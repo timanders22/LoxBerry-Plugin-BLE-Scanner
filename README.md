@@ -18,6 +18,16 @@ daraus für LoxBerry ein anderes Plugin, und jedes Update schlägt fehl.
 
 ## Version 1.0.0 — LoxBerry 4 und Hausstandard
 
+**Zur Versionsnummer:** Das Original zählte nach Datum (2021.2.3). Hier beginnt
+die Zählung neu bei `1.0.0`. Für LoxBerry ist das rechnerisch **älter** als die
+vorhandene Fassung: `LoxBerry::System::plugin_version_compare` vergleicht
+Haupt-, Neben- und Fehlerstand als Zahlen, und 1 ist kleiner als 2021.
+
+Praktische Folge: Wer noch 2021.2.3 installiert hat, bekommt diese Fassung
+**nicht** als Update angeboten und muss sie einmal von Hand einspielen — über
+das ZIP oder die Release-Adresse. Ab dann greift das Auto-Update normal, weil
+alle weiteren Fassungen von `1.0.0` aus aufwärts zählen.
+
 ### Warum die Originalfassung auf LoxBerry 4 nicht läuft
 
 Vier voneinander unabhängige Gründe, jeder für sich ausreichend:
