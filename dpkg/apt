@@ -1,1 +1,16 @@
-python python-pip python-dev python-bluez raspberrypi-sys-mods pi-bluetooth bluez 
+# These packages will be installed by apt-get -y install PACKAGENAME
+# One line per package, use exact packagename as you would do for apt-get.
+#
+# Der Scanner spricht BlueZ ueber D-Bus an. Alle drei Pakete sind auf
+# LoxBerry 3 und 4 bereits im Grundsystem - sie stehen hier nur, damit die
+# Installation auf einem abgespeckten System nicht stillschweigend scheitert.
+#
+# Die Originalfassung verlangte hier python, python-pip, python-dev und
+# python-bluez. Diese Python-2-Pakete gibt es auf Bookworm und Trixie nicht
+# mehr; die Installation des Plugins brach damit ab. raspberrypi-sys-mods und
+# pi-bluetooth waren zudem Raspberry-Pi-spezifisch, obwohl das Plugin sich als
+# "raspberry,x86" auswies.
+bluez
+python3-dbus
+python3-gi
+python3-paho-mqtt
