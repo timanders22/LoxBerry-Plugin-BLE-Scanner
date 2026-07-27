@@ -1,0 +1,9 @@
+#!/bin/bash
+# Wird als Benutzer "root" ausgefuehrt.
+
+pkill -f ble_scanner.py >/dev/null 2>&1
+rm -f /run/shm/ble_scanner_status.json /tmp/ble_scanner_status.json
+# Rueckstaende der Originalfassung
+rm -f /tmp/ble_scanner.dat /tmp/BLE-Scanner.loglevel /tmp/BLE-Scanner.daemon.pid
+
+exit 0
