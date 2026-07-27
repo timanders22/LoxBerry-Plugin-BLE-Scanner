@@ -1,201 +1,28 @@
 #!/bin/bash
-### BEGIN INIT INFO
-# Provides:          BLE-Scanner
-# Required-Start:    $remote_fs $syslog $network
-# Required-Stop:     $remote_fs $syslog $network
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: This file starts the Loxberry BLE-Scanner Plugin Daemon.
-# Description:       This file starts the Loxberry BLE-Scanner Plugin Daemon.
-### END INIT INFO
+# Wird beim Systemstart als Benutzer "root" ausgefuehrt.
+# LoxBerry benennt diese Datei bei der Installation in NAME um.
+#
+# Die Originalfassung startete hier den Bluetooth-Stapel von Hand: rsyslog-Regeln
+# schreiben, hciuart.service bis zu dreimal neu starten, "hciconfig hci0 up"
+# aufrufen und im Fehlerfall wiederholen - dazu zwei Endlosschleifen, die
+# alle 15 Sekunden mit sed in /var/log/syslog und /var/log/kern.log
+# herumschnitten. Das entfaellt vollstaendig: der Dienst schaltet den Adapter
+# ueber die D-Bus-Eigenschaft "Powered" selbst ein, und hciconfig wird nicht
+# mehr gebraucht.
 
-PATH="/sbin:/bin:/usr/sbin:/usr/bin:REPLACELBHOMEDIR/bin"
-PATH=$PATH.":REPLACELBHOMEDIR/sbin"
+pluginname=REPLACELBPPLUGINDIR
+pluginbindir=REPLACELBPBINDIR
+logdir=REPLACELBPLOGDIR
+log=$logdir/ble_scanner.log
 
-. /lib/lsb/init-functions
-. $LBHOMEDIR/libs/bashlib/loxberry_log.sh
+if [ -x /usr/bin/logger ]; then
+    /usr/bin/logger "loxberry-plugin-$pluginname - Starte BLE-Scanner"
+fi
 
-PACKAGE=ble_scanner
-NAME=BASH-DAEMON
-FILENAME=${LBPLOG}/${PACKAGE}/BLE-Scanner.log
-APPEND=1
-LOGSTART "BASH-DAEMON started"
-touch ${LBPLOG}/${PACKAGE}/BLE-Scanner.log
-chown loxberry ${LBPLOG}/${PACKAGE}/BLE-Scanner.log
-chgrp loxberry ${LBPLOG}/${PACKAGE}/BLE-Scanner.log
-chmod 0660 ${LBPLOG}/${PACKAGE}/BLE-Scanner.log
+mkdir -p "$logdir" 2>/dev/null
 
-function debug 
-{
-	DATE=`date +"[%d-%b-%Y %H:%M:%S %Z]"`
-	case $2 in
-	'LOGINF')
-		LOGINF "$DATE $1"
-		;;
-	'LOGOK')
-		LOGOK "$DATE $1"
-		log_action_msg "$1"
-		;;
-	'LOGWARN')
-		LOGWARN "$DATE $1"
-		log_action_msg "$1"
-		;;
-	'LOGERR')
-		LOGERR "$DATE $1"
-        log_failure_msg "$1"
-		;;
-	'LOGCRIT')
-		LOGCRIT "$DATE $1"
-        log_failure_msg "$1"
-		;;
-	'LOGALERT')
-		LOGALERT "$DATE $1"
-        log_failure_msg "$1"
-		;;
-	'LOGEMERGE')
-		LOGEMERGE "$DATE $1"
-        log_failure_msg "$1"
-		;;
-	*)
-		LOGDEB "$DATE $1"
-		;;
-	esac
-	return
-}
-case "${1:-''}" in
-  'stop')
-        debug "Got STOP request" "LOGOK"
-        debug "Try to kill PHP-DAEMON" "LOGDEB"
-		pkill -f "/usr/bin/php -f REPLACELBPHTMLAUTHDIR/bin/daemon.php"
-        if [ $? -eq 1 ]
-        then
-          debug "BLE-Scanner PHP-DAEMON: Failed. Process not running" "LOGERR"
-		  # Exit with Status 1
-        else
-          debug "BLE-Scanner PHP-DAEMON: OK. Process stopped" "LOGOK"
-          log_daemon_msg "BLE-Scanner daemon stopped" "OK"
-          log_end_msg 0
-        fi
-        exit 0
-        ;;
-  'status')
-        debug "BLE-Scanner PHP-DAEMON: Got STATUS request" "LOGOK"
-        debug "Try to get process ID of PHP-DAEMON" "LOGDEB"
-        output=$( pgrep -f "/usr/bin/php -f REPLACELBPHTMLAUTHDIR/bin/daemon.php" )
-        if [ $? -eq 1 ]
-        then
-          debug "BLE-Scanner PHP-DAEMON: Not running" "LOGWARN"
-        else
-          debug "BLE-Scanner PHP-DAEMON: Running with PID `echo -n $output`" "LOGOK"
-        fi
-        exit 0
-        ;;
-    *)
-        output=$( pgrep -f "/usr/bin/php -f REPLACELBPHTMLAUTHDIR/bin/daemon.php" )
-        if [ $? -eq 1 ]
-        then
-          debug "Checking, if /etc/rsyslog.d/99-BLE-Scanner.conf is readable" "LOGINF"
-          if [ -r /etc/rsyslog.d/99-BLE-Scanner.conf ]
-          then
-            debug "File /etc/rsyslog.d/99-BLE-Scanner.conf is readable, updating remove syslog errors rule but not restarting syslog" "LOGINF"
-            echo ':msg,contains,"advertising data length corrected" ~' > /etc/rsyslog.d/99-BLE-Scanner.conf
-            echo ':msg,contains,"bt_err_ratelimited:" ~'              >> /etc/rsyslog.d/99-BLE-Scanner.conf
-          else
-            debug "File /etc/rsyslog.d/99-BLE-Scanner.conf not readable, create remove syslog errors rule + restart syslog" "LOGWARN"
-            echo ':msg,contains,"advertising data length corrected" ~' > /etc/rsyslog.d/99-BLE-Scanner.conf
-            echo ':msg,contains,"bt_err_ratelimited:" ~'              >> /etc/rsyslog.d/99-BLE-Scanner.conf
-            debug "Syslog restart `service rsyslog restart 2>&1`" "LOGWARN"
-          fi
-          debug "Restart Bluetooth... (hciuart.service)" "LOGWARN"
-          hci="`systemctl stop hciuart.service 2>&1`"
-          debug "hciuart.service stopped $hci" LOGDEB
-          hci="`systemctl start hciuart.service 2>&1`"
-          if [ $? -eq 1 ]
-          then
-            debug "hciuart.service start $hci" LOGDEB
-            debug "=> `systemctl status hciuart.service 2>&1` <=" LOGDEB
-            debug "Error when starting Bluetooth (hciuart.service). Retrying..." "LOGWARN"
-            hci="`systemctl stop hciuart.service 2>&1`"
-            debug "hciuart.service stopped $hci" LOGDEB
-            hci="`systemctl start hciuart.service 2>&1`"
-            if [ $? -eq 1 ]
-            then
-            debug "hciuart.service 2nd start $hci" LOGDEB
-            debug "=> `systemctl status hciuart.service 2>&1` <=" LOGDEB
-            debug "Error when starting Bluetooth (hciuart.service) 2nd time. Retrying again..." "LOGWARN"
-            hci="`systemctl stop hciuart.service 2>&1`"
-            debug "hciuart.service stopped $hci" LOGDEB
-            hci="`systemctl start hciuart.service 2>&1`"
-            if [ $? -eq 1 ]
-              then
-            debug "hciuart.service 3nd start $hci" LOGDEB
-            debug "=> `systemctl status hciuart.service 2>&1` <=" LOGDEB
-            debug "Error when starting Bluetooth (hciuart.service) 3rd time. Giving up..." "LOGCRIT"
-                exit 1
-              fi
-            fi
-          fi
-          debug "Successful start of hciuart service" "LOGOK"
-          debug "=> `systemctl status hciuart.service 2>&1` <=" LOGDEB
-          # Start daemon
-          debug "Try to start BLE-Scanner daemon" "LOGDEB"
-          # Now start the daemon
-            if [ -x /bin/hciconfig ]
-            then
-  			hci="`/bin/hciconfig hci0 up 2>&1`"
-              if [ $? -eq 1 ]
-              then
-                debug "hciconfig hci0 $hci" "LOGDEB"
-                debug "Error during start of bluetooth interface hci0 - retrying.... " "LOGWARN"
-    			hci="`/bin/hciconfig hci0 up 2>&1`"
-                if [ $? -eq 1 ]
-                then
-                  debug "hciconfig hci0 $hci" "LOGDEB"
-                  debug "Error during 2nd start of bluetooth interface hci0 - giving up" "LOGCRIT"
-                  exit 1
-                fi
-              fi
-             hci="`echo -n \`/bin/hciconfig hci0 2>&1\``"
-             debug "Bluetooth device successfully started." "LOGINF"
-             debug "Device-Infos: $hci" "LOGDEB"
-              if [ -x /usr/bin/php ]
-              then
-                if [ -x /usr/bin/python ]
-                then
-                  output=$( /usr/bin/php -f REPLACELBPHTMLAUTHDIR/bin/daemon.php >/dev/null 2>&1 & )
-                  output=$( pgrep -f "/usr/bin/php -f REPLACELBPHTMLAUTHDIR/bin/daemon.php" )
-                  if [ $? -eq 1 ]
-                  then
-                    debug "BLE-Scanner Daemon could NOT be started" "LOGCRIT"
-                    exit 1
-                  else
-                    echo "$output" > /tmp/BLE-Scanner.daemon.pid
-                    chown loxberry /tmp/BLE-Scanner.daemon.pid
-                    chgrp loxberry /tmp/BLE-Scanner.daemon.pid
-                    chmod 660 /tmp/BLE-Scanner.daemon.pid
-                    debug "BLE-Scanner Daemon successfully started" "LOGOK"
-					while :; do /bin/sed -i '/advertising data len corrected/d' /var/log/kern.log >/dev/null 2>&1; sleep 15; done &
-					while :; do /bin/sed -i '/advertising data len corrected/d' /var/log/syslog >/dev/null 2>&1; sleep 15; done &
-                    log_end_msg 0
-                    exit 0
-                  fi
-                 else
-                    debug "Python not found." "LOGCRIT"
-                  exit 1
-                 fi
-              else
-                    debug "PHP not found." "LOGCRIT"
-                exit 1
-              fi
-            else
-                debug "Starting Bluetooth interface using 'hciconfig' failed" "LOGCRIT"
-              exit 1
-            fi
-        else
-          debug "BLE-Scanner PHP-Daemon already running with PID `echo -n $output` - please stop the running process first" "LOGERR"
-          exit 1
-        fi
-        debug "BLE-Scanner BASH-DAEMON exit with unknown error" "LOGERR"
-        exit 1
-        ;;
-esac
+# Der Dienst braucht keine Rootrechte: BlueZ erlaubt Mitgliedern der Gruppe
+# bluetooth ueber D-Bus das Suchen. Deshalb als loxberry starten.
+su loxberry -c "nohup $pluginbindir/ble_scanner.py >> $log 2>&1 &" >/dev/null 2>&1
+
+exit 0
