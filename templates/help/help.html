@@ -1,0 +1,65 @@
+<h2>BLE-Scanner</h2>
+
+<p>Erkennt Bluetooth-Low-Energy-Ger&auml;te in Reichweite und meldet dem Loxone
+Miniserver, ob ein hinterlegter Tag anwesend ist &mdash; samt Signalst&auml;rke.
+Typischer Einsatz: Schl&uuml;sselanh&auml;nger als Anwesenheitserkennung.</p>
+
+<h3>In drei Schritten eingerichtet</h3>
+<ol>
+<li>Reiter <i>Einstellungen</i> &rarr; <i>Ger&auml;te suchen</i>. Der gesuchte Tag
+    sollte dabei in der N&auml;he liegen.</li>
+<li>Gefundenes Ger&auml;t anhaken, eine Bezeichnung vergeben und speichern.</li>
+<li>Reiter <i>Einbindung in Loxone</i> &rarr; Vorlage herunterladen und in
+    Loxone Config einf&uuml;gen.</li>
+</ol>
+
+<h3>Nicht jedes Ger&auml;t taugt dazu</h3>
+<p>Mobiltelefone, Uhren und Kopfh&ouml;rer <b>wechseln ihre Bluetooth-Adresse
+regelm&auml;&szlig;ig</b> &mdash; oft alle 15 Minuten. Das ist eine
+Datenschutzfunktion und l&auml;sst sich nicht abschalten. Solche Ger&auml;te sind
+zur Anwesenheitserkennung unbrauchbar: die eingetragene Adresse gilt nur bis
+zum n&auml;chsten Wechsel.</p>
+
+<p>Zuverl&auml;ssig sind einfache BLE-Beacons und Schl&uuml;sselfinder mit fester
+Adresse. Pr&uuml;fen l&auml;sst sich das, indem man die Adresse ein paar Tage
+sp&auml;ter erneut sucht: bleibt sie gleich, ist sie fest.</p>
+
+<h3>Anwesenheit flattert</h3>
+<p>BLE-Tags senden nicht ununterbrochen, sondern in Abst&auml;nden von Sekunden
+bis Minuten &mdash; je sparsamer, desto seltener. Meldet ein Tag st&auml;ndig
+zwischen anwesend und abwesend, ist die <i>Abwesend nach</i>-Zeit zu kurz
+eingestellt. 60 bis 120 Sekunden sind bei sparsamen Tags &uuml;blich.</p>
+
+<h3>Es wird nichts gefunden</h3>
+<ul>
+<li>Reiter <i>Test</i> &rarr; <i>Bluetooth pr&uuml;fen</i>: wird ein Adapter
+    aufgelistet? Ohne Adapter geht nichts &mdash; ein Raspberry Pi ohne
+    eingebautes Bluetooth braucht einen USB-Adapter.</li>
+<li>Manche Tags werben erst nach einem Tastendruck.</li>
+<li>Reiter <i>Test</i> &rarr; <i>Zustand des Dienstes</i>: l&auml;uft er
+    &uuml;berhaupt?</li>
+<li>BlueZ l&auml;sst nur <b>eine</b> Suche gleichzeitig zu. L&auml;uft parallel
+    ein anderes Programm mit Bluetooth-Suche, st&ouml;ren sie sich.</li>
+</ul>
+
+<h3>MQTT oder HTTP</h3>
+<p><b>MQTT ist der empfohlene Weg.</b> Die Zust&auml;nde kommen retained an;
+nach einem Neustart des Miniservers steht die Anwesenheit sofort wieder da.</p>
+
+<p>Der <b>HTTP-Weg</b> ist der Weg der Originalfassung: bei jedem Wechsel wird
+ein virtueller Eingang am Miniserver gesetzt. Er bleibt abschaltbar erhalten,
+damit bestehende Loxone-Konfigurationen weiterlaufen. Die Zugangsdaten gehen
+dabei jetzt im Authorization-Kopf mit statt in der Adresse.</p>
+
+<h3>Was sich gegen&uuml;ber 2021.2.3 ge&auml;ndert hat</h3>
+<ul>
+<li>Der Scanner l&auml;uft unter <b>Python 3</b> und spricht <b>BlueZ &uuml;ber
+    D-Bus</b> an. Die alte Fassung war Python 2 und benutzte pybluez sowie
+    <tt>hciconfig</tt> &mdash; beides auf LoxBerry 4 nicht mehr vorhanden.</li>
+<li>Ein <b>durchlaufender Dienst</b> statt Scan auf Zuruf: Loxone muss nichts
+    mehr abfragen.</li>
+<li>Zus&auml;tzlich zu anwesend/abwesend gibt es <b>RSSI, Signalstufe, Alter
+    der letzten Sichtung</b> und den gemeldeten Ger&auml;tenamen.</li>
+<li>Die vorhandene Konfiguration wird &uuml;bernommen &mdash; eingetragene Tags
+    bleiben erhalten.</li>
+</ul>
