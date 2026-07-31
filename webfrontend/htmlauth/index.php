@@ -395,14 +395,34 @@ Die Zugangsdaten gehen dabei im Authorization-Kopf mit, nicht mehr in der Adress
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
 <div class="bl-pane" id="tab-loxone">
 
-<h2>In drei Schritten eingerichtet</h2>
-<div class="bl-step"><b>1. Tags eintragen</b> im Reiter Einstellungen &mdash; am einfachsten &uuml;ber
-<i>Ger&auml;te suchen</i>, anhaken, speichern.</div>
-<div class="bl-step"><b>2. Vorlage herunterladen</b> (unten) und in Loxone Config einlesen:
-Rechtsklick auf den Miniserver &rarr; <i>Vorlage einf&uuml;gen</i>.</div>
-<div class="bl-step"><b>3. Eing&auml;nge mit dem MQTT-Gateway verbinden.</b> Die Vorlage legt nur die
-Namen an; die Werte liefert das Gateway. Unter <i>Incoming overview</i> erscheinen die Themen,
-sobald der Dienst l&auml;uft.</div>
+<h2>Einbindung in Loxone &mdash; Schritt f&uuml;r Schritt</h2>
+<div class="bl-small">Der Dienst sucht laufend nach den eingetragenen Tags und meldet je Tag vier
+Werte per MQTT (Schritt&nbsp;1 bis&nbsp;3). Im Miniserver wird daraus Anwesenheit &mdash; und die ist
+nur so gut wie die Entprellung, siehe Schritt&nbsp;5.</div>
+<div class="bl-step"><b>Schritt 1: Tags eintragen</b><br><br>
+Im Reiter <i>Einstellungen</i>, am einfachsten &uuml;ber <i>Ger&auml;te suchen</i>, anhaken,
+speichern.</div>
+<div class="bl-step"><b>Schritt 2: Abo im MQTT-Gateway eintragen</b><br><br>
+<b>Ohne diesen Eintrag kommt am Miniserver nichts an</b> &mdash; einzutragen unter
+<i>System-Einstellungen &rarr; MQTT Gateway &rarr; Abonnements</i>:
+<div class="bl-mono" style="background:#f4f4f4;border:1px solid #ccc;padding:8px;margin-top:6px;"><?= bl_e($bl_praefix) ?>/#</div></div>
+<div class="bl-step"><b>Schritt 3: Vorlage einlesen</b><br><br>
+Vorlage herunterladen (unten) und in Loxone Config einlesen: Rechtsklick auf den Miniserver &rarr;
+<i>Vorlage einf&uuml;gen</i>. Sie legt die virtuellen Eing&auml;nge mit den richtigen Namen an; die
+Werte liefert das Gateway. <b>Von Hand angelegt</b> hei&szlig;t ein Eingang
+<span class="bl-mono"><?= bl_e($bl_praefix) ?>_&lt;MAC ohne Trennzeichen&gt;_present</span> &mdash;
+das Gateway ersetzt jeden Schr&auml;gstrich durch einen Unterstrich.</div>
+<div class="bl-step"><b>Schritt 4: Kachel in der App</b><br><br>
+Einen <i>Status</i>-Baustein anlegen und <span class="bl-mono">v1</span> mit
+<span class="bl-mono">summary_present</span> verbinden &mdash; das ist die Zahl der gerade
+anwesenden Tags. Statustext zum Beispiel:
+<span class="bl-mono">&lt;v1.0&gt; von <?= $bl_aktiv ?> Tags da</span>.</div>
+<div class="bl-step"><b>Schritt 5: Anwesenheit entprellen</b><br><br>
+BLE-Tags senden nicht ununterbrochen, sondern in Abst&auml;nden von Sekunden bis Minuten &mdash; je
+sparsamer das Tag, desto seltener. <b>Ein einzelner verpasster Empfang darf keine Abwesenheit
+ausl&ouml;sen.</b> Das Plugin hat daf&uuml;r die Einstellung <i>Abwesend nach</i>; im Miniserver
+kommt eine Ausschaltverz&ouml;gerung dazu, damit auch ein kurzer Aussetzer des Dienstes selbst
+nichts umwirft. Aufbau in Schritt&nbsp;6, Zeile 6.</div>
 
 <div class="bl-small" style="margin-top:10px;">
 Broker: <span class="bl-mono"><?= $bl_broker !== '' ? bl_e($bl_broker) : 'MQTT-Gateway nicht gefunden' ?></span>
@@ -450,6 +470,38 @@ Dazu <span class="bl-mono"><?= bl_e($bl_praefix) ?>/server/online</span>,
 <?php } ?>
 </table>
 <?php } ?>
+
+<h2>Schritt 6: Komplette Baustein-Liste zum 1:1-Nachbauen</h2>
+<div class="bl-small">So sieht die vollst&auml;ndige Logik auf der Programmierseite aus (jede Zeile =
+ein Baustein). <span class="bl-mono">&lt;T&gt;</span> steht f&uuml;r den Themenzweig eines Tags aus der
+Tabelle oben. Alle Bausteine findet man in Loxone Config &uuml;ber die Baustein-Suche (F5):</div>
+<table class="bl-tbl">
+<tr><th>#</th><th>Baustein (Typ)</th><th>Name (Vorschlag)</th><th>Parameter</th><th>Eing&auml;nge verbinden mit</th></tr>
+<tr><td>1</td><td>Virtueller Eingang</td><td class="bl-mono"><?= bl_e($bl_praefix) ?>_server_online</td><td>digital</td><td>&mdash; (kommt &uuml;ber das Gateway)</td></tr>
+<tr><td>2</td><td>Virtueller Eingang</td><td class="bl-mono"><?= bl_e($bl_praefix) ?>_summary_present</td><td>analog, Anzahl</td><td>&mdash;</td></tr>
+<tr><td>3</td><td>Virtueller Eingang</td><td class="bl-mono"><?= bl_e($bl_praefix) ?>_&lt;T&gt;_present</td><td>digital, je Tag einer</td><td>&mdash;</td></tr>
+<tr><td>4</td><td>Virtueller Eingang</td><td class="bl-mono"><?= bl_e($bl_praefix) ?>_&lt;T&gt;_rssi</td><td>analog, dBm</td><td>&mdash;</td></tr>
+<tr><td>5</td><td>Virtueller Eingang</td><td class="bl-mono"><?= bl_e($bl_praefix) ?>_&lt;T&gt;_last_seen</td><td>analog, Sekunden</td><td>&mdash;</td></tr>
+<tr><td>6</td><td>Ausschaltverz&ouml;gerung</td><td>Schl&uuml;ssel da (entprellt)</td><td>120&nbsp;s &mdash; je sparsamer das Tag, desto l&auml;nger</td><td>Eingang = #3</td></tr>
+<tr><td>7</td><td>ODER</td><td>Jemand ist zu Hause</td><td>eine Quelle je Person</td><td>I1&hellip;In = je ein #6</td></tr>
+<tr><td>8</td><td>Flankenerkennung (fallend)</td><td>Letzter ist gegangen</td><td>&mdash;</td><td>Eingang = #7</td></tr>
+<tr><td>9</td><td>Flankenerkennung (steigend)</td><td>Erster ist gekommen</td><td>&mdash;</td><td>Eingang = #7</td></tr>
+<tr><td>10</td><td>NICHT</td><td>Dienst antwortet nicht</td><td>&mdash;</td><td>Eingang = #1</td></tr>
+<tr><td>11</td><td>Einschaltverz&ouml;gerung</td><td>Ausfall best&auml;tigt</td><td>900&nbsp;s</td><td>Eingang = #10 &rarr; Benachrichtigung</td></tr>
+<tr><td>12</td><td>UND + NICHT</td><td>Abwesenheit gilt</td><td>&mdash;</td><td>I1 = #8, I2 = #10 <b>invertiert</b></td></tr>
+<tr><td>13</td><td>Status</td><td>Anwesenheit</td><td>Statustext siehe Schritt&nbsp;4, Visualisierung EIN</td><td>v1 = #2</td></tr>
+</table>
+<div class="bl-alert bl-info">
+<b>Zu #12 &mdash; die wichtigste Zeile.</b> F&auml;llt der Dienst aus, melden alle Tags Abwesenheit.
+Ohne diese Sperre f&auml;hrt das Haus in den Abwesenheitsbetrieb, obwohl alle da sind: Heizung
+runter, Alarm scharf. Deshalb darf #8 nur wirken, solange #1 wahr ist.<br>
+<b>Zu #6:</b> die Ausschaltverz&ouml;gerung kommt <i>zus&auml;tzlich</i> zur Einstellung
+<i>Abwesend nach</i> im Plugin. Beide zusammen ergeben die Zeit, nach der eine Person als gegangen
+gilt.<br>
+<b>Zu #11:</b> ein Benachrichtigungs-Baustein sendet nur bei einem Wechsel von Aus auf Ein. Niemals
+mehrere Quellen direkt an seinen Eingang legen &mdash; erst &uuml;ber einen ODER-Baustein
+zusammenf&uuml;hren.
+</div>
 
 <h2>Worauf man sich nicht verlassen kann</h2>
 <div class="bl-small">
