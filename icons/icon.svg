@@ -1,23 +1,39 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  BLE-Scanner - Plugin-Symbol nach Hausstandard.
-  Runde Scheibe in LoxBerry-Gruen #6dac20, Motiv weiss:
-  Bluetooth-Rune mit zwei Reichweitenbogen.
-  Keine fremde Wortmarke, kein Herstellerlogo.
--->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="50%" fx="35%" fy="35%">
+      <stop offset="0%" stop-color="#7dc424" />
+      <stop offset="65%" stop-color="#6dac20" />
+      <stop offset="100%" stop-color="#568819" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
 
-  <circle cx="256" cy="256" r="256" fill="#6dac20"/>
-  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="6"/>
+  <!-- Outer Badge Ring -->
+  <circle cx="256" cy="256" r="246" fill="url(#bg-grad)" />
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" />
 
-  <!-- Bluetooth-Rune: Strichzug von unten nach oben und zurueck -->
-  <path d="M 196 176 L 300 328 L 226 384 L 226 128 L 300 184 L 196 336"
-        fill="none" stroke="#ffffff" stroke-width="30"
-        stroke-linecap="round" stroke-linejoin="round"/>
+  <g filter="url(#shadow)">
+    <!-- Bluetooth-Rune + Bögen: auf 0.78 skaliert & leicht nach oben gerückt -->
+    <g transform="translate(56, -20) scale(0.78)">
+      <path d="M 196 176 L 300 328 L 226 384 L 226 128 L 300 184 L 196 336"
+            fill="none" stroke="#ffffff" stroke-width="30"
+            stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- Reichweitenbogen rechts -->
-  <g fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round">
-    <path d="M 330 206 a 68 68 0 0 1 0 100"/>
-    <path d="M 372 168 a 128 128 0 0 1 0 176"/>
+      <!-- Reichweitenbogen rechts -->
+      <g fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round">
+        <path d="M 330 206 a 68 68 0 0 1 0 100"/>
+        <path d="M 372 168 a 128 128 0 0 1 0 176"/>
+      </g>
+    </g>
+
+    <!-- Dashed Line -->
+    <path d="M 150 345 L 362 345" stroke="#ffffff" stroke-width="4" stroke-dasharray="6 8" opacity="0.8" />
   </g>
+
+  <!-- Typography -->
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="1">BLE SCANNER</text>
+  <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
 </svg>

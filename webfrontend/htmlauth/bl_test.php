@@ -1,6 +1,6 @@
 <?php
 /**
- * BLE-Scanner - Aktionen des Reiters Test
+ * BLE-Scanner NG - Aktionen des Reiters Test
  *
  * Jede Funktion liefert array(Ueberschrift, Text). Der Text wird von der
  * Oberflaeche maskiert ausgegeben, hier also bewusst als Klartext erzeugt.
@@ -8,11 +8,42 @@
 
 require_once __DIR__ . '/bl_lib.php';
 
+/**
+ * Einen Systembefehl ausfuehren und die Ausgabe zurueckgeben.
+ *
+ * Der Rueckgabewert wird ausgewertet. Bis 1.1.0 wurde er verworfen, und das
+ * hat genau bei den Aufrufen mit 'timeout' gestoert: laeuft bluetoothctl in
+ * die Zeitgrenze, bricht timeout ab und liefert 124 - die Ausgabe ist dann
+ * leer oder halb. Im Reiter Test stand daraufhin eine leere Zeile, und wer
+ * sie sah, hielt sie fuer 'kein Adapter vorhanden'. Das ist etwas voellig
+ * anderes als 'BlueZ antwortet nicht mehr', und nur das zweite erklaert,
+ * warum der Scanner stumm bleibt.
+ *
+ * 127 wird ebenso benannt: dann fehlt der Befehl, und niemand muss raten.
+ */
 function bl_sh($cmd)
 {
     $out = array();
-    @exec($cmd . ' 2>&1', $out);
-    return implode("\n", $out);
+    $code = 0;
+    @exec($cmd . ' 2>&1', $out, $code);
+    $text = implode("\n", $out);
+    if ($code === 124) {
+        return trim($text) === ''
+            ? '[Zeitgrenze] Der Befehl hat innerhalb der Wartezeit nichts geliefert '
+              . 'und wurde abgebrochen. Das heisst NICHT, dass kein Adapter da ist - '
+              . 'es heisst, dass BlueZ nicht antwortet. Pruefen mit: '
+              . 'systemctl status bluetooth'
+            : $text . "\n[Zeitgrenze] Abgebrochen - die Ausgabe oben ist unvollstaendig.";
+    }
+    if ($code === 127) {
+        return '[fehlt] Der Befehl ist auf diesem System nicht vorhanden. '
+             . 'Bei bluetoothctl hilft: sudo apt-get install -y bluez';
+    }
+    if ($code !== 0 && trim($text) === '') {
+        return '[Rueckgabewert ' . (int) $code . '] Der Befehl endete mit einem Fehler, '
+             . 'ohne etwas auszugeben.';
+    }
+    return $text;
 }
 
 function bl_test_ausfuehren($was)
@@ -45,7 +76,7 @@ function bl_test_ausfuehren($was)
                     . "geschrieben. Das deutet auf ein haengendes BlueZ hin -\n"
                     . "\"Bluetooth pruefen\" gibt Aufschluss.\n\n";
             }
-            $t .= bl_sh('ps -o pid,etime,rss,args -C python3 2>/dev/null | grep -iE "ble_scanner|PID"');
+            $t .= bl_sh('ps -o pid,etime,rss,args -C python3 2>/dev/null | grep -iE "ble_scanner_ng|PID"');
             return array('Zustand des Dienstes', trim($t) !== '' ? $t : 'Keine Angaben.');
 
         case 'sichtbar':

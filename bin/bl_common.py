@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BLE-Scanner - gemeinsame Grundlagen fuer Dienst und Suchlauf
+BLE-Scanner NG - gemeinsame Grundlagen fuer Dienst und Suchlauf
 
 Pfade, Konfiguration und der eigentliche BlueZ-Zugriff liegen hier, damit
-ble_scanner.py und bl_discover.py dieselbe Sicht auf die Geraete haben.
+ble_scanner_ng.py und bl_discover.py dieselbe Sicht auf die Geraete haben.
 
 Gescannt wird ueber die **D-Bus-Schnittstelle von BlueZ**. Die alte Fassung
 benutzte pybluez (`bluetooth._bluetooth`) und rief `hciconfig` auf - beides
@@ -23,7 +23,7 @@ import time
 
 PLUGIN_NAME = "REPLACELBPPLUGINDIR"
 if PLUGIN_NAME.startswith("REPLACE"):
-    PLUGIN_NAME = "ble_scanner"
+    PLUGIN_NAME = "ble_scanner_ng"
 
 CONFIG_DIR = "REPLACELBPCONFIGDIR"
 if CONFIG_DIR.startswith("REPLACE"):
@@ -34,12 +34,12 @@ if LOG_DIR.startswith("REPLACE"):
     LOG_DIR = "/opt/loxberry/log/plugins/" + PLUGIN_NAME
 
 HOME_DIR = os.environ.get("LBHOMEDIR", "/opt/loxberry")
-CONFIG_FILE = os.path.join(CONFIG_DIR, "ble_scanner.cfg")
-STATUS_FILE = "/run/shm/ble_scanner_status.json"
+CONFIG_FILE = os.path.join(CONFIG_DIR, "ble_scanner_ng.cfg")
+STATUS_FILE = "/run/shm/ble_scanner_ng_status.json"
 if not os.path.isdir("/run/shm"):
-    STATUS_FILE = "/tmp/ble_scanner_status.json"
+    STATUS_FILE = "/tmp/ble_scanner_ng_status.json"
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 
 # ---------------------------------------------------------------------------
 # Konfiguration
@@ -118,8 +118,30 @@ def konfiguration_lesen(pfad=None):
         schluessel = schluessel.strip()
         wert = wert.strip().strip('"').strip("'")
 
+        # Welches Format ist das? Die Entscheidung faellt an der FORM des
+        # Wertes, nicht am Vorhandensein eines senkrechten Strichs.
+        #
+        # Bis 1.1.0 lautete die Bedingung '":" in wert and "|" not in wert'.
+        # Eine Zeile im neuen Format, die nur die MAC enthaelt, also
+        #
+        #     tag1=AA:BB:CC:DD:EE:FF
+        #
+        # hat Doppelpunkte und keinen Strich - sie landete deshalb im Zweig
+        # fuer das alte Format. Dort ist teile[0] das erste Feld bis zum
+        # ersten Doppelpunkt, also "AA", und mac_normieren("AA") ergibt
+        # Leerstring. Der Tag verschwand lautlos. Aus der Oberflaeche kann
+        # das nicht kommen - die schreibt immer alle drei Felder -, aber aus
+        # einer von Hand bearbeiteten Datei schon.
+        #
+        # Neue Regel: ein Strich heisst neues Format. Ohne Strich wird
+        # versucht, den ganzen Wert als MAC zu lesen; klappt das, ist es
+        # ebenfalls das neue Format. Erst wenn beides nicht zutrifft, ist es
+        # die alte Schreibweise mit ihren Doppelpunkt-Feldern.
+        ist_tag = re.fullmatch(r"(?i)(default\.)?TAG\d+", schluessel) is not None
+        neues_format = ist_tag and ("|" in wert or mac_normieren(wert) != "")
+
         # --- altes Format: TAG1=BLE_..:on:1^on~2^off:Kommentar
-        if re.fullmatch(r"(?i)(default\.)?TAG\d+", schluessel) and ":" in wert and "|" not in wert:
+        if ist_tag and not neues_format and ":" in wert:
             alt_gefunden = True
             teile = wert.split(":")
             # Die MAC steht mit Unterstrichen am Anfang und enthaelt selbst
@@ -132,8 +154,17 @@ def konfiguration_lesen(pfad=None):
             continue
 
         # --- neues Format: tag1=AA:BB:..|1|Kommentar
-        if re.fullmatch(r"(?i)tag\d+", schluessel):
-            teile = wert.split("|")
+        if neues_format:
+            # split mit Obergrenze 2: alles hinter dem zweiten Strich gehoert
+            # zum Kommentar, auch wenn dort selbst Striche stehen.
+            #
+            # Die Oberflaeche ersetzt einen eingegebenen Strich zwar durch
+            # einen Schraegstrich, bevor sie speichert (bl_config_write in
+            # bl_lib.php) - aus dieser Richtung kann der Fall also nicht
+            # kommen. Wer die Datei aber von Hand bearbeitet, und das kommt
+            # vor, verlor bis 1.1.0 alles hinter dem dritten Strich
+            # stillschweigend: aus "Schluessel | Justin" wurde "Schluessel".
+            teile = wert.split("|", 2)
             mac = mac_normieren(teile[0] if teile else "")
             aktiv = teile[1].strip() if len(teile) > 1 else "1"
             name = teile[2].strip() if len(teile) > 2 else ""
@@ -150,32 +181,17 @@ def konfiguration_lesen(pfad=None):
     return werte, tags, alt_gefunden
 
 
-def konfiguration_schreiben(werte, tags, pfad=None):
-    """Konfiguration im neuen Format schreiben."""
-    pfad = pfad or CONFIG_FILE
-    try:
-        os.makedirs(os.path.dirname(pfad), exist_ok=True)
-    except OSError:
-        pass
-    zeilen = [
-        "; BLE-Scanner",
-        "; Geschrieben von der Plugin-Oberflaeche.",
-        "",
-        "[CONFIG]",
-    ]
-    for schluessel, vorgabe in VORGABEN.items():
-        zeilen.append("{0}={1}".format(schluessel, werte.get(schluessel, vorgabe)))
-    zeilen.append("")
-    for nummer, tag in enumerate(tags, start=1):
-        zeilen.append("tag{0}={1}|{2}|{3}".format(
-            nummer, tag["mac"], tag.get("aktiv", "1"), tag.get("name", "")))
-    try:
-        with open(pfad, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(zeilen) + "\n")
-        os.chmod(pfad, 0o644)
-        return True
-    except OSError:
-        return False
+# Es gibt bewusst KEIN konfiguration_schreiben() mehr.
+#
+# Bis 1.1.0 stand hier eines - aufgerufen wurde es von nirgends. Geschrieben
+# wird die Datei ausschliesslich von der Oberflaeche (bl_config_write in
+# bl_lib.php), und dabei bleibt es: zwei Schreiber fuer ein Format laufen
+# zwangslaeufig auseinander, und der ungenutzte war schon falsch - er liess
+# einen senkrechten Strich im Kommentar unveraendert durch und haette damit
+# genau die Zeile erzeugt, die der Leser nicht mehr richtig zerlegen kann.
+#
+# Wer die Datei aus Python heraus schreiben will, filtert vorher \r, \n und
+# | aus jedem Feld - so wie die PHP-Seite es tut.
 
 
 def signalstufe(rssi, nah, mittel):
@@ -208,6 +224,55 @@ class BlueZFehlt(Exception):
     """python3-dbus fehlt oder BlueZ antwortet nicht."""
 
 
+def dbus_fehler_deuten(fehler, adapter="hci0"):
+    """Aus einem D-Bus-Fehler eine Anweisung machen.
+
+    Die drei Faelle brauchen voellig verschiedene Abhilfen, sehen aber im
+    Protokoll gleich aus, wenn man nur str(fehler) hinschreibt. Bis 1.1.0
+    stand dort genau das - und wer 'Adapter hci0 nicht ansprechbar' las,
+    suchte am Dongle, obwohl die Gruppenmitgliedschaft fehlte.
+
+    Zur oft gehoerten Behauptung, seit Bookworm reiche die Gruppe bluetooth
+    nicht mehr und man muesse eine eigene Richtliniendatei unter
+    /etc/dbus-1/system.d/ ablegen: das ist nicht so. BlueZ bringt seine
+    Richtlinie selbst mit, und darin steht wortwoertlich
+
+        <!-- allow users of bluetooth group to communicate -->
+        <policy group="bluetooth">
+          <allow send_destination="org.bluez"/>
+        </policy>
+
+    (geprueft an bluez 5.64, /etc/dbus-1/system.d/bluetooth.conf). Die
+    Gruppe IST der vorgesehene Weg. Eine eigene Datei dorthin zu legen waere
+    eine systemweite Rechteaenderung durch ein Plugin, sie waere doppelt, und
+    beim naechsten BlueZ-Update stuende sie neben der mitgelieferten.
+
+    Was tatsaechlich schiefgehen kann: eine neue Gruppe wirkt erst in einer
+    NEUEN Sitzung. Wird der Dienst aus der Oberflaeche gestartet, erbt er die
+    Gruppen des Webservers - und der laeuft womoeglich noch aus der Zeit vor
+    der Installation. Beim Systemstart ueber daemon/daemon tritt das nicht
+    auf. Genau darauf weist die Meldung jetzt hin.
+    """
+    text = str(fehler)
+    if "AccessDenied" in text or "Rejected send message" in text:
+        return ("Der D-Bus weist den Zugriff auf org.bluez ab. Die Gruppe bluetooth "
+                "ist der vorgesehene Weg dorthin - pruefen mit: id loxberry. "
+                "Fehlt sie: sudo usermod -a -G bluetooth loxberry. "
+                "ACHTUNG: eine neue Gruppe wirkt erst in einer neuen Sitzung. Wird "
+                "der Dienst aus der Oberflaeche gestartet, erbt er die Gruppen des "
+                "Webservers - nach einem Neustart des LoxBerry ist das erledigt. "
+                "Urspruenglicher Fehler: " + text)
+    if "ServiceUnknown" in text or "was not provided by any .service" in text:
+        return ("Der Dienst org.bluez antwortet nicht - bluetoothd laeuft nicht. "
+                "Pruefen mit: systemctl status bluetooth. Starten mit: "
+                "sudo systemctl enable --now bluetooth. Urspruenglicher Fehler: " + text)
+    if "UnknownObject" in text or "No such object" in text or "DoesNotExist" in text:
+        return ("BlueZ laeuft, kennt aber keinen Adapter {0}. Steckt ein "
+                "Bluetooth-Adapter, und heisst er wirklich so? Liste mit: "
+                "bluetoothctl list. Urspruenglicher Fehler: {1}".format(adapter, text))
+    return text
+
+
 class BlueZ:
     """Duenne Huelle um die BlueZ-D-Bus-Schnittstelle."""
 
@@ -229,9 +294,7 @@ class BlueZ:
             self.props = dbus.Interface(obj, PROPS_IF)
             self.adapter = dbus.Interface(obj, ADAPTER_IF)
         except Exception as fehler:  # noqa: BLE001
-            raise BlueZFehlt(
-                "Bluetooth-Adapter {0} nicht ansprechbar: {1}".format(
-                    self.adaptername, fehler)) from fehler
+            raise BlueZFehlt(dbus_fehler_deuten(fehler, self.adaptername)) from fehler
         return True
 
     def einschalten(self):
@@ -244,7 +307,8 @@ class BlueZ:
                 time.sleep(1.0)
             return True
         except Exception as fehler:  # noqa: BLE001
-            raise BlueZFehlt("Adapter lässt sich nicht einschalten: {0}".format(fehler))
+            raise BlueZFehlt("Adapter lässt sich nicht einschalten. "
+                             + dbus_fehler_deuten(fehler, self.adaptername))
 
     def suche_starten(self):
         import dbus
@@ -263,7 +327,8 @@ class BlueZ:
         except Exception as fehler:  # noqa: BLE001
             text = str(fehler)
             if "InProgress" not in text:
-                raise BlueZFehlt("Suche lässt sich nicht starten: {0}".format(text))
+                raise BlueZFehlt("Suche lässt sich nicht starten. "
+                                 + dbus_fehler_deuten(fehler, self.adaptername))
         return True
 
     def suche_beenden(self):
@@ -285,7 +350,8 @@ class BlueZ:
             objmgr = dbus.Interface(obj, OBJMGR_IF)
             verwaltet = objmgr.GetManagedObjects()
         except Exception as fehler:  # noqa: BLE001
-            raise BlueZFehlt("Geräteliste nicht lesbar: {0}".format(fehler))
+            raise BlueZFehlt("Geräteliste nicht lesbar. "
+                             + dbus_fehler_deuten(fehler, self.adaptername))
 
         out = {}
         for pfad, schnittstellen in verwaltet.items():

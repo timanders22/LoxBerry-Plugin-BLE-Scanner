@@ -1,0 +1,67 @@
+BLE-Scanner NG
+==============
+
+Dieses Werk steht unter der Apache License 2.0 (siehe LICENSE).
+
+Urspruengliches Werk
+--------------------
+BLE-Scanner
+Copyright Christian Woerstenfeld
+https://github.com/Woersty/LoxBerry-Plugin-BLE-Scanner
+Stand 2021.2.3, Apache License 2.0
+
+
+Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
+-----------------------------------------------------------------------
+
+1.0.0  Neufassung fuer LoxBerry 4: Dienst in Python statt der alten
+       Skriptkette, Oberflaeche nach LoxBerry-Hausstandard, MQTT ueber das
+       LoxBerry-Gateway.
+
+1.1.0  Reiter "Einbindung in Loxone" mit vollstaendiger Bausteinliste.
+
+1.2.1  Eigene Kennung und eigener Name: "BLE-Scanner NG", Ordner
+       ble_scanner_ng.
+
+       WARUM DIE KENNUNG WECHSELT: LoxBerry benutzt [AUTHOR] NAME und EMAIL
+       zusammen mit [PLUGIN] NAME als Kennung des Plugins, nicht als
+       Urhebervermerk. Bis 1.1.0 trug diese Fortfuehrung die Kennung des
+       fremden Plugins, zeigte mit AUTOMATIC_UPDATES aber auf ein anderes
+       Repository - eine Mischform, die LoxBerry nicht sauber aufloest. Und
+       Fehlerberichte waeren beim Originalautor gelandet, der mit dieser
+       Fassung nichts zu tun hat.
+
+       WARUM ZUSAETZLICH DER ORDNER: Mehrere Dateien liegen in einem von
+       allen Plugins geteilten Bereich:
+
+           /run/shm/ble_scanner_status.json  -> ble_scanner_ng_status.json
+           /tmp/ble_scanner_status.json      -> ble_scanner_ng_status.json
+           /tmp/BLE-Scanner.loglevel         -> ble_scanner_ng.loglevel
+
+       Waeren die geblieben, haetten sich Original und Fortfuehrung bei
+       paralleler Installation gegenseitig ueberschrieben.
+
+       DIE PID-DATEI liegt nicht auf der Ramdisk, sondern unter
+       <datadir>/dienst.pid - also ohnehin im plugin-eigenen Verzeichnis, das
+       mit dem Ordnernamen mitwandert. Dabei ist ein Fehler aufgefallen, der
+       aelter ist als diese Umbenennung: die Oberflaeche suchte die PID-Datei
+       unter /run/shm, wo sie nie lag. daemon/daemon, preupgrade.sh und
+       uninstall/uninstall benutzten die richtige Stelle, nur die Oberflaeche
+       nicht - sie fiel deshalb bei jedem Aufruf auf die Namenssuche zurueck,
+       also genau auf den Weg, den die PID-Datei ersetzen sollte. Behoben.
+
+       Aus demselben Grund raeumt uninstall/uninstall nur noch die EIGENEN
+       Zustandsdateien weg. Bis 1.1.0 loeschte es auch /tmp/BLE-Scanner.loglevel
+       und /tmp/BLE-Scanner.daemon.pid - Rueckstaende der Originalfassung. Das
+       war richtig, solange diese Fortfuehrung das Original ersetzte; jetzt
+       waere es ein Eingriff in eine fremde, weiterlaufende Installation.
+
+Die urheberrechtliche Nennung des Originalautors steht weiterhin in dieser
+Datei, im README, in der Hilfeseite und im Kopf der Python-Dateien.
+
+
+Marken
+------
+Die Bluetooth-Wortmarke ist Eigentum der Bluetooth SIG, Inc. Dieses Plugin
+steht in keiner Verbindung zu dieser Organisation und wird von ihr weder
+herausgegeben noch unterstuetzt.

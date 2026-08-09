@@ -13,16 +13,32 @@
 pluginname=REPLACELBPPLUGINDIR
 pluginbindir=REPLACELBPBINDIR
 logdir=REPLACELBPLOGDIR
-log=$logdir/ble_scanner.log
+log=$logdir/ble_scanner_ng.log
 
 if [ -x /usr/bin/logger ]; then
-    /usr/bin/logger "loxberry-plugin-$pluginname - Starte BLE-Scanner"
+    /usr/bin/logger "loxberry-plugin-$pluginname - Starte BLE-Scanner NG"
 fi
 
-mkdir -p "$logdir" 2>/dev/null
+datadir=REPLACELBPDATADIR
+piddatei=$datadir/dienst.pid
+
+mkdir -p "$logdir" "$datadir" 2>/dev/null
 
 # Der Dienst braucht keine Rootrechte: BlueZ erlaubt Mitgliedern der Gruppe
 # bluetooth ueber D-Bus das Suchen. Deshalb als loxberry starten.
-su loxberry -c "nohup $pluginbindir/ble_scanner.py >> $log 2>&1 &" >/dev/null 2>&1
+#
+# Die Prozessnummer wird in dieselbe Datei geschrieben, die auch die
+# Oberflaeche benutzt. Bis 1.1.0 fehlte das hier: nach einem Neustart des
+# LoxBerry lief der Dienst, aber ohne PID-Datei - die Oberflaeche fiel dann
+# auf die Suche nach dem Namen zurueck, und die trifft auch einen Editor, der
+# ble_scanner_ng.py geoeffnet hat.
+#
+# echo $! muss INNERHALB der su-Zeichenkette stehen. Stuende es draussen,
+# waere es die Nummer des su-Prozesses, nicht die des Dienstes - und der su
+# beendet sich sofort.
+su loxberry -c "nohup '$pluginbindir/ble_scanner_ng.py' >> '$log' 2>&1 & echo \$! > '$piddatei'" >/dev/null 2>&1
+
+# Die Datei gehoert loxberry, damit die Oberflaeche sie spaeter aufraeumen kann.
+chown loxberry:loxberry "$piddatei" 2>/dev/null
 
 exit 0

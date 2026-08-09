@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BLE-Scanner - Dienst
+BLE-Scanner NG - Dienst
 
 Sucht dauerhaft nach Bluetooth-Low-Energy-Geraeten und meldet je
 konfiguriertem Tag, ob es in Reichweite ist. Zustaende gehen per MQTT
@@ -23,8 +23,10 @@ LoxBerry 4 neu geschrieben:
 
 import json
 import os
+import queue
 import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -39,7 +41,7 @@ import logging  # noqa: E402
 _handlers = []
 try:
     os.makedirs(gem.LOG_DIR, exist_ok=True)
-    _handlers.append(logging.FileHandler(os.path.join(gem.LOG_DIR, "ble_scanner.log")))
+    _handlers.append(logging.FileHandler(os.path.join(gem.LOG_DIR, "ble_scanner_ng.log")))
 except OSError:
     pass
 _handlers.append(logging.StreamHandler(sys.stdout))
@@ -50,7 +52,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=_handlers,
 )
-log = logging.getLogger("ble_scanner")
+log = logging.getLogger("ble_scanner_ng")
 
 
 # ---------------------------------------------------------------------------
@@ -91,11 +93,41 @@ def mqtt_zugangsdaten():
 
 class Mqtt:
     """Duenne Huelle um paho-mqtt. Faellt still aus, wenn Bibliothek oder
-    Gateway fehlen - der HTTP-Weg funktioniert dann weiter."""
+    Gateway fehlen - der HTTP-Weg funktioniert dann weiter.
+
+    Zum haeufigsten Missverstaendnis vorweg: paho verbindet nach einem
+    Abbruch von SELBST wieder. loop_start() laesst loop_forever() in einem
+    Thread laufen, und der hat seine eigene Wiederverbindungsschleife. Ein
+    on_disconnect-Behandler mit eigenem reconnect() ist dafuer nicht noetig.
+
+    Zwei andere Dinge waren bis 1.1.0 wirklich falsch:
+
+    1. Der ERSTE Verbindungsversuch. Schlug connect() fehl - und beim Start
+       zum Systemstart ist das der Regelfall, weil das MQTT-Gateway noch
+       nicht laeuft -, kehrte start() mit False zurueck, ohne loop_start()
+       aufzurufen. self.client blieb dabei gesetzt. senden() rief danach
+       publish() auf einem Client ohne Netzwerkschleife auf: die Nachricht
+       verschwand, ohne Fehler, fuer die gesamte Laufzeit. Nur eine Zeile im
+       Protokoll wies darauf hin, und die las niemand.
+       Jetzt wird connect_async() benutzt und loop_start() in JEDEM Fall
+       gestartet - dann kuemmert sich paho auch um den ersten Versuch.
+
+    2. Nach einem Neustart des Brokers sind die retained-Werte weg. Da
+       _senden() unveraenderte Werte unterdrueckt, blieben die Themen dann
+       leer, bis sich zufaellig etwas aenderte - bei einem Tag, der eine
+       Woche im Schrank liegt, also eine Woche lang. Der on_connect-Behandler
+       verlangt jetzt eine vollstaendige Neumeldung.
+    """
 
     def __init__(self, praefix):
         self.praefix = praefix
         self.client = None
+        self.verbunden = False
+        # Wird von aussen gelesen: nach einer Neuverbindung muessen ALLE
+        # Werte erneut gesendet werden, weil der Broker seine retained-Werte
+        # verloren haben kann.
+        self.neumeldung_faellig = False
+        self.verluste = 0
 
     def start(self):
         try:
@@ -114,32 +146,79 @@ class Mqtt:
         if zugang["user"]:
             self.client.username_pw_set(zugang["user"], zugang["pass"] or "")
         self.client.will_set(self.praefix + "/server/online", "0", retain=True)
+
+        def bei_verbindung(_c, _u, _f, rc, *_a):
+            if rc == 0:
+                self.verbunden = True
+                self.neumeldung_faellig = True
+                log.info("MQTT verbunden mit %s:%s, Themenpräfix %s",
+                         zugang["host"], zugang["port"], self.praefix)
+                self.senden("server/online", "1")
+            else:
+                # rc 4 und 5 sind falsche Zugangsdaten - die behebt kein
+                # Warten, deshalb wird der Grund benannt.
+                self.verbunden = False
+                log.error("MQTT-Anmeldung abgelehnt (Code %s). Bei 4 oder 5 stimmen "
+                          "Benutzer oder Kennwort des Brokers nicht.", rc)
+
+        def bei_trennung(_c, _u, rc, *_a):
+            self.verbunden = False
+            if rc != 0:
+                log.warning("MQTT-Verbindung abgerissen (Code %s) - paho verbindet "
+                            "selbst wieder.", rc)
+
+        self.client.on_connect = bei_verbindung
+        self.client.on_disconnect = bei_trennung
+        # Wartezeit zwischen den Versuchen begrenzen, sonst waechst sie bei
+        # paho bis auf zwei Minuten - beim Systemstart zu lang.
         try:
-            self.client.connect(zugang["host"], zugang["port"], keepalive=60)
-        except OSError as fehler:
-            log.error("MQTT-Broker %s:%s nicht erreichbar: %s",
-                      zugang["host"], zugang["port"], fehler)
-            return False
+            self.client.reconnect_delay_set(min_delay=1, max_delay=30)
+        except Exception:  # noqa: BLE001
+            pass
+        # connect_async statt connect: es wirft nicht, wenn der Broker noch
+        # nicht da ist, und loop_start() versucht es weiter.
+        try:
+            self.client.connect_async(zugang["host"], zugang["port"], keepalive=60)
+        except AttributeError:
+            try:
+                self.client.connect(zugang["host"], zugang["port"], keepalive=60)
+            except OSError as fehler:
+                log.warning("MQTT-Broker %s:%s noch nicht erreichbar (%s) - "
+                            "es wird weiter versucht.",
+                            zugang["host"], zugang["port"], fehler)
         self.client.loop_start()
-        log.info("MQTT verbunden mit %s:%s, Themenpräfix %s",
-                 zugang["host"], zugang["port"], self.praefix)
-        self.senden("server/online", "1")
+        log.info("MQTT-Schleife gestartet, Ziel %s:%s", zugang["host"], zugang["port"])
         return True
 
     def senden(self, unterthema, wert):
         if not self.client:
-            return
+            return False
         try:
-            self.client.publish(self.praefix + "/" + unterthema,
-                                str(wert), qos=0, retain=True)
+            erg = self.client.publish(self.praefix + "/" + unterthema,
+                                      str(wert), qos=0, retain=True)
         except Exception as fehler:  # noqa: BLE001
             log.error("MQTT-Veröffentlichung fehlgeschlagen: %s", fehler)
+            return False
+        # Der Rueckgabewert wird ausgewertet. Bei qos=0 und getrennter
+        # Verbindung ist die Nachricht verloren - das gehoert gezaehlt und
+        # nicht verschwiegen.
+        rc = getattr(erg, "rc", 0)
+        if rc != 0:
+            self.verluste += 1
+            if self.verluste in (1, 10, 100) or self.verluste % 1000 == 0:
+                log.warning("MQTT: %d Nachricht(en) nicht abgesetzt (letzter Code %s). "
+                            "Laeuft das MQTT-Gateway?", self.verluste, rc)
+            return False
+        return True
 
     def stop(self):
         if not self.client:
             return
         try:
             self.senden("server/online", "0")
+            # Kurz warten, damit die letzte Nachricht das Haus verlaesst -
+            # ohne das steht im Broker retained weiter '1'.
+            time.sleep(0.3)
             self.client.loop_stop()
             self.client.disconnect()
         except Exception:  # noqa: BLE001
@@ -219,6 +298,13 @@ class Dienst:
         self.letzter_stand = {}  # Thema -> Wert
         self.config_mtime = self._mtime()
         self.ms = miniserver_liste()
+        # HTTP-Push laeuft in einem eigenen Faden. Die Schlange ist begrenzt:
+        # eine unbegrenzte wuerde bei einem dauerhaft stummen Miniserver
+        # unbemerkt Speicher fressen.
+        self.push_schlange = queue.Queue(maxsize=200)
+        self.push_sperre = {}
+        self.push_verworfen = 0
+        self.push_faden = None
 
     def _mtime(self):
         try:
@@ -291,16 +377,63 @@ class Dienst:
         self.zustand_schreiben(uebersicht, anwesend_gesamt)
 
     def an_miniserver(self, mac, anwesend):
-        """Virtuellen Eingang setzen - der Weg der Originalfassung."""
+        """Virtuellen Eingang setzen - der Weg der Originalfassung.
+
+        Der Auftrag wird nur EINGEREIHT, nicht hier ausgefuehrt. Bis 1.1.0
+        lief der HTTP-Aufruf im Scan-Faden: bei fuenf Tags, die gleichzeitig
+        wechseln, und einem Miniserver, der gerade neu startet, blockierte das
+        5 x 4 s = 20 Sekunden. In dieser Zeit fragt niemand BlueZ ab, und
+        genau dann gesendete Beacons gehen verloren - das Ergebnis ist eine
+        flatternde Anwesenheit, deren Ursache man nirgends sieht.
+        """
         kennung = (self.cfg.get("loxberry_id") or "").strip()
         name = "{0}BLE_{1}".format(kennung, mac.replace(":", "_"))
         for ms in self.ms:
-            ok, fehler = http_push(ms, name, anwesend)
+            try:
+                self.push_schlange.put_nowait((ms, name, anwesend))
+            except queue.Full:
+                # Voll heisst: der Miniserver nimmt seit langem nichts an.
+                # Dann ist der aktuelle Wert wichtiger als der aelteste.
+                try:
+                    self.push_schlange.get_nowait()
+                    self.push_schlange.put_nowait((ms, name, anwesend))
+                    self.push_verworfen += 1
+                except (queue.Empty, queue.Full):
+                    pass
+                if self.push_verworfen in (1, 10, 100):
+                    log.warning("HTTP-Push: %d Auftrag/Auftraege verworfen - der "
+                                "Miniserver nimmt nichts an. MQTT ist davon "
+                                "unberuehrt.", self.push_verworfen)
+
+    def push_arbeiter(self):
+        """Hintergrundfaden: arbeitet die HTTP-Aufträge ab.
+
+        Ein eigener Faden statt asyncio, weil der Dienst sonst keinen
+        Ereignisverwalter braucht - und ein Faden, der nur wartet und
+        gelegentlich eine Adresse abruft, ist die einfachere Loesung, die man
+        auch in zwei Jahren noch versteht.
+        """
+        while self.laeuft:
+            try:
+                auftrag = self.push_schlange.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            ms, name, wert = auftrag
+            # Ein Miniserver, der nicht antwortet, wird eine Weile in Ruhe
+            # gelassen - sonst kostet jeder Auftrag erneut die volle
+            # Zeitgrenze, auch wenn seit Stunden klar ist, dass niemand da ist.
+            sperre = self.push_sperre.get(ms["nr"], 0)
+            if time.time() < sperre:
+                continue
+            ok, fehler = http_push(ms, name, wert)
             if ok:
-                log.info("An %s gesendet: %s = %s", ms["name"], name, anwesend)
+                log.info("An %s gesendet: %s = %s", ms["name"], name, wert)
+                self.push_sperre.pop(ms["nr"], None)
             else:
-                log.warning("An %s fehlgeschlagen: %s = %s (%s)",
-                            ms["name"], name, anwesend, fehler)
+                self.push_sperre[ms["nr"]] = time.time() + 60
+                log.warning("An %s fehlgeschlagen: %s = %s (%s). Naechster Versuch "
+                            "an diesen Miniserver in 60 s.",
+                            ms["name"], name, wert, fehler)
 
     def zustand_schreiben(self, uebersicht, anwesend_gesamt):
         """Zustandsdatei fuer die Oberflaeche."""
@@ -375,7 +508,7 @@ class Dienst:
             log.info("%d fremde Geräte aus dem BlueZ-Zwischenspeicher entfernt", entfernt)
 
     def start(self):
-        log.info("BLE-Scanner %s startet", gem.VERSION)
+        log.info("BLE-Scanner NG %s startet", gem.VERSION)
         log.info("Konfiguration: %s", gem.CONFIG_FILE)
         log.info("%d Tag(s) konfiguriert, davon %d aktiv",
                  len(self.tags), sum(1 for t in self.tags if t.get("aktiv") == "1"))
@@ -384,6 +517,13 @@ class Dienst:
             self.mqtt.start()
         else:
             log.info("MQTT ist ausgeschaltet")
+
+        # Der Push-Faden laeuft immer mit, auch wenn http_push gerade aus ist:
+        # der Schalter kann zur Laufzeit umgestellt werden, und ein wartender
+        # Faden kostet nichts.
+        self.push_faden = threading.Thread(target=self.push_arbeiter,
+                                           name="http-push", daemon=True)
+        self.push_faden.start()
 
         self.bluez = gem.BlueZ(self.cfg.get("adapter", "hci0"))
         while self.laeuft:
@@ -416,7 +556,17 @@ class Dienst:
                     time.sleep(15)
                     continue
 
-            erzwingen = (time.time() - letzte_vollmeldung) >= vollmeldung_alle
+            # Nach einer Neuverbindung zum Broker sind dessen retained-Werte
+            # womoeglich weg. Dann muss ALLES neu gesendet werden - sonst
+            # bleiben die Themen leer, bis sich zufaellig etwas aendert, und
+            # bei einem Tag im Schrank kann das Wochen dauern.
+            neu_verbunden = self.mqtt.neumeldung_faellig
+            if neu_verbunden:
+                self.mqtt.neumeldung_faellig = False
+                self.letzter_stand.clear()
+                log.info("MQTT neu verbunden - alle Zustände werden erneut gemeldet")
+
+            erzwingen = neu_verbunden or (time.time() - letzte_vollmeldung) >= vollmeldung_alle
             self.auswerten(erzwingen=erzwingen)
             if erzwingen:
                 letzte_vollmeldung = time.time()

@@ -1,9 +1,64 @@
 #!/bin/bash
-# Wird als Benutzer "root" ausgefuehrt.
+# BLE-Scanner NG - Deinstallation (laeuft als ROOT)
+#
+# Beendet wird ueber die PID-Datei, die daemon/daemon beim Start anlegt -
+# NICHT mehr ueber pkill -f.
+#
+# pkill -f ble_scanner_ng.py traf jeden Prozess, in dessen Kommandozeile die
+# Zeichenkette irgendwo vorkam: einen Editor mit der geoeffneten Datei, ein
+# tail auf einen Pfad mit diesem Namen. Beim Beenden ist das kein
+# theoretisches Risiko - pkill schickt das Signal an ALLE Treffer. Die
+# PID-Datei gab es die ganze Zeit, sie wurde hier nur nie benutzt.
 
-pkill -f ble_scanner.py >/dev/null 2>&1
-rm -f /run/shm/ble_scanner_status.json /tmp/ble_scanner_status.json
-# Rueckstaende der Originalfassung
-rm -f /tmp/ble_scanner.dat /tmp/BLE-Scanner.loglevel /tmp/BLE-Scanner.daemon.pid
+BASE="${LBHOMEDIR:-/opt/loxberry}"
+PDIR="${3:-ble-scanner}"
+PIDDATEI="$BASE/data/plugins/$PDIR/dienst.pid"
+
+beendet=0
+if [ -f "$PIDDATEI" ]; then
+    PID=$(cat "$PIDDATEI" 2>/dev/null)
+    case "$PID" in
+        ''|*[!0-9]*) PID="" ;;
+    esac
+    # Gegenprobe argumentweise, nicht als Teilzeichenkette: die Kommandozeile
+    # eines fremden Prozesses kann den Namen zufaellig enthalten, und ein
+    # kill an den Falschen ist nicht rueckgaengig zu machen.
+    if [ -n "$PID" ] && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null \
+         | sed 's#.*/##' | grep -qx "ble_scanner_ng.py"; then
+        kill "$PID" 2>/dev/null
+        # Zeit zum Aufraeumen lassen: der Dienst meldet beim Beenden noch
+        # seinen Zustand per MQTT, damit Loxone den Ausfall mitbekommt.
+        i=0
+        while [ $i -lt 20 ] && kill -0 "$PID" 2>/dev/null; do
+            sleep 0.25
+            i=$((i + 1))
+        done
+        kill -9 "$PID" 2>/dev/null
+        beendet=1
+    fi
+    rm -f "$PIDDATEI"
+fi
+
+if [ "$beendet" = "1" ]; then
+    echo "<OK> Dienst beendet."
+else
+    echo "<INFO> Kein laufender Dienst gefunden."
+fi
+
+# Nur die EIGENEN Zustandsdateien wegraeumen.
+#
+# Bis 1.1.0 loeschte diese Stelle auch "/tmp/BLE-Scanner.loglevel" und
+# "/tmp/BLE-Scanner.daemon.pid" - Rueckstaende der ORIGINALFASSUNG, deren
+# Plugin-Name "BLE-Scanner" lautete. Das war richtig, solange diese
+# Fortfuehrung dieselbe Kennung trug und das Original ersetzte. Seit 1.2.1 ist
+# es ein eigenstaendiges Plugin, das neben dem Original laufen kann: dessen
+# Dateien beim Deinstallieren mitzunehmen wuerde eine fremde, weiterlaufende
+# Installation beschaedigen. Sie bleiben deshalb stehen.
+#
+# Die PID-Datei selbst liegt unter <datadir>/dienst.pid und wird oben
+# behandelt; die Zeilen hier raeumen nur, was auf der Ramdisk und in /tmp
+# liegen bleiben koennte.
+rm -f /run/shm/ble_scanner_ng_status.json /tmp/ble_scanner_ng_status.json
+rm -f /tmp/ble_scanner_ng.loglevel /tmp/ble_scanner_ng.daemon.pid
 
 exit 0

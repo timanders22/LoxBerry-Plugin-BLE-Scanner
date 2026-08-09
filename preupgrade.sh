@@ -9,15 +9,56 @@ PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now. Fifth argument is
               # Base folder of LoxBerry
 
-# Combine them with /etc/environment
-PCGI=$LBPCGI/$PDIR
-PHTML=$LBPHTML/$PDIR
-PTEMPL=$LBPTEMPL/$PDIR
+# Von den Pfadvariablen der LoxBerry-Vorlage sind nur die uebrig, die
+# wirklich gebraucht werden. PCGI, PHTML, PTEMPL, PSBIN und PBIN wurden
+# zugewiesen und nie gelesen.
 PDATA=$LBPDATA/$PDIR
 PLOG=$LBPLOG/$PDIR # Note! This is stored on a Ramdisk now!
 PCONFIG=$LBPCONFIG/$PDIR
-PSBIN=$LBPSBIN/$PDIR
-PBIN=$LBPBIN/$PDIR
+
+# Den laufenden Dienst zuerst anhalten - das fehlte bis 1.1.0 vollstaendig.
+#
+# Was wirklich passiert, wenn man es nicht tut: LoxBerry ersetzt bin/*.py
+# unter einem laufenden Python-Prozess. Der hat seinen Quelltext laengst
+# geladen und laeuft unbeirrt weiter - mit der ALTEN Fassung, bis irgendwann
+# neu gestartet wird. Der Anwender sieht die neue Oberflaeche, waehrend im
+# Hintergrund der alte Dienst arbeitet, und wundert sich, dass eine behobene
+# Sache noch auftritt.
+#
+# Die oft genannte Sorge vor einem Kernel-Deadlock auf hci0 ist dagegen
+# unbegruendet: BlueZ zaehlt Discovery-Anforderungen je D-Bus-Verbindung mit
+# und raeumt sie auf, wenn die Verbindung wegfaellt. Der Schaden ist ein
+# stiller Fassungsversatz, kein haengendes Geraet.
+#
+# Angehalten wird mit SIGTERM und Geduld: der Dienst nimmt in seinem
+# Signalbehandler die Suche zurueck und meldet server/online=0 an den Broker.
+# Wird er hart abgeschossen, bleibt im Broker ein retained '1' stehen, und
+# Loxone glaubt weiter an einen laufenden Scanner.
+PIDDATEI="$PDATA/dienst.pid"
+P=""
+if [ -f "$PIDDATEI" ]; then
+    P=$(cat "$PIDDATEI" 2>/dev/null)
+fi
+if [ -z "$P" ]; then
+    P=$(pgrep -o -f "[b]le_scanner.py" 2>/dev/null)
+fi
+if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
+    echo "<INFO> Halte den laufenden BLE-Scanner NG an (PID $P)."
+    kill "$P" 2>/dev/null
+    i=0
+    while [ $i -lt 15 ] && kill -0 "$P" 2>/dev/null; do
+        sleep 1
+        i=$((i + 1))
+    done
+    # Nummernrecycling ausschliessen, bevor mit -9 nachgesetzt wird.
+    if kill -0 "$P" 2>/dev/null && grep -qa "ble_scanner_ng.py" "/proc/$P/cmdline" 2>/dev/null; then
+        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
+        kill -9 "$P" 2>/dev/null
+    fi
+    rm -f "$PIDDATEI"
+else
+    echo "<INFO> Es lief kein BLE-Scanner NG."
+fi
 
 echo "<INFO> Creating temporary folders for upgrading /tmp/${PDIR}.SAVE "
 mkdir /tmp/${PDIR}.SAVE

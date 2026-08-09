@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BLE-Scanner - Suchlauf fuer die Oberflaeche
+BLE-Scanner NG - Suchlauf fuer die Oberflaeche
 
 Gibt die gerade sichtbaren BLE-Geraete als JSON aus. Wird vom Reiter
 Einstellungen aufgerufen, um Tags zum Anhaken anzubieten.
@@ -36,21 +36,52 @@ def aus_zustandsdatei(hoechstalter=30):
 
 
 def selbst_suchen(cfg):
-    """Eigener Suchlauf, wenn der Dienst nicht laeuft."""
+    """Eigener Suchlauf, wenn der Dienst nicht laeuft.
+
+    Behalten wird der STAERKSTE gemessene Wert je Geraet, nicht der letzte.
+
+    Bis 1.1.0 stand hier eine einfache Zuweisung, und damit gewann das
+    zuletzt empfangene Paket. Ueber zwoelf Sekunden werden rund acht
+    Abfragen gemacht; faengt die letzte ein schwaches Paket ein (-95 dBm,
+    weil jemand mit dem Schluessel in der Tasche gerade um die Ecke ging),
+    stand das Geraet mit -95 in der Liste, obwohl es zwei Sekunden vorher
+    mit -55 zu hoeren war. Die Liste ist nach Signalstaerke sortiert und
+    dient dazu, den eigenen Schluesselanhaenger unter fremden Geraeten zu
+    ERKENNEN - dafuer ist der beste Wert der aussagekraeftige.
+
+    Der Name wird nur ergaenzt, nie geleert: BlueZ meldet oft zuerst nur die
+    Adresse und den Namen erst, wenn das naechste Advertising-Paket ihn
+    mitbringt. Wer stur ueberschreibt, verliert ihn wieder.
+    """
     bluez = gem.BlueZ(cfg.get("adapter", "hci0"))
     bluez.verbinden()
     bluez.einschalten()
     bluez.suche_starten()
     gesehen = {}
+    messungen = {}
     ende = time.time() + DAUER
     while time.time() < ende:
         for mac, werte in bluez.geraete().items():
             if werte["rssi"] is None:
                 continue
-            gesehen[mac] = {"mac": mac, "rssi": werte["rssi"],
-                            "name": werte["name"], "seit": 0}
+            alt = gesehen.get(mac)
+            messungen[mac] = messungen.get(mac, 0) + 1
+            if alt is None:
+                gesehen[mac] = {"mac": mac, "rssi": werte["rssi"],
+                                "name": werte["name"], "seit": 0,
+                                "rssi_letzter": werte["rssi"]}
+                continue
+            # Bester Wert gewinnt.
+            if werte["rssi"] > alt["rssi"]:
+                alt["rssi"] = werte["rssi"]
+            alt["rssi_letzter"] = werte["rssi"]
+            # Namen nur ergaenzen, nicht ueberschreiben.
+            if werte["name"] and not alt["name"]:
+                alt["name"] = werte["name"]
         time.sleep(1.5)
     bluez.suche_beenden()
+    for mac, eintrag in gesehen.items():
+        eintrag["messungen"] = messungen.get(mac, 1)
     return sorted(gesehen.values(), key=lambda g: -(g["rssi"] or -255))
 
 
