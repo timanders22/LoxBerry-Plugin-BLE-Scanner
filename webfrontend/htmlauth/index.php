@@ -339,6 +339,9 @@ if ($bl_frame) {
 <div class="sm-alert sm-info"><?php echo bl_t('TEXT.DER_SUCHLAUF_HAT_NICHTS_NEUES_GEFU'); ?> <?= bl_e($bl_such['quelle']) ?>).</div>
 <?php } ?>
 
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?php echo bl_t('LEGENDE.LESEN'); ?></span>
+</div>
 <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="suchen" value="1"><?php echo bl_t('TEXT.GERTE_SUCHEN'); ?></button>
 <div class="sm-small"><?php echo bl_t('TEXT.LUFT_DER_DIENST_WERDEN_DESSEN_SICH'); ?></div>
 
