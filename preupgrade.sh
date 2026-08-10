@@ -60,11 +60,23 @@ else
     echo "<INFO> Es lief kein BLE-Scanner NG."
 fi
 
-echo "<INFO> Creating temporary folders for upgrading /tmp/${PDIR}.SAVE "
-mkdir /tmp/${PDIR}.SAVE
+# Der Sicherungsordner liegt unter data/, NICHT unter /tmp.
+#
+# /tmp ist auf dem LoxBerry eine Ramdisk: bricht die Installation ab oder
+# startet der Rechner dazwischen neu, ist die Sicherung weg. Und /tmp ist fuer
+# jeden lesbar - in ble_scanner_ng.cfg stehen MAC-Adressen und die Namen der
+# ueberwachten Personen, also eine Anwesenheitsliste des Haushalts.
+# Geaendert am 10.08.2026 nach der Durchsicht aller Plugins.
+SICHER="$PDATA/upgrade_sicherung"
 
-echo "<INFO> Backing up existing config files $PCONFIG/* /tmp/${PDIR}.SAVE/ "
-cp -v -r $PCONFIG/* /tmp/${PDIR}.SAVE/
+echo "<INFO> Creating backup folder for upgrading $SICHER"
+rm -rf "$SICHER" 2>/dev/null
+mkdir -p "$SICHER"
+chmod 0700 "$SICHER" 2>/dev/null
+
+echo "<INFO> Backing up existing config files $PCONFIG/ -> $SICHER/"
+cp -a "$PCONFIG/." "$SICHER/" 2>/dev/null \
+    && echo "<OK> Konfiguration gesichert (Rechte 0700)."
 
 # Exit with Status 0
 exit 0

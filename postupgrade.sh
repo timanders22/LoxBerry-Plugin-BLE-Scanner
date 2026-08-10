@@ -16,8 +16,17 @@ PDATA=$LBPDATA/$PDIR
 PLOG=$LBPLOG/$PDIR # Note! This is stored on a Ramdisk now!
 PCONFIG=$LBPCONFIG/$PDIR
 
-echo "<INFO> Copy back existing config files /tmp/${PDIR}.SAVE/* $PCONFIG/"
-cp -v -r /tmp/${PDIR}.SAVE/* $PCONFIG/
+# Die Sicherung liegt seit dem 10.08.2026 unter data/ statt unter /tmp: /tmp
+# ist auf dem LoxBerry eine Ramdisk und ausserdem fuer jeden lesbar.
+SICHER="$PDATA/upgrade_sicherung"
+
+if [ -d "$SICHER" ]; then
+    echo "<INFO> Copy back existing config files $SICHER/ -> $PCONFIG/"
+    mkdir -p "$PCONFIG" 2>/dev/null
+    cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null
+else
+    echo "<INFO> Keine Sicherung vorhanden - offenbar eine Erstinstallation."
+fi
 
 # Eigentuemer richtigstellen - das fehlte bis 1.1.0.
 #
@@ -35,8 +44,8 @@ else
     echo "<WARNING> Benutzer loxberry nicht gefunden - Eigentuemer nicht geaendert."
 fi
 
-echo "<INFO> Remove temporary folder /tmp/${PDIR}.SAVE"
-rm -rf /tmp/${PDIR}.SAVE
+echo "<INFO> Remove backup folder $SICHER"
+rm -rf "$SICHER"
 
 # Exit with Status 0
 
