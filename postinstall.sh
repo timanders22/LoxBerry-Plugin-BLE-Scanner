@@ -105,4 +105,40 @@ fi
 echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"
 echo "<INFO> gefundene Tags anhaken und speichern."
 
+
+# ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
+# Zurueckspielen aus der Zweitschrift - aber NUR, wenn die Datei des Nutzers
+# wirklich verloren ist. Erkannt wird das an dreierlei: sie fehlt, sie ist
+# leer, oder sie ist zeichengenau die mitgelieferte Vorgabe (Pruefsumme
+# unten). Der letzte Fall ist der eigentliche: genau so sieht die Datei nach
+# dem Kopierschritt des Installers aus.
+#
+# Eine gueltige Konfiguration wird NIE ueberschrieben. Eine Sicherung, die
+# echte Einstellungen ersetzt, waere schlimmer als gar keine.
+NETZ_BASE="${5:-$LBHOMEDIR}"
+NETZ_PDIR="${3:-ble_scanner_ng}"
+NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
+netz_zurueck() {
+    datei=$1; soll=$2
+    ziel="$NETZ_CFG/$datei"
+    zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"
+    [ -f "$zweit" ] || return 0
+    verloren=0
+    if [ ! -f "$ziel" ] || [ ! -s "$ziel" ]; then
+        verloren=1
+    else
+        ist=$(sha256sum "$ziel" 2>/dev/null | cut -d" " -f1)
+        [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
+    fi
+    if [ "$verloren" = "1" ]; then
+        if cp -p "$zweit" "$ziel" 2>/dev/null; then
+            echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
+        else
+            echo "<WARNING> $datei liess sich nicht zurueckspielen. Die Sicherung"
+            echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
+        fi
+    fi
+}
+netz_zurueck "ble_scanner_ng.cfg" "7ac1c0efe356e01bc46c6a297c7ff11c0a655320e7032958a242720000af4358"
+
 exit 0
