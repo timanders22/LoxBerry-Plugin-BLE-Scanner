@@ -411,6 +411,7 @@ if ($bl_frame) {
 <div class="sm-step"><b><?php echo bl_t('TEXT.SCHRITT_1_TAGS_EINTRAGEN'); ?></b><br><br>
 <?php echo bl_t('TEXT.IM_REITER'); ?> <i>Einstellungen</i><?php echo bl_t('TEXT.AM_EINFACHSTEN_BER'); ?> <i>Ger&auml;te suchen</i><?php echo bl_t('TEXT.ANHAKEN_SPEICHERN'); ?></div>
 <div class="sm-step"><b><?php echo bl_t('TEXT.SCHRITT_2_ABO_IM_MQTT_GATEWAY_EINT'); ?></b><br><br>
+<?php if (!function_exists('bl_hs_autostart')) { function bl_hs_autostart() { $h = getenv('LBHOMEDIR') ?: '/opt/loxberry'; $g = $h . '/config/system/general.json'; if (!is_file($g)) { return null; } $j = json_decode((string) @file_get_contents($g), true); if (!is_array($j) || !isset($j['Mqtt'])) { return null; } return !empty($j['Mqtt']['Gatewayautostart']); } } if (bl_hs_autostart() === false) { ?><div class="sm-alert sm-warn"><b>MQTT:</b> <?php echo bl_t('TEXT.W_AUTOSTART'); ?></div><?php } ?>
 <b><?php echo bl_t('TEXT.OHNE_DIESEN_EINTRAG_KOMMT_AM_MINIS'); ?></b> <?php echo bl_t('TEXT.EINZUTRAGEN_UNTER'); ?>
 <i><?php echo bl_t('TEXT.SYSTEM_EINSTELLUNGEN_MQTT_GATEWAY_'); ?></i>:
 <div class="sm-mono" style="background:#f4f4f4;border:1px solid #ccc;padding:8px;margin-top:6px;"><?= bl_e($bl_praefix) ?>/#</div></div>
