@@ -1,5 +1,17 @@
+# Uebersetzte Python-Zwischenstaende gehoeren nicht ins Paket.
 __pycache__/
 *.pyc
+*.pyo
+
+# Laufzeitdaten
+*.pid
+*.tmp
+
+# Betriebssystem- und Editorreste
 .DS_Store
 Thumbs.db
+*~
+*.swp
+
+# Protokolle (stand seit jeher im Repository, hier nachgetragen)
 *.log
