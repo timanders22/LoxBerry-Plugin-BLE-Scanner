@@ -1,62 +1,67 @@
-#!/bin/bash
-# Rueckfall ohne fest verdrahteten Pfad.
+#!/bin/sh
 #
-# Ein fest verdrahteter Systempfad ist aus zwei Gruenden falsch: LoxBerry laesst
-# sich anderswohin installieren, und der Pluginpruefer beanstandet die
-# Zeichenkette. Eine feste Anzahl von ".." waere nur die naechste Wette -
-# je nachdem, wohin LoxBerry diese Datei bei der Installation legt, sind es
-# drei oder vier Ebenen. Deshalb wird aufwaerts gesucht, bis ein
-# Verzeichnis gefunden ist, das nachweislich eine LoxBerry-Wurzel ist:
-# es traegt config/plugins UND data/plugins.
-lb_wurzel_suchen() {
-    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
-    i=0
-    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
-        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ]; then
-            echo "$v"; return 0
-        fi
-        v=$(dirname "$v"); i=$((i + 1))
-    done
-    return 1
-}
-# BLE-Scanner NG - Deinstallation (laeuft als ROOT)
+# BLE-Scanner NG - Deinstallation
 #
-# Beendet wird ueber die PID-Datei, die daemon/daemon beim Start anlegt -
-# NICHT mehr ueber pkill -f.
-#
-# pkill -f ble_scanner_ng.py traf jeden Prozess, in dessen Kommandozeile die
-# Zeichenkette irgendwo vorkam: einen Editor mit der geoeffneten Datei, ein
-# tail auf einen Pfad mit diesem Namen. Beim Beenden ist das kein
-# theoretisches Risiko - pkill schickt das Signal an ALLE Treffer. Die
-# PID-Datei gab es die ganze Zeit, sie wurde hier nur nie benutzt.
+# LoxBerry entfernt die Verzeichnisse des Plugins selbst. Hier wird nur
+# weggeraeumt, was AUSSERHALB davon liegt: der laufende Dienst, die Dateien
+# auf der Ramdisk und die Zweitschrift der Konfiguration.
 
-BASE="${5:-$LBHOMEDIR}"
-[ -n "$BASE" ] && [ -d "$BASE" ] || BASE=$(lb_wurzel_suchen)
-PDIR="${3:-ble-scanner}"
-PIDDATEI="$BASE/data/plugins/$PDIR/dienst.pid"
+PTEMPDIR=$1
+PSHNAME=$2
+PDIR=$3
+PVERSION=$4
+BASE=${5:-$LBHOMEDIR}
+[ -n "$BASE" ] || BASE=/opt/loxberry
 
-beendet=0
+# BERICHTIGT IN 1.3.0: hier stand PDIR="${3:-ble-scanner}". Das Plugin heisst
+# ble_scanner_ng (plugin.cfg), und postinstall.sh sowie preupgrade.sh
+# schrieben es richtig. Fehlte $3, zeigte der PID-Pfad ins Leere, das Skript
+# meldete "Kein laufender Dienst gefunden" - eine Falschaussage - und der
+# Dienst lief nach der Deinstallation weiter.
+PDIR="${PDIR:-ble_scanner_ng}"
+PDATA="$BASE/data/plugins/$PDIR"
+PIDDATEI="$PDATA/dienst.pid"
+
+# --- Dienst beenden ---------------------------------------------------------
+PID=""
 if [ -f "$PIDDATEI" ]; then
     PID=$(cat "$PIDDATEI" 2>/dev/null)
-    case "$PID" in
-        ''|*[!0-9]*) PID="" ;;
-    esac
-    # Gegenprobe argumentweise, nicht als Teilzeichenkette: die Kommandozeile
-    # eines fremden Prozesses kann den Namen zufaellig enthalten, und ein
-    # kill an den Falschen ist nicht rueckgaengig zu machen.
-    if [ -n "$PID" ] && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null \
-         | sed 's#.*/##' | grep -qx "ble_scanner_ng.py"; then
-        kill "$PID" 2>/dev/null
-        # Zeit zum Aufraeumen lassen: der Dienst meldet beim Beenden noch
-        # seinen Zustand per MQTT, damit Loxone den Ausfall mitbekommt.
-        i=0
-        while [ $i -lt 20 ] && kill -0 "$PID" 2>/dev/null; do
-            sleep 0.25
-            i=$((i + 1))
-        done
-        kill -9 "$PID" 2>/dev/null
-        beendet=1
+fi
+# Gegenprobe: gehoert die Nummer wirklich unserem Dienst? Eine Nummer wird
+# nach dem Ende eines Prozesses wiederverwendet.
+if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    if ! tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
+        PID=""
     fi
+fi
+if [ -z "$PID" ]; then
+    for d in /proc/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
+            PID=$(basename "$d")
+            break
+        fi
+    done
+fi
+
+beendet=0
+if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    echo "<INFO> Halte den BLE-Scanner NG an (PID $PID)."
+    kill "$PID" 2>/dev/null
+    i=0
+    while [ $i -lt 15 ] && kill -0 "$PID" 2>/dev/null; do
+        sleep 1
+        i=$((i + 1))
+    done
+    # kill -9 NUR, wenn der Prozess noch laeuft UND immer noch unserer ist.
+    # Bis 1.2.10 folgte das -9 bedingungslos - auch wenn der Prozess laengst
+    # beendet war und die Nummer inzwischen ein fremder Prozess trug.
+    if kill -0 "$PID" 2>/dev/null \
+       && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
+        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
+        kill -9 "$PID" 2>/dev/null
+    fi
+    beendet=1
     rm -f "$PIDDATEI"
 fi
 
@@ -66,20 +71,35 @@ else
     echo "<INFO> Kein laufender Dienst gefunden."
 fi
 
-# Nur die EIGENEN Zustandsdateien wegraeumen.
+# --- Nur die EIGENEN Dateien wegraeumen -------------------------------------
 #
-# Bis 1.1.0 loeschte diese Stelle auch "/tmp/BLE-Scanner.loglevel" und
-# "/tmp/BLE-Scanner.daemon.pid" - Rueckstaende der ORIGINALFASSUNG, deren
+# Bis 1.1.0 loeschte diese Stelle auch /tmp/BLE-Scanner.loglevel und
+# /tmp/BLE-Scanner.daemon.pid - Rueckstaende der ORIGINALFASSUNG, deren
 # Plugin-Name "BLE-Scanner" lautete. Das war richtig, solange diese
-# Fortfuehrung dieselbe Kennung trug und das Original ersetzte. Seit 1.2.1 ist
-# es ein eigenstaendiges Plugin, das neben dem Original laufen kann: dessen
-# Dateien beim Deinstallieren mitzunehmen wuerde eine fremde, weiterlaufende
-# Installation beschaedigen. Sie bleiben deshalb stehen.
-#
-# Die PID-Datei selbst liegt unter <datadir>/dienst.pid und wird oben
-# behandelt; die Zeilen hier raeumen nur, was auf der Ramdisk und in /tmp
-# liegen bleiben koennte.
+# Fortfuehrung dieselbe Kennung trug und das Original ersetzte. Seit 1.2.1
+# ist es ein eigenstaendiges Plugin, das neben dem Original laufen kann:
+# dessen Dateien mitzunehmen wuerde eine fremde, weiterlaufende Installation
+# beschaedigen.
 rm -f /run/shm/ble_scanner_ng_status.json /tmp/ble_scanner_ng_status.json
+rm -f /run/shm/ble_scanner_ng_steuer.json /tmp/ble_scanner_ng_steuer.json
 rm -f /tmp/ble_scanner_ng.loglevel /tmp/ble_scanner_ng.daemon.pid
+
+# --- Die Zweitschrift der Konfiguration -------------------------------------
+#
+# NEU IN 1.3.0. Sie liegt AUSSERHALB des Plugin-Ordners
+# (config/plugins/<pdir>.backup.ble_scanner_ng.cfg) und wurde deshalb von
+# LoxBerry nicht mit entfernt. Zwei Folgen hatte das: eine Datei mit
+# MAC-Adressen und den Klarnamen der ueberwachten Personen blieb dauerhaft
+# auf dem Geraet liegen, und bei einer spaeteren Neuinstallation spielte
+# postinstall.sh sie UNGEFRAGT wieder ein - der Anwender bekam seine alte
+# Personenliste zurueck, ohne danach gefragt worden zu sein.
+ZWEIT="$BASE/config/plugins/$PDIR.backup.ble_scanner_ng.cfg"
+if [ -f "$ZWEIT" ]; then
+    rm -f "$ZWEIT" && echo "<OK> Zweitschrift der Konfiguration entfernt ($ZWEIT)."
+fi
+
+echo "<INFO> Die Themen im MQTT-Broker bleiben stehen. Wer sie loswerden will,"
+echo "<INFO> loescht sie dort - ein zurueckbehaltenes Thema verschwindet nur"
+echo "<INFO> durch eine Nachricht mit leerer Nutzlast."
 
 exit 0

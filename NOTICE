@@ -28,33 +28,96 @@ Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
        Urhebervermerk. Bis 1.1.0 trug diese Fortfuehrung die Kennung des
        fremden Plugins, zeigte mit AUTOMATIC_UPDATES aber auf ein anderes
        Repository - eine Mischform, die LoxBerry nicht sauber aufloest. Und
-       Fehlerberichte waeren beim Originalautor gelandet, der mit dieser
-       Fassung nichts zu tun hat.
+       Fehlerberichte waeren beim Originalautor gelandet.
 
-       WARUM ZUSAETZLICH DER ORDNER: Mehrere Dateien liegen in einem von
-       allen Plugins geteilten Bereich:
+       WARUM ZUSAETZLICH DER ORDNER: mehrere Dateien liegen in einem von
+       allen Plugins geteilten Bereich (/run/shm, /tmp). Waeren die
+       geblieben, haetten sich Original und Fortfuehrung bei paralleler
+       Installation gegenseitig ueberschrieben.
 
-           /run/shm/ble_scanner_status.json  -> ble_scanner_ng_status.json
-           /tmp/ble_scanner_status.json      -> ble_scanner_ng_status.json
-           /tmp/BLE-Scanner.loglevel         -> ble_scanner_ng.loglevel
+1.2.2 bis 1.2.10
+       Fuer diese Staende liegt in diesem Archiv keine Aenderungsliste vor.
+       Sie laesst sich daraus auch nicht zuverlaessig rekonstruieren; hier
+       etwas zu erfinden waere schlimmer als die Luecke. Wer sie braucht,
+       findet sie in der Fassungsgeschichte des Repositories.
 
-       Waeren die geblieben, haetten sich Original und Fortfuehrung bei
-       paralleler Installation gegenseitig ueberschrieben.
+1.3.0  Umbau in zwei Richtungen: die Befunde einer zeilenweisen Durchsicht
+       sind behoben, und der Funktionsumfang ist erweitert.
 
-       DIE PID-DATEI liegt nicht auf der Ramdisk, sondern unter
-       <datadir>/dienst.pid - also ohnehin im plugin-eigenen Verzeichnis, das
-       mit dem Ordnernamen mitwandert. Dabei ist ein Fehler aufgefallen, der
-       aelter ist als diese Umbenennung: die Oberflaeche suchte die PID-Datei
-       unter /run/shm, wo sie nie lag. daemon/daemon, preupgrade.sh und
-       uninstall/uninstall benutzten die richtige Stelle, nur die Oberflaeche
-       nicht - sie fiel deshalb bei jedem Aufruf auf die Namenssuche zurueck,
-       also genau auf den Weg, den die PID-Datei ersetzen sollte. Behoben.
+       BEHOBEN
+       * Die PHP-Seite hatte die beiden Korrekturen des Konfigurationslesers
+         aus 1.2.0 nie bekommen. Gemessen: ein Klick auf "Speichern", ohne
+         etwas zu aendern, loeschte einen von Hand eingetragenen Tag und
+         kuerzte den Kommentar eines zweiten. Beide Leser werden jetzt im
+         Reiter Test gegeneinander gemessen.
+       * last_seen sprang nach zehn Minuten auf -1 ("nie gesehen"), weil die
+         Sichtung eines konfigurierten Tags aus dem Zwischenspeicher fiel.
+         Konfigurierte Tags verfallen nicht mehr; zusaetzlich gibt es
+         last_seen_ts als Zeitstempel.
+       * Der HTTP-Weg verwarf Zustandswechsel waehrend der 60-Sekunden-Sperre
+         endgueltig. Jetzt wird der Sollwert gemerkt und wiederholt - und der
+         HTTP-Weg traegt dieselben Werte wie MQTT.
+       * preupgrade.sh konnte den laufenden Dienst ohne PID-Datei nicht
+         finden: das Suchmuster hiess ble_scanner.py, der Dienst
+         ble_scanner_ng.py. Gemessen: null Treffer.
+       * Nach einem Update startete den Dienst niemand wieder. postupgrade.sh
+         tut es jetzt - aber nur, wenn er vorher lief.
+       * Der Aufraeumer entkoppelte gekoppelte Fremdgeraete (RemoveDevice
+         loescht bei einem gekoppelten Geraet die Kopplung). Paired, Trusted
+         und Connected werden jetzt verschont.
+       * Zurueckbehaltene Themen entfernter oder abgehakter Tags blieben fuer
+         immer im Broker stehen. Sie werden jetzt geloescht.
+       * Das Protokoll wuchs unbegrenzt auf einer Ramdisk und wurde von zwei
+         Schreibern zugleich gefuellt. Jetzt eine Kappung und ein Schreiber.
+       * Die Fassungsnummer stand an drei Stellen verschieden. Sie steht
+         jetzt an einer: postinstall.sh schreibt sie nach fassung.txt.
+       * uninstall/uninstall riet einen falschen Ordnernamen und liess die
+         Zweitschrift der Konfiguration liegen - eine Anwesenheitsliste des
+         Haushalts, die eine spaetere Neuinstallation ungefragt zurueckholte.
+       * Die Loxone-Vorlage war der geerbte Stand: ohne Info templateType,
+         ohne Unit, ohne HintText, mit pauschalen Grenzen und mit einem
+         Texteingang. Jetzt auf dem Stand der massgeblichen Ausfuhr.
+       * Die Oberflaeche bog Eingaben stillschweigend auf die VORGABE zurecht.
+         Jetzt werden Beanstandungen gesammelt und angezeigt, und der
+         bisherige Wert bleibt stehen.
+       * Der Reiter Test war einsprachig deutsch (null Sprachaufrufe). Beide
+         Sprachdateien entstehen jetzt aus einer Tabelle.
+       * Die Konfigurations-Neueinlesung uebernahm Themenpraefix, Adapter und
+         den MQTT-Schalter nicht, behauptete im Protokoll aber das Gegenteil.
+       * Zeitrechnung auf monotone Uhr umgestellt, damit ein NTP-Sprung nicht
+         alle Geraete als anwesend erscheinen laesst.
 
-       Aus demselben Grund raeumt uninstall/uninstall nur noch die EIGENEN
-       Zustandsdateien weg. Bis 1.1.0 loeschte es auch /tmp/BLE-Scanner.loglevel
-       und /tmp/BLE-Scanner.daemon.pid - Rueckstaende der Originalfassung. Das
-       war richtig, solange diese Fortfuehrung das Original ersetzte; jetzt
-       waere es ein Eingriff in eine fremde, weiterlaufende Installation.
+       NEU
+       * Ereignisgesteuerter Betrieb ueber PropertiesChanged (python3-gi war
+         seit jeher Abhaengigkeit und wurde nie benutzt), mit Sicherungsabfrage
+         und Rueckfall auf den Abfragebetrieb.
+       * Glaettung der Signalstaerke, Hysterese der Signalstufe,
+         Ankunfts-Entprellung und Mindest-Signalstaerke.
+       * Wachhund: erkennt, wenn gar nichts mehr ankommt, und setzt Suche und
+         Adapter in Stufen neu auf.
+       * Adresstyp je Geraet (fest, statisch zufaellig, wechselnd) - der
+         haeufigste Anwenderfehler wird dort abgefangen, wo er entsteht.
+       * Werbedaten dekodieren: iBeacon, Eddystone, ATC/pvvx, RuuviTag.
+       * Entfernungsschaetzung mit Kalibrierhilfe.
+       * Batteriestand aus den Werbedaten und, je Tag einschaltbar, ueber GATT.
+       * Verlauf von Kommen und Gehen, daraus eine Empfehlung fuer die
+         Abwesenheitszeit; eigener Reiter.
+       * Einstellungen je Tag, Themen-Alias und Personen (mehrere Tags, ein
+         Mensch).
+       * Mehrere Scanner: eigener Themenzweig je Scanner und Raumzuordnung
+         mit Hysterese und Ausgleichswert.
+       * Eigener Reiter MQTT mit eigenem Speicher-Handler, Live-Ansicht der
+         Kacheln, Selbstpruefung im Reiter Test.
+       * Identitaet ueber eine iBeacon-Kennung statt ueber die MAC.
+
+       BEWUSST NICHT UMGESETZT
+       * org.bluez.AdvertisementMonitorManager1. Verfuegbarkeit haengt an der
+         BlueZ-Fassung und an einer herstellerspezifischen Erweiterung des
+         Chips; ob es sich mit einer parallelen StartDiscovery vertraegt, ist
+         offen. Alle drei Punkte sind zu messen, bevor gebaut wird.
+       * systemctl restart bluetooth im Wachhund. Das braeuchte eine
+         sudo-Regel, also eine systemweite Rechteaenderung durch ein Plugin.
+       * Entschluesselung originaler Xiaomi-Mi-Beacon-Pakete.
 
 Die urheberrechtliche Nennung des Originalautors steht weiterhin in dieser
 Datei, im README, in der Hilfeseite und im Kopf der Python-Dateien.

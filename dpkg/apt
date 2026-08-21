@@ -1,15 +1,20 @@
 # These packages will be installed by apt-get -y install PACKAGENAME
 # One line per package, use exact packagename as you would do for apt-get.
 #
-# Der Scanner spricht BlueZ ueber D-Bus an. Alle drei Pakete sind auf
+# Der Scanner spricht BlueZ ueber D-Bus an. Alle vier Pakete sind auf
 # LoxBerry 3 und 4 bereits im Grundsystem - sie stehen hier nur, damit die
 # Installation auf einem abgespeckten System nicht stillschweigend scheitert.
+#
+# python3-gi wurde bis 1.2.10 verlangt, geprueft - und nie benutzt. Seit
+# 1.3.0 traegt es den Signalbetrieb: die GLib-Hauptschleife, ueber die BlueZ
+# jede Aenderung meldet, statt dass der Dienst getaktet nachfragt. Fehlt das
+# Paket, faellt der Dienst auf den Abfragebetrieb zurueck und sagt es im
+# Protokoll.
 #
 # Die Originalfassung verlangte hier python, python-pip, python-dev und
 # python-bluez. Diese Python-2-Pakete gibt es auf Bookworm und Trixie nicht
 # mehr; die Installation des Plugins brach damit ab. raspberrypi-sys-mods und
-# pi-bluetooth waren zudem Raspberry-Pi-spezifisch, obwohl das Plugin sich als
-# "raspberry,x86" auswies.
+# pi-bluetooth waren zudem Raspberry-Pi-spezifisch.
 bluez
 python3-dbus
 python3-gi

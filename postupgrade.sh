@@ -6,71 +6,83 @@ PTEMPDIR=$1   # First argument is temp folder during install
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 PVERSION=$4   # Forth argument is Plugin version
-#LBHOMEDIR=$5 # Comes from /etc/environment now. Fifth argument is
-              # Base folder of LoxBerry
+#LBHOMEDIR=$5 # Comes from /etc/environment now.
 
-# Von den Pfadvariablen der LoxBerry-Vorlage sind nur die uebrig, die
-# wirklich gebraucht werden. PCGI, PHTML, PTEMPL, PSBIN und PBIN wurden
-# zugewiesen und nie gelesen.
 PDATA=$LBPDATA/$PDIR
-PLOG=$LBPLOG/$PDIR # Note! This is stored on a Ramdisk now!
+PLOG=$LBPLOG/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
+PBIN=$LBPBIN/$PDIR
 
-# Die Sicherung liegt seit dem 10.08.2026 unter data/ statt unter /tmp: /tmp
-# ist auf dem LoxBerry eine Ramdisk und ausserdem fuer jeden lesbar.
 SICHER="$PDATA/upgrade_sicherung"
 
+# --- Konfiguration zurueckspielen -------------------------------------------
+#
+# Der Installer kopiert config/* aus dem Archiv ueber config/plugins/<ordner>
+# und ueberschreibt dabei die Datei des Nutzers. Hier wird sie zurueckgeholt.
 if [ -d "$SICHER" ]; then
-    echo "<INFO> Copy back existing config files $SICHER/ -> $PCONFIG/"
-    mkdir -p "$PCONFIG" 2>/dev/null
-    cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null
-else
-    echo "<INFO> Keine Sicherung vorhanden - offenbar eine Erstinstallation."
+    echo "<INFO> Restoring config files $SICHER/ -> $PCONFIG/"
+    mkdir -p "$PCONFIG"
+    cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null && echo "<OK> Konfiguration zurueckgespielt."
+    rm -rf "$SICHER" 2>/dev/null
 fi
 
-# Eigentuemer richtigstellen - das fehlte bis 1.1.0.
-#
-# LoxBerry fuehrt dieses Skript als root aus. cp uebernimmt den Eigentuemer
-# des Kopierenden, also root. Die Oberflaeche laeuft als loxberry: sie konnte
-# ble_scanner_ng.cfg danach LESEN (0644), aber nicht mehr schreiben. Wer nach
-# einem Update Tags anhakte und speicherte, bekam nichts gespeichert -
-# file_put_contents scheitert mit @ unterdrueckt, also lautlos.
+# Eigentuemer richtigstellen. Das Update laeuft als root; alles, was dabei
+# entsteht, gehoerte danach root - und die Oberflaeche laeuft als loxberry
+# und koennte die Konfiguration nicht mehr schreiben. Bis 1.1.0 fehlte das
+# ganz: wer Tags anhakte und speicherte, bekam nichts gespeichert, und das
+# Schreiben ist mit @ unterdrueckt, also lautlos.
 if id loxberry >/dev/null 2>&1; then
-    chown -R loxberry:loxberry "$PCONFIG" 2>/dev/null
-    [ -d "$PDATA" ] && chown -R loxberry:loxberry "$PDATA" 2>/dev/null
-    [ -d "$PLOG" ] && chown -R loxberry:loxberry "$PLOG" 2>/dev/null
-    echo "<OK> Eigentuemer der Konfiguration auf loxberry gesetzt."
-else
-    echo "<WARNING> Benutzer loxberry nicht gefunden - Eigentuemer nicht geaendert."
+    for d in "$PCONFIG" "$PDATA" "$PLOG"; do
+        [ -d "$d" ] && chown -R loxberry:loxberry "$d" 2>/dev/null
+    done
+    echo "<OK> Eigentuemer der Konfigurations-, Daten- und Protokollordner: loxberry."
 fi
 
-echo "<INFO> Remove backup folder $SICHER"
-rm -rf "$SICHER"
+chmod 755 "$PBIN"/*.py 2>/dev/null
 
-# Exit with Status 0
+# --- Fassungsnummer an EINE Stelle schreiben --------------------------------
+#
+# bl_common.py und bl_lib.php lesen sie von hier. Bis 1.2.10 stand sie an
+# drei Stellen verschieden im Archiv (plugin.cfg 1.2.10, release.cfg 1.2.9,
+# bl_common.py 1.2.0), und die aus bl_common.py landete im Protokoll.
+if [ -n "$PVERSION" ]; then
+    mkdir -p "$PCONFIG" 2>/dev/null
+    printf '%s\n' "$PVERSION" > "$PCONFIG/fassung.txt"
+    chown loxberry:loxberry "$PCONFIG/fassung.txt" 2>/dev/null
+    chmod 0644 "$PCONFIG/fassung.txt" 2>/dev/null
+    echo "<OK> Fassung $PVERSION vermerkt."
+fi
 
-# --- BLE-Scanner NG ---------------------------------------------------------
-# Ausfuehrbar machen. Ohne das startet der Daemon beim Systemstart nicht.
-chmod 755 "$LBPBIN/$PDIR"/*.py 2>/dev/null
+# --- Den Dienst wieder starten ----------------------------------------------
+#
+# DAS FEHLTE BIS 1.2.10 VOLLSTAENDIG. preupgrade.sh hielt den Dienst an, und
+# niemand startete ihn wieder: kein nohup, kein Aufruf von daemon, und
+# REBOOT=false. Nach jedem Auto-Update war die Anwesenheitserkennung tot, bis
+# jemand in der Oberflaeche speicherte oder den LoxBerry neu startete. Im
+# Broker stand dann server/online=0, die Tag-Themen behielten aber ihren
+# zurueckbehaltenen Wert - in Loxone sah das aus wie "alle noch da".
+#
+# Gestartet wird nur, wenn er VORHER lief (Merker aus preupgrade.sh) - sonst
+# liefe ein bewusst angehaltener Dienst nach jedem Update wieder an.
+if [ -f "$PDATA/lief_vor_update" ]; then
+    rm -f "$PDATA/lief_vor_update"
+    mkdir -p "$PLOG" "$PDATA" 2>/dev/null
+    chown loxberry:loxberry "$PLOG" "$PDATA" 2>/dev/null
+    su loxberry -c "nohup '$PBIN/ble_scanner_ng.py' >> '$PLOG/ble_scanner_ng.log' 2>&1 & echo \$! > '$PDATA/dienst.pid'"
+    chown loxberry:loxberry "$PDATA/dienst.pid" 2>/dev/null
+    sleep 2
+    if [ -s "$PDATA/dienst.pid" ] && kill -0 "$(cat "$PDATA/dienst.pid")" 2>/dev/null; then
+        echo "<OK> Der Dienst laeuft wieder (PID $(cat "$PDATA/dienst.pid"))."
+    else
+        echo "<WARNING> Der Dienst liess sich nicht wieder starten."
+        echo "<WARNING> Nachsehen im Reiter Logdateien, dann im Reiter Einstellungen"
+        echo "<WARNING> auf 'Dienst starten' druecken."
+    fi
+else
+    echo "<INFO> Der Dienst lief vor dem Update nicht und wurde nicht gestartet."
+fi
 
-# Der Dienst laeuft als loxberry und spricht BlueZ ueber D-Bus an. BlueZ
-# erlaubt das Mitgliedern der Gruppe bluetooth.
-#
-# BEWUSST KEINE eigene D-Bus-Richtlinie unter /etc/dbus-1/system.d/.
-#
-# BlueZ bringt seine Richtlinie selbst mit, und darin steht wortwoertlich:
-#
-#     <!-- allow users of bluetooth group to communicate -->
-#     <policy group="bluetooth">
-#       <allow send_destination="org.bluez"/>
-#     </policy>
-#
-# (nachgesehen in bluez 5.64, Datei /etc/dbus-1/system.d/bluetooth.conf). Die
-# Gruppe IST der vorgesehene Weg - die Behauptung, das reiche seit Bookworm
-# nicht mehr, trifft nicht zu. Eine eigene Datei dorthin zu legen waere eine
-# systemweite Rechteaenderung durch ein Plugin, sie waere doppelt, und beim
-# naechsten BlueZ-Update stuende sie neben der mitgelieferten. Deshalb wird
-# hier nur die Gruppe gesetzt - und geprueft, ob die Richtlinie sie kennt.
+# --- Gruppe und Module pruefen ----------------------------------------------
 if getent group bluetooth >/dev/null 2>&1; then
     if id -nG loxberry 2>/dev/null | tr ' ' '\n' | grep -qx bluetooth; then
         echo "<OK> Benutzer loxberry ist in der Gruppe bluetooth."
@@ -82,31 +94,10 @@ if getent group bluetooth >/dev/null 2>&1; then
         echo "<INFO> Webservers - dann meldet der Reiter Test 'Zugriff abgewiesen'."
         echo "<INFO> Abhilfe: LoxBerry einmal neu starten."
     else
-        echo "<WARNING> Gruppenzuordnung bluetooth konnte nicht gesetzt werden (nicht als root?)."
-        echo "<WARNING> Nachholen mit: sudo usermod -a -G bluetooth loxberry && sudo reboot"
+        echo "<WARNING> Gruppenzuordnung bluetooth konnte nicht gesetzt werden."
     fi
-else
-    echo "<WARNING> Gruppe bluetooth nicht vorhanden - ist bluez installiert?"
 fi
 
-# Kennt die mitgelieferte Richtlinie die Gruppe wirklich? Wenn nicht, hilft
-# keine Gruppenzuordnung, und der Anwender soll das erfahren, bevor er
-# stundenlang am Dongle sucht.
-BTCONF=""
-for k in /etc/dbus-1/system.d/bluetooth.conf /usr/share/dbus-1/system.d/bluetooth.conf; do
-    [ -f "$k" ] && BTCONF="$k" && break
-done
-if [ -z "$BTCONF" ]; then
-    echo "<WARNING> Keine D-Bus-Richtlinie fuer BlueZ gefunden. Ist bluez vollstaendig installiert?"
-elif grep -q 'group="bluetooth"' "$BTCONF"; then
-    echo "<OK> Die D-Bus-Richtlinie ($BTCONF) erlaubt der Gruppe bluetooth den Zugriff."
-else
-    echo "<WARNING> In $BTCONF steht keine Regel fuer die Gruppe bluetooth."
-    echo "<WARNING> Dann genuegt die Gruppenzuordnung allein nicht. Der Reiter Test"
-    echo "<WARNING> zeigt in diesem Fall 'Zugriff abgewiesen' mit dem genauen Grund."
-fi
-
-# Pruefen, ob die Bausteine wirklich da sind.
 for modul in dbus gi paho.mqtt.client; do
     if python3 -c "import $modul" >/dev/null 2>&1; then
         echo "<OK> Python-Modul $modul vorhanden."
@@ -114,13 +105,5 @@ for modul in dbus gi paho.mqtt.client; do
         echo "<WARNING> Python-Modul $modul fehlt."
     fi
 done
-if command -v bluetoothctl >/dev/null 2>&1; then
-    echo "<OK> bluez ist vorhanden."
-else
-    echo "<WARNING> bluez fehlt. Nachinstallieren: sudo apt-get install -y bluez"
-fi
-
-echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"
-echo "<INFO> gefundene Tags anhaken und speichern."
 
 exit 0

@@ -4,41 +4,53 @@
 #
 # Die Originalfassung startete hier den Bluetooth-Stapel von Hand: rsyslog-Regeln
 # schreiben, hciuart.service bis zu dreimal neu starten, "hciconfig hci0 up"
-# aufrufen und im Fehlerfall wiederholen - dazu zwei Endlosschleifen, die
-# alle 15 Sekunden mit sed in /var/log/syslog und /var/log/kern.log
-# herumschnitten. Das entfaellt vollstaendig: der Dienst schaltet den Adapter
-# ueber die D-Bus-Eigenschaft "Powered" selbst ein, und hciconfig wird nicht
-# mehr gebraucht.
+# aufrufen - dazu zwei Endlosschleifen, die alle 15 Sekunden mit sed in
+# /var/log/syslog und /var/log/kern.log herumschnitten. Das entfaellt
+# vollstaendig: der Dienst schaltet den Adapter ueber die D-Bus-Eigenschaft
+# "Powered" selbst ein.
 
 pluginname=REPLACELBPPLUGINDIR
 pluginbindir=REPLACELBPBINDIR
 logdir=REPLACELBPLOGDIR
-log=$logdir/ble_scanner_ng.log
-
-if [ -x /usr/bin/logger ]; then
-    /usr/bin/logger "loxberry-plugin-$pluginname - Starte BLE-Scanner NG"
-fi
-
 datadir=REPLACELBPDATADIR
+log=$logdir/ble_scanner_ng.log
 piddatei=$datadir/dienst.pid
 
+melde() {
+    [ -x /usr/bin/logger ] && /usr/bin/logger "loxberry-plugin-$pluginname - $1"
+}
+
+melde "Starte BLE-Scanner NG"
+
+# Verzeichnisse anlegen UND dem Benutzer geben, der gleich hineinschreibt.
+#
+# Bis 1.2.10 lief hier nur ein mkdir als root. Fehlte eines der beiden
+# Verzeichnisse - das Protokollverzeichnis liegt auf einer Ramdisk, ist nach
+# einem Neustart also wirklich weg -, gehoerte es danach root:root, und das
+# unmittelbar folgende "su loxberry" konnte weder das Protokoll noch die
+# PID-Datei schreiben. Der Dienst startete dann gar nicht, und die ganze
+# Zeile war mit >/dev/null 2>&1 stummgeschaltet: keine einzige Zeile
+# irgendwo, die das erklaert haette.
 mkdir -p "$logdir" "$datadir" 2>/dev/null
+chown loxberry:loxberry "$logdir" "$datadir" 2>/dev/null
 
 # Der Dienst braucht keine Rootrechte: BlueZ erlaubt Mitgliedern der Gruppe
 # bluetooth ueber D-Bus das Suchen. Deshalb als loxberry starten.
 #
-# Die Prozessnummer wird in dieselbe Datei geschrieben, die auch die
-# Oberflaeche benutzt. Bis 1.1.0 fehlte das hier: nach einem Neustart des
-# LoxBerry lief der Dienst, aber ohne PID-Datei - die Oberflaeche fiel dann
-# auf die Suche nach dem Namen zurueck, und die trifft auch einen Editor, der
-# ble_scanner_ng.py geoeffnet hat.
-#
 # echo $! muss INNERHALB der su-Zeichenkette stehen. Stuende es draussen,
-# waere es die Nummer des su-Prozesses, nicht die des Dienstes - und der su
-# beendet sich sofort.
-su loxberry -c "nohup '$pluginbindir/ble_scanner_ng.py' >> '$log' 2>&1 & echo \$! > '$piddatei'" >/dev/null 2>&1
+# waere es die Nummer des su-Prozesses, nicht die des Dienstes.
+su loxberry -c "nohup '$pluginbindir/ble_scanner_ng.py' >> '$log' 2>&1 & echo \$! > '$piddatei'"
+start_rc=$?
 
-# Die Datei gehoert loxberry, damit die Oberflaeche sie spaeter aufraeumen kann.
 chown loxberry:loxberry "$piddatei" 2>/dev/null
+
+# Nachsehen, ob es geklappt hat, und es SAGEN. Ein stummer Fehlstart ist der
+# unangenehmste: nach dem Neustart laeuft nichts, und es steht nirgends warum.
+sleep 2
+if [ -s "$piddatei" ] && kill -0 "$(cat "$piddatei")" 2>/dev/null; then
+    melde "BLE-Scanner NG laeuft (PID $(cat "$piddatei"))"
+else
+    melde "BLE-Scanner NG konnte nicht gestartet werden (Rueckgabewert $start_rc) - siehe $log"
+fi
 
 exit 0
