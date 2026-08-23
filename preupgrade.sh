@@ -5,6 +5,13 @@ COMMAND=$0    # Zero argument is shell command
 PTEMPDIR=$1   # First argument is temp folder during install
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
+# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
+LBHOMEDIR="${LBHOMEDIR:-$5}"
+LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
+# sudo -n -u loxberry setzt die Umgebung zurueck - ohne diesen
+# Rueckfall zeigte $LBPDATA ins Nichts und der Pfad auf /<ordner>.
+LBPDATA="${LBPDATA:-$5/data/plugins}"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
@@ -83,7 +90,16 @@ fi
 # LoxBerry eine Ramdisk, und /tmp ist fuer jeden lesbar - in
 # ble_scanner_ng.cfg stehen MAC-Adressen und die Namen der ueberwachten
 # Personen, also eine Anwesenheitsliste des Haushalts.
-SICHER="$PDATA/upgrade_sicherung"
+# Die Sicherung liegt NEBEN dem Ordner, nicht darin. Gemessen an
+# sbin/plugininstall.pl (Zweig master, 23.08.2026): der Installer ruft
+# &purge_installation nicht nur beim Deinstallieren, sondern auch im
+# Upgrade-Zweig (:886), und deren Rumpf loescht ohne jede Bedingung
+# (:1629 ff.) config/plugins/<x>/, bin/plugins/<x>/, data/plugins/<x>/,
+# templates/plugins/<x>/ und beide webfrontend/-Ordner. Eine Sicherung IN
+# data/plugins/<x>/ wird also von genau dem Schritt vernichtet, den sie
+# ueberdauern soll. Der Punkt im Namen ist der ganze Unterschied:
+# "rm -rf .../<x>/" trifft den Nachbarn "<x>.upgrade_sicherung" nicht.
+SICHER="$PDATA.upgrade_sicherung"
 
 echo "<INFO> Creating backup folder for upgrading $SICHER"
 rm -rf "$SICHER" 2>/dev/null
@@ -93,6 +109,10 @@ chmod 0700 "$SICHER" 2>/dev/null
 echo "<INFO> Backing up existing config files $PCONFIG/ -> $SICHER/"
 cp -a "$PCONFIG/." "$SICHER/" 2>/dev/null \
     && echo "<OK> Konfiguration gesichert (Rechte 0700)."
+# verlauf.csv waechst ueber Wochen und ergibt sich nicht neu - es liegt
+# unter data/, und data/plugins/<x>/ raeumt der Installer bei jedem
+# Update ab (plugininstall.pl :886 -> :1631).
+[ -f "$PDATA/verlauf.csv" ] && cp -p "$PDATA/verlauf.csv" "$SICHER/verlauf.csv" 2>/dev/null
 
 # ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
 # Zweitschrift NEBEN den Konfigurationsordner, zusaetzlich zur bisherigen

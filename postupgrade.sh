@@ -5,6 +5,14 @@ COMMAND=$0    # Zero argument is shell command
 PTEMPDIR=$1   # First argument is temp folder during install
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
+# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
+LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
+LBPLOG="${LBPLOG:-$5/log/plugins}"
+LBPBIN="${LBPBIN:-$5/bin/plugins}"
+# sudo -n -u loxberry setzt die Umgebung zurueck - ohne diesen
+# Rueckfall zeigte $LBPDATA ins Nichts und der Pfad auf /<ordner>.
+LBPDATA="${LBPDATA:-$5/data/plugins}"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
@@ -13,13 +21,25 @@ PLOG=$LBPLOG/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
 PBIN=$LBPBIN/$PDIR
 
-SICHER="$PDATA/upgrade_sicherung"
+SICHER="$PDATA.upgrade_sicherung"
 
 # --- Konfiguration zurueckspielen -------------------------------------------
 #
 # Der Installer kopiert config/* aus dem Archiv ueber config/plugins/<ordner>
 # und ueberschreibt dabei die Datei des Nutzers. Hier wird sie zurueckgeholt.
 if [ -d "$SICHER" ]; then
+    # ZUERST der Verlauf: er gehoert unter data/, nicht nach config/. Die
+    # pauschale Kopie unten schiebt sonst alles in den Konfigordner.
+    # verlauf.csv waechst ueber Wochen und ergibt sich nicht neu; data/ raeumt
+    # der Installer bei jedem Update ab (plugininstall.pl :886 -> :1631).
+    if [ -f "$SICHER/verlauf.csv" ]; then
+        mkdir -p "$PDATA" 2>/dev/null
+        if [ ! -s "$PDATA/verlauf.csv" ]; then
+            cp -p "$SICHER/verlauf.csv" "$PDATA/verlauf.csv" 2>/dev/null \
+                && echo "<OK> verlauf.csv ueber das Update gerettet."
+        fi
+        rm -f "$SICHER/verlauf.csv" 2>/dev/null
+    fi
     echo "<INFO> Restoring config files $SICHER/ -> $PCONFIG/"
     mkdir -p "$PCONFIG"
     cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null && echo "<OK> Konfiguration zurueckgespielt."
