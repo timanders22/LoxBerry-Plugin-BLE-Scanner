@@ -188,6 +188,23 @@ function bl_tags_aus_post(&$mangel)
     return $tags;
 }
 
+/* ==================================================================
+ * DIE HANDLER STEHEN VOR lbheader() - DAS IST BAUVORSCHRIFT
+ * ==================================================================
+ *
+ * Stand der Kopf davor, war er beim Aufruf von header() schon
+ * geschrieben - "Cannot modify header information", und der Knopf
+ * "Einstellungen sichern" lieferte eine Seite mit angehaengtem JSON
+ * statt einer Datei.
+ *
+ * Am PHP-CLI ist das unsichtbar: header() ist dort wirkungslos und
+ * headers_sent() immer falsch. Und wer OHNE gueltiges Formularmerkmal
+ * misst, wird vom Wachposten abgewiesen, bevor der Handler anlaeuft.
+ * Beides hat den Fehler lange verdeckt.
+ *
+ * Reihenfolge: Bibliothek, Konfiguration, Wachposten, Reiterwahl,
+ * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
+ * ================================================================== */
 /* ============ Loxone-Vorlage herunterladen ============ */
 if ($bl_ist_post && isset($_POST['download'])) {
     $aktive = array_filter($bl_tags, function ($t) { return $t['aktiv'] === '1'; });
@@ -393,10 +410,6 @@ $bl_zustand = bl_zustaende();
 $bl_themen_tag = array_merge(bl_status_themen(), bl_zusatzthemen($bl_cfg));
 $bl_verlauf = bl_verlauf_lesen(24);
 
-if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader('BLE-Scanner NG',
-        'https://github.com/timanders22/LoxBerry-Plugin-BLE-Scanner', 'help.html');
-}
 
 /* ---------------- Einstellungen sichern ----------------
  *
@@ -443,6 +456,12 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
             $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
         }
     }
+}
+
+
+if (class_exists('LBWeb', false)) {
+    LBWeb::lbheader('BLE-Scanner NG',
+        'https://github.com/timanders22/LoxBerry-Plugin-BLE-Scanner', 'help.html');
 }
 
 ?>
