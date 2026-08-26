@@ -397,6 +397,54 @@ if (class_exists('LBWeb', false)) {
     LBWeb::lbheader('BLE-Scanner NG',
         'https://github.com/timanders22/LoxBerry-Plugin-BLE-Scanner', 'help.html');
 }
+
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
+ * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
+ * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
+ * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
+if ($bl_ist_post && isset($_POST['bl_sichern'])) {
+    $bl_js = json_encode(bl_cfg(),
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($bl_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="ble_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        echo $bl_js;
+        exit;
+    }
+    $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
+}
+
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
+ * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
+if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
+    if (!isset($_FILES['bl_sicherung']) || !is_array($_FILES['bl_sicherung'])
+        || !isset($_FILES['bl_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['bl_sicherung']['tmp_name'])) {
+        $bl_error = bl_t('TEXT.SICH_KEINE_DATEI');
+    } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
+        $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
+    } else {
+        list($bl_neu, $bl_mangel, $bl_n) = bl_sicherung_lesen(
+            (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']));
+        if ($bl_neu === null) {
+            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
+             * nichts. */
+            $bl_error = bl_t('TEXT.SICH_ABGELEHNT') . ' '
+                            . implode(' ', $bl_mangel);
+        } elseif (bl_config_write($bl_neu)) {
+            $bl_saved = true; $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n);
+        } else {
+            $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
+        }
+    }
+}
+
 ?>
 <style>
 /* Hausstandard - wortgleich aus VORLAGE_hausstandard.css.html uebernommen. */
@@ -754,6 +802,25 @@ if (class_exists('LBWeb', false)) {
 </div>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.SPEICHERN_HILFE')) ?></p>
 </form>
+
+<h2><?= bl_t('TEXT.H_SICHERUNG') ?></h2>
+<div class="sm-hinweis"><?= bl_t('TEXT.SICH_ERKLAERUNG') ?></div>
+<div class="sm-warnung"><?= bl_t('TEXT.SICH_WARNUNG') ?></div>
+<div class="sm-knopfreihe">
+  <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
+       exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
+       Wer beides in ein Formular legt, bekommt entweder keinen Upload oder
+       einen Download, der das Speichern verschluckt. -->
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="bl_sichern" value="1"><?= bl_t('TEXT.K_SICHERN') ?></button>
+  </form>
+  <form action="index.php" method="post" enctype="multipart/form-data">
+    <input data-role="none" type="hidden" name="activetab" value="tab-settings">
+    <input data-role="none" type="file" name="bl_sicherung" accept=".json">
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="bl_zurueck" value="1"><?= bl_t('TEXT.K_ZURUECK') ?></button>
+  </form>
+</div>
 </div>
 
 <!-- ================= Reiter: MQTT ================= -->
@@ -794,7 +861,7 @@ if (class_exists('LBWeb', false)) {
 </table>
 
 <h2><?= bl_e(bl_t('TEXT.ABO_EINTRAGEN')) ?></h2>
-<div class="sm-step"><b><?= bl_e(bl_t('TEXT.ABO_PFLICHT')) ?></b><br><br>
+<div class="sm-step"><b><?= bl_abo_text() ?></b><br><br>
 <?= bl_e(bl_t('TEXT.ABO_WO')) ?>
 <div class="sm-mono" style="margin-top:6px;padding:8px;border:1px solid #ccc;background:#f4f4f4;"><?= bl_e($bl_praefix) ?>/#</div>
 </div>
@@ -834,7 +901,7 @@ if (class_exists('LBWeb', false)) {
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOX_EINLEITUNG')) ?></p>
 
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S1')) ?></b><br><br><?= bl_e(bl_t('LOX.S1_TEXT')) ?></div>
-<div class="sm-step"><b><?= bl_e(bl_t('LOX.S2')) ?></b><br><br><?= bl_e(bl_t('LOX.S2_TEXT')) ?>
+<div class="sm-step"><b><?= bl_e(bl_t('LOX.S2')) ?></b><br><br><?= bl_abo_text() ?>
 <div class="sm-mono" style="margin-top:6px;padding:8px;border:1px solid #ccc;background:#f4f4f4;"><?= bl_e($bl_praefix) ?>/#</div></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S3')) ?></b><br><br><?= bl_e(bl_t('LOX.S3_TEXT')) ?></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S4')) ?></b><br><br><?= bl_e(bl_t('LOX.S4_TEXT')) ?></div>
