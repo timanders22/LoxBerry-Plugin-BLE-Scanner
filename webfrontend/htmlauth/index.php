@@ -31,7 +31,7 @@ if ($bl_home !== '' && file_exists($bl_home . '/libs/phplib/loxberry_system.php'
 $bl_saved   = false;
 $bl_hinweis = '';
 $bl_error   = '';
-$bl_mangel  = array();   // gesammelte Beanstandungen
+$bl_fehler  = array();   // gesammelte Beanstandungen
 
 /* ---------------------------------------------------------------- *
  * Der Wachposten - EIN Posten, vor allen Handlern.
@@ -47,7 +47,7 @@ if ($bl_wache !== '') {
     if ($bl_reiter_merk !== null) {
         $_POST['activetab'] = $bl_reiter_merk;
     }
-    $bl_mangel[] = $bl_wache;
+    $bl_fehler[] = $bl_wache;
 }
 
 $bl_such    = null;
@@ -256,7 +256,7 @@ if ($bl_ist_post && isset($_POST['verlauf_download'])) {
 /* ============ Suchlauf ============ */
 if ($bl_ist_post && isset($_POST['suchen'])) {
     // Die getippten Zeilen NICHT verlieren.
-    $eingetippt = bl_tags_aus_post($bl_mangel);
+    $eingetippt = bl_tags_aus_post($bl_fehler);
     if ($eingetippt) {
         $bl_tags = $eingetippt;
     }
@@ -300,56 +300,56 @@ if ($bl_ist_post && isset($_POST['save'])) {
     if (preg_match('/^hci[0-9]+$/', $adapter)) {
         $neu['adapter'] = $adapter;
     } else {
-        $bl_mangel[] = sprintf(bl_t('MANGEL.ADAPTER'), $adapter, $bl_cfg['adapter']);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.ADAPTER'), $adapter, $bl_cfg['adapter']);
     }
 
     $betriebsart = isset($_POST['betriebsart']) ? (string) $_POST['betriebsart'] : '';
     if (in_array($betriebsart, array('signal', 'abfrage'), true)) {
         $neu['betriebsart'] = $betriebsart;
     } else {
-        $bl_mangel[] = sprintf(bl_t('MANGEL.BETRIEBSART'), $betriebsart);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.BETRIEBSART'), $betriebsart);
     }
 
     $neu['http_push']   = isset($_POST['http_push']) ? '1' : '0';
     $neu['loxberry_id'] = bl_saubere_eingabe(isset($_POST['loxberry_id']) ? $_POST['loxberry_id'] : '');
 
-    $neu['intervall']          = bl_zahl($_POST['intervall'] ?? '', $bl_cfg['intervall'], 2, 600, bl_t('FELD.INTERVALL'), $bl_mangel);
-    $neu['abwesenheit_nach']   = bl_zahl($_POST['abwesenheit_nach'] ?? '', $bl_cfg['abwesenheit_nach'], 5, 3600, bl_t('FELD.ABWESEND'), $bl_mangel);
-    $neu['aktualisierung']     = bl_zahl($_POST['aktualisierung'] ?? '', $bl_cfg['aktualisierung'], 5, 86400, bl_t('FELD.AKTUALISIERUNG'), $bl_mangel);
-    $neu['rssi_nah']           = bl_zahl($_POST['rssi_nah'] ?? '', $bl_cfg['rssi_nah'], -120, 0, bl_t('FELD.RSSI_NAH'), $bl_mangel);
-    $neu['rssi_mittel']        = bl_zahl($_POST['rssi_mittel'] ?? '', $bl_cfg['rssi_mittel'], -120, 0, bl_t('FELD.RSSI_MITTEL'), $bl_mangel);
-    $neu['rssi_minimum']       = bl_zahl($_POST['rssi_minimum'] ?? '', $bl_cfg['rssi_minimum'], -120, 0, bl_t('FELD.RSSI_MINIMUM'), $bl_mangel);
-    $neu['ankunft_sichtungen'] = bl_zahl($_POST['ankunft_sichtungen'] ?? '', $bl_cfg['ankunft_sichtungen'], 1, 20, bl_t('FELD.ANKUNFT'), $bl_mangel);
+    $neu['intervall']          = bl_zahl($_POST['intervall'] ?? '', $bl_cfg['intervall'], 2, 600, bl_t('FELD.INTERVALL'), $bl_fehler);
+    $neu['abwesenheit_nach']   = bl_zahl($_POST['abwesenheit_nach'] ?? '', $bl_cfg['abwesenheit_nach'], 5, 3600, bl_t('FELD.ABWESEND'), $bl_fehler);
+    $neu['aktualisierung']     = bl_zahl($_POST['aktualisierung'] ?? '', $bl_cfg['aktualisierung'], 5, 86400, bl_t('FELD.AKTUALISIERUNG'), $bl_fehler);
+    $neu['rssi_nah']           = bl_zahl($_POST['rssi_nah'] ?? '', $bl_cfg['rssi_nah'], -120, 0, bl_t('FELD.RSSI_NAH'), $bl_fehler);
+    $neu['rssi_mittel']        = bl_zahl($_POST['rssi_mittel'] ?? '', $bl_cfg['rssi_mittel'], -120, 0, bl_t('FELD.RSSI_MITTEL'), $bl_fehler);
+    $neu['rssi_minimum']       = bl_zahl($_POST['rssi_minimum'] ?? '', $bl_cfg['rssi_minimum'], -120, 0, bl_t('FELD.RSSI_MINIMUM'), $bl_fehler);
+    $neu['ankunft_sichtungen'] = bl_zahl($_POST['ankunft_sichtungen'] ?? '', $bl_cfg['ankunft_sichtungen'], 1, 20, bl_t('FELD.ANKUNFT'), $bl_fehler);
     $neu['glaettung']          = isset($_POST['glaettung']) ? '1' : '0';
-    $neu['glaettung_fenster']  = bl_zahl($_POST['glaettung_fenster'] ?? '', $bl_cfg['glaettung_fenster'], 1, 30, bl_t('FELD.FENSTER'), $bl_mangel);
-    $neu['hysterese_db']       = bl_zahl($_POST['hysterese_db'] ?? '', $bl_cfg['hysterese_db'], 0, 20, bl_t('FELD.HYSTERESE'), $bl_mangel);
+    $neu['glaettung_fenster']  = bl_zahl($_POST['glaettung_fenster'] ?? '', $bl_cfg['glaettung_fenster'], 1, 30, bl_t('FELD.FENSTER'), $bl_fehler);
+    $neu['hysterese_db']       = bl_zahl($_POST['hysterese_db'] ?? '', $bl_cfg['hysterese_db'], 0, 20, bl_t('FELD.HYSTERESE'), $bl_fehler);
     $neu['wachhund']           = isset($_POST['wachhund']) ? '1' : '0';
-    $neu['wachhund_stille']    = bl_zahl($_POST['wachhund_stille'] ?? '', $bl_cfg['wachhund_stille'], 60, 86400, bl_t('FELD.STILLE'), $bl_mangel);
-    $neu['discovery_rssi']     = bl_zahl($_POST['discovery_rssi'] ?? '', $bl_cfg['discovery_rssi'], -120, 0, bl_t('FELD.DISCOVERY_RSSI'), $bl_mangel);
-    $neu['log_kappung_kb']     = bl_zahl($_POST['log_kappung_kb'] ?? '', $bl_cfg['log_kappung_kb'], 16, 20000, bl_t('FELD.LOGKAPPUNG'), $bl_mangel);
+    $neu['wachhund_stille']    = bl_zahl($_POST['wachhund_stille'] ?? '', $bl_cfg['wachhund_stille'], 60, 86400, bl_t('FELD.STILLE'), $bl_fehler);
+    $neu['discovery_rssi']     = bl_zahl($_POST['discovery_rssi'] ?? '', $bl_cfg['discovery_rssi'], -120, 0, bl_t('FELD.DISCOVERY_RSSI'), $bl_fehler);
+    $neu['log_kappung_kb']     = bl_zahl($_POST['log_kappung_kb'] ?? '', $bl_cfg['log_kappung_kb'], 16, 20000, bl_t('FELD.LOGKAPPUNG'), $bl_fehler);
     $neu['ereignisse']         = isset($_POST['ereignisse']) ? '1' : '0';
-    $neu['ereignisse_tage']    = bl_zahl($_POST['ereignisse_tage'] ?? '', $bl_cfg['ereignisse_tage'], 1, 365, bl_t('FELD.EREIGNISTAGE'), $bl_mangel);
+    $neu['ereignisse_tage']    = bl_zahl($_POST['ereignisse_tage'] ?? '', $bl_cfg['ereignisse_tage'], 1, 365, bl_t('FELD.EREIGNISTAGE'), $bl_fehler);
     $neu['entfernung']         = isset($_POST['entfernung']) ? '1' : '0';
-    $neu['daempfung']          = bl_komma($_POST['daempfung'] ?? '', $bl_cfg['daempfung'], 1.5, 6.0, bl_t('FELD.DAEMPFUNG'), $bl_mangel);
+    $neu['daempfung']          = bl_komma($_POST['daempfung'] ?? '', $bl_cfg['daempfung'], 1.5, 6.0, bl_t('FELD.DAEMPFUNG'), $bl_fehler);
     $neu['beacon']             = isset($_POST['beacon']) ? '1' : '0';
     $neu['batterie']           = isset($_POST['batterie']) ? '1' : '0';
     $neu['scanner_themen']     = isset($_POST['scanner_themen']) ? '1' : '0';
     $neu['raum']               = isset($_POST['raum']) ? '1' : '0';
-    $neu['raum_hysterese_db']  = bl_zahl($_POST['raum_hysterese_db'] ?? '', $bl_cfg['raum_hysterese_db'], 0, 30, bl_t('FELD.RAUM_HYST'), $bl_mangel);
-    $neu['raum_ausgleich_db']  = bl_zahl($_POST['raum_ausgleich_db'] ?? '', $bl_cfg['raum_ausgleich_db'], -30, 30, bl_t('FELD.RAUM_AUSGLEICH'), $bl_mangel);
+    $neu['raum_hysterese_db']  = bl_zahl($_POST['raum_hysterese_db'] ?? '', $bl_cfg['raum_hysterese_db'], 0, 30, bl_t('FELD.RAUM_HYST'), $bl_fehler);
+    $neu['raum_ausgleich_db']  = bl_zahl($_POST['raum_ausgleich_db'] ?? '', $bl_cfg['raum_ausgleich_db'], -30, 30, bl_t('FELD.RAUM_AUSGLEICH'), $bl_fehler);
 
     $uhr = bl_saubere_eingabe($_POST['batterie_uhrzeit'] ?? '');
     if (preg_match('/^([01]?\d|2[0-3]):[0-5]\d$/', $uhr)) {
         $neu['batterie_uhrzeit'] = $uhr;
     } else {
-        $bl_mangel[] = sprintf(bl_t('MANGEL.UHRZEIT'), $uhr, $bl_cfg['batterie_uhrzeit']);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.UHRZEIT'), $uhr, $bl_cfg['batterie_uhrzeit']);
     }
 
     $sname = bl_saubere_eingabe($_POST['scanner_name'] ?? '');
     if ($sname === '' || preg_match('/^[A-Za-z0-9_-]{1,32}$/', $sname)) {
         $neu['scanner_name'] = $sname;
     } else {
-        $bl_mangel[] = sprintf(bl_t('MANGEL.SCANNERNAME'), $sname);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.SCANNERNAME'), $sname);
     }
 
     if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
@@ -357,10 +357,10 @@ if ($bl_ist_post && isset($_POST['save'])) {
         $tausch = $neu['rssi_nah'];
         $neu['rssi_nah'] = $neu['rssi_mittel'];
         $neu['rssi_mittel'] = $tausch;
-        $bl_mangel[] = bl_t('MANGEL.SCHWELLEN_GEDREHT');
+        $bl_fehler[] = bl_t('MANGEL.SCHWELLEN_GEDREHT');
     }
 
-    $tags = bl_tags_aus_post($bl_mangel);
+    $tags = bl_tags_aus_post($bl_fehler);
 
     if (bl_config_write($neu, $tags)) {
         $bl_saved = true;
@@ -388,12 +388,12 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
     $neu['mqtt'] = isset($_POST['mqtt']) ? '1' : '0';
     $praefix = bl_saubere_eingabe($_POST['themenpraefix'] ?? '');
     if ($praefix === '') {
-        $bl_mangel[] = bl_t('MANGEL.PRAEFIX_LEER');
+        $bl_fehler[] = bl_t('MANGEL.PRAEFIX_LEER');
     } elseif (!preg_match('/^[A-Za-z0-9_-]+$/', $praefix)) {
         // ABWEISEN, nicht filtern. Bis 1.2.10 wurde hier hart gefiltert:
         // aus "haus/keller etage" wurde "hauskelleretage", und das landete
         // danach in jeder angezeigten Adresse und im MQTT-Abo.
-        $bl_mangel[] = sprintf(bl_t('MANGEL.PRAEFIX'), $praefix, $neu['themenpraefix']);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.PRAEFIX'), $praefix, $neu['themenpraefix']);
     } else {
         $neu['themenpraefix'] = $praefix;
     }
@@ -461,13 +461,13 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
     } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
         $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
     } else {
-        list($bl_neu, $bl_mangel, $bl_n) = bl_sicherung_lesen(
+        list($bl_neu, $bl_fehler, $bl_n) = bl_sicherung_lesen(
             (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']));
         if ($bl_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
              * nichts. */
             $bl_error = bl_t('TEXT.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $bl_mangel);
+                            . implode(' ', $bl_fehler);
         } elseif (bl_config_write($bl_neu)) {
             $bl_saved = true; $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n);
         } else {
@@ -565,10 +565,10 @@ if (class_exists('LBWeb', false)) {
 <?php if ($bl_error !== '') { ?>
 <div class="sm-fehler"><b><?= bl_e(bl_t('TEXT.FEHLER')) ?></b> <?= $bl_error ?></div>
 <?php } ?>
-<?php if ($bl_mangel) { ?>
+<?php if ($bl_fehler) { ?>
 <div class="sm-warnung"><b><?= bl_e(bl_t('TEXT.BEANSTANDUNGEN')) ?></b>
 <ul style="margin:6px 0 0 18px;">
-<?php foreach ($bl_mangel as $m) { ?><li><?= bl_e($m) ?></li><?php } ?>
+<?php foreach ($bl_fehler as $m) { ?><li><?= bl_e($m) ?></li><?php } ?>
 </ul></div>
 <?php } ?>
 <?php if ($bl_altformat) { ?>
