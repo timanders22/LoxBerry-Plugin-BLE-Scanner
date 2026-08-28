@@ -1,11 +1,55 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.2
+Version 1.3.5
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Fassung 1.3.5
+
+**Ein Befund, und er kam aus dem Betrieb.** Beim Einspielen meldet der
+Pluginprüfer von LoxBerry:
+
+```
+WARNING BLE-Scanner NG: HARDCODED PATH'S: Das Plugin nutzt einen hardkodierten
+Pfad zu <LoxBerry-Wurzel> … /uninstall/uninstall
+```
+
+In `uninstall/uninstall` stand ein fester Rückfall auf das übliche
+Installationsverzeichnis. Es war die einzige Stelle im gesamten Plugin-Bestand
+dieses Hauses, die der Prüfer beim Einspielen wirklich meldet — alle übrigen
+Fundstellen stehen in Dateien *mit* Endung, und die überspringt er.
+
+Die Wurzel wird jetzt **gesucht statt gesetzt**, nach dem Hausmuster: vom
+eigenen Ablageort aufwärts, bis ein Verzeichnis gefunden ist, das
+`config/plugins` **und** `data/plugins` trägt — mit **harter Obergrenze von
+acht Ebenen**. Die Grenze ist kein Beiwerk: ohne sie läuft die Suche bis zur
+Wurzel des Dateisystems durch und nimmt das erste Verzeichnis, das die beiden
+Namen zufällig trägt. Auf dem Entwicklungsrechner war das das Laufwerk selbst.
+
+**Und ein zweiter Befund kam beim Lesen dazu:** die Datei führte *zwei*
+Wurzelvariablen. `BASE` oben mit dem harten Rückfall, und ganz am Ende ein
+eigenes `UN_BASE` ohne jeden — dazu ein eigenes `UN_FOLDER` ohne den
+Vorgabewert, den `PDIR` weiter oben längst hatte. Fehlten die Argumente, tat
+der letzte Block still nichts, während der Rest der Datei arbeitete. Zwei
+Wahrheiten über dieselbe Sache in einer Datei; jetzt ist es eine.
+
+**Fail closed:** findet die Suche nichts, wird **nichts gelöscht**, sondern
+genannt, was liegenbleibt. Das ist hier nicht gleichgültig — in der
+Zweitschrift stehen MAC-Adressen und die Klarnamen der überwachten Personen.
+
+Geeicht in vier Lagen: mit den Argumenten des Installers, nur über
+`LBHOMEDIR`, ohne beides mit dem Skript im Baum, und als Gegenprobe außerhalb
+jedes Baums — dort räumt es nichts weg und sagt es.
+
+Sonst ist 1.3.5 inhaltlich gleich 1.3.4.
+
+> **Zu den Fassungen 1.3.1 bis 1.3.4** steht in dieser Datei nichts; die
+> Kopfzeile war zwei Fassungen lang auf 1.3.2 stehengeblieben. Die Anmerkungen
+> dazu stehen auf den Release-Seiten des Repositories — nachgesehen, alle vier
+> tragen einen Text. Sie werden hier nicht nacherzählt.
 
 ## Fassung 1.3.0
 
