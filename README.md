@@ -1,11 +1,60 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.5
+Version 1.3.9
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.9
+
+**Der Dienst konnte sein Protokoll verlieren, ohne dass es auffiel.**
+
+Am 06.09.2026 an einem laufenden LoxBerry gemessen — aufgefallen am
+Heimkino-Plugin, das sieben Stunden lief und keine Protokolldatei hatte:
+`log/plugins` liegt auf einer **Ramdisk** (`/dev/zram0`). Wird sie geleert,
+ist die Datei fort — und ein `logging.FileHandler`, der sie beim Start
+**einmal** geöffnet hat, schreibt bis zum nächsten Neustart in einen
+gelöschten Inode. Es gibt keine Fehlermeldung; es gibt gar nichts.
+
+Diese Fassung benutzt deshalb `logging.handlers.WatchedFileHandler`. Der
+prüft bei jeder Zeile Gerätenummer und Inode und öffnet nötigenfalls neu; er
+steht in der Standardbibliothek und ist für genau diesen Fall gebaut.
+
+Auf dem Gerät geeicht, in beide Richtungen: mit dem alten Handler ist die
+Zeile nach dem Löschen verloren, mit dem neuen steht sie in der wieder
+angelegten Datei. Auf einem Windows-Arbeitsplatz lässt sich das nicht
+messen — dort kann eine offene Datei gar nicht gelöscht werden.
+
+Dieselbe Bauart hatten APC-UPS NG, BLE-Scanner NG, Heimkino und Ultraschall
+Entfernung; alle vier sind am selben Tag nachgezogen worden. Über alle
+Plugin-Ordner gezählt (06.09.2026) benutzen jetzt genau diese vier den
+`WatchedFileHandler`.
+
+**Eine fünfte Stelle ist offen und soll hier benannt sein, statt zu fehlen:**
+Skoda Connect NG stand hier zunächst als Ausnahme mit der Begründung, ein Cron
+starte das Programm bei jedem Lauf neu. Nachgemessen trifft das nicht zu: der
+Cron ruft dort nur `waechter` und `wachzeichen`; der eigentliche Dienst läuft
+dauerhaft (`bin/dienst.sh`, `nohup … &`). In diesem Zweig steht ein
+`RotatingFileHandler` — der hält ebenfalls einen offenen Deskriptor und öffnet
+nur bei seiner **eigenen** Größenrotation neu, nicht wenn die Datei unter ihm
+verschwindet. Die Bauart ist dort also dieselbe, nur in anderem Gewand, und
+noch nicht behoben.
+
+**Weiter:** die Fassungszeile im Kopf dieser Datei stand noch auf
+1.3.5, während 1.3.8 veröffentlicht war.
+
+
+## Neu in 1.3.8
+
+- **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 1.3.7 kam er von der
+  Oberfläche des LoxBerry. Am 05.09.2026 am Gerät gemessen (LoxBerry 4.0.0.15,
+  `system/css/components.css`): deren Regel `.lb-content select`
+  gibt es erst seit der neuen Oberfläche, und jede eigene Feldregel mit der
+  Kurzform `background:` löscht sie wieder. Darauf soll sich eine
+  Plugin-Oberfläche nicht verlassen (`Regeln/04`). Sonst ist an dieser
+  Fassung nichts geändert.
 
 ## Fassung 1.3.5
 

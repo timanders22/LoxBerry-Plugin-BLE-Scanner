@@ -41,6 +41,7 @@ import bl_common as gem      # noqa: E402
 import bl_beacon             # noqa: E402
 
 import logging               # noqa: E402
+import logging.handlers  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +63,15 @@ def _log_einrichten():
     if os.environ.get("BLE_LOGDATEI") == "1":
         try:
             os.makedirs(gem.LOG_DIR, exist_ok=True)
-            handlers.append(logging.FileHandler(LOG_DATEI))
+            # WatchedFileHandler, NICHT FileHandler.
+            # Am Geraet gemessen (06.09.2026, LoxBerry 4.0.0.15): log/plugins liegt auf
+            # einer Ramdisk (/dev/zram0). Wird sie geleert, ist die Protokolldatei fort -
+            # und ein FileHandler, der sie beim Start EINMAL geoeffnet hat, schreibt bis
+            # zum naechsten Neustart in einen geloeschten Inode. Sichtbar wird davon
+            # nichts. Der WatchedFileHandler prueft bei jeder Zeile Geraetenummer und
+            # Inode und oeffnet noetigenfalls neu; er steht in der Standardbibliothek.
+            # Aufgefallen am Heimkino-Dienst, der sieben Stunden ohne Protokoll lief.
+            handlers.append(logging.handlers.WatchedFileHandler(LOG_DATEI))
         except OSError:
             pass
     logging.basicConfig(
