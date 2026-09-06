@@ -171,10 +171,16 @@ class Mqtt:
         zugang = mqtt_zugangsdaten()
         if not zugang:
             return False
+        # Die Fassung wird abgetastet, nicht angenommen: paho-mqtt 2.x schreibt
+        # bei VERSION1 eine DeprecationWarning in JEDES Protokoll (am Geraet an
+        # 2.1.0 gemessen, 06.09.2026), paho 1.x kennt die Aufzaehlung gar nicht.
         try:
-            self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+            self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         except (AttributeError, TypeError):
-            self.client = mqtt.Client()      # paho-mqtt 1.x
+            try:
+                self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+            except (AttributeError, TypeError):
+                self.client = mqtt.Client()      # paho-mqtt 1.x
         if zugang["user"]:
             self.client.username_pw_set(zugang["user"], zugang["pass"] or "")
         self.client.will_set(self.praefix + "/server/online", "0", retain=True)
@@ -198,7 +204,13 @@ class Mqtt:
                 log.error("MQTT-Anmeldung abgelehnt (Code %s). Bei 4 oder 5 stimmen "
                           "Benutzer oder Kennwort des Brokers nicht.", rc)
 
-        def bei_trennung(_c, _u, rc, *_a):
+        def bei_trennung(_c, _u, *rest):
+            # paho ruft hier VERSCHIEDEN, am Geraet an 2.1.0 gemessen:
+            # VERSION1 mit (rc), VERSION2 mit (flags, rc, properties). Wer
+            # blind das dritte Argument als Code liest, bekommt unter
+            # VERSION2 die DisconnectFlags - und meldete jeden sauberen
+            # Abschied als Abriss.
+            rc = rest[1] if len(rest) >= 3 else (rest[0] if rest else 0)
             self.verbunden = False
             if rc != 0:
                 log.warning("MQTT-Verbindung abgerissen (Code %s) - paho verbindet "
