@@ -1,6 +1,6 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.10
+Version 1.3.11
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
