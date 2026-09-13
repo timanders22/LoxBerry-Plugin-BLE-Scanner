@@ -1,11 +1,115 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.12
+Version 1.3.13
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.13
+
+### Xiaomi-Sensoren werden gelesen (MiBeacon, `0xFE95`)
+
+Am 13.09.2026 **am Gerät gemessen**, nachdem das eingebaute Bluetooth des
+Raspberry Pi 4 eingeschaltet war: ein *Mi Temperature and Humidity Monitor*
+(LYWSDCGQ/01ZM, in der Werbung `MJ_HT_V1`) sendet seine Werte
+**unverschlüsselt in der Werbung** — ohne Kopplung, ohne Verbindung.
+
+```
+ServiceData 0000fe95 (18 B): 50 20 AA 01 83 FF EE DD CC BB AA 0D 10 04 0A 01 E2 01
+                             └───┘ └──┘ └┘ └──────────┘ └───┘ └┘ └──────┘
+                             Rahmen Typ  Z   MAC rückw.   Art    L   Werte
+→ 26,6 °C / 48,2 %
+```
+
+| Bit im Rahmen | Bedeutung |
+|---|---|
+| `0x0008` | **verschlüsselt** |
+| `0x0010` | MAC dabei |
+| `0x0020` | Capability-Byte dabei |
+| `0x0040` | Werte dabei |
+
+| Satzart | Inhalt |
+|---|---|
+| `0x1004` | Temperatur, 2 B vorzeichenbehaftet, /10 → °C |
+| `0x1006` | Luftfeuchte, 2 B, /10 → % |
+| `0x100A` | Batteriestand, 1 B, % |
+| `0x100D` | beides, 4 B (Temperatur, dann Feuchte) |
+
+Damit gehen `<tag>/sensor/temperatur`, `…/feuchte`, `…/batterie` und
+`…/folge` hinaus — dieselben Themen wie bei ATC/pvvx und RuuviTag, ohne
+eine neue Zeile in der Loxone-Vorlage.
+
+**Drei Dinge, die dieser Dekoder bewusst anders macht als die übrigen:**
+
+1. **Er prüft den Absender.** Das Paket trägt die MAC des Geräts, das
+   gemessen hat. Stimmt sie nicht mit der Adresse überein, von der das Paket
+   kam, wird **nichts** geliefert — sonst schreibt ein Nachbarpaket fremde
+   Temperaturen in den eigenen Tag. `deuten()` nimmt dafür ein drittes
+   Argument; wer es leer lässt, verzichtet auf die Prüfung, und das steht im
+   Quelltext, damit es eine Entscheidung ist und kein Versehen.
+2. **Bei einem verschlüsselten Paket schweigt er nicht.** Neuere Xiaomi-Geräte
+   (und jedes, das in der Mi-Home-App gebunden wurde) verschlüsseln die Werte
+   mit einem Bindungsschlüssel, den dieses Plugin nicht hat. Statt gar nichts
+   zu melden, gibt der Dekoder ein Ergebnis mit leeren Werten und dem Hinweis
+   `verschluesselt` zurück — so kann die Oberfläche den **Grund** nennen.
+3. **Er ist an zwei verschiedenen Satzarten desselben Geräts gemessen**
+   (`0x100D` und `0x1004`), nicht nur gegen eine Beschreibung. Ein Dekoder, der
+   nur `0x100D` kennt, schweigt bei der Hälfte der Pakete.
+
+Die Eichung (`python3 bin/bl_beacon.py`) prüft **35 Fälle**, darunter drei
+Gegenproben, die **rot werden müssen**: ein fremder Absender, ein
+verschlüsseltes Paket und ein Paket ohne Wertebit. Beide Richtungen sind
+gefahren worden — nimmt man die Absenderprüfung heraus, fällt genau eine
+Zeile; verdreht man die Bitmaske (`0x40` statt `0x08` für „verschlüsselt" —
+**mein eigener Irrtum beim ersten Versuch**), fallen vier.
+
+### Behoben — die Selbstprüfung ließ ihre Arbeitsordner liegen
+
+Am Gerät gemessen: unter `/tmp` lagen **45 Arbeitsordner** dieser
+Selbstprüfung.
+
+| Vorsilbe | Anzahl |
+|---|---|
+| `ble_selbsttest_` | 35 |
+| `ble_cfg_` | 5 |
+| `ble_log_` | 5 |
+
+**Neun davon gehörten `loxberry`** — also Läufen über die Oberfläche. Die
+Datei rief dreimal `tempfile.mkdtemp()` und kein einziges Mal `rmtree`. Auf dem
+LoxBerry liegt `/tmp` auf einer Ramdisk: kein Platzproblem (3,3 MB von 1,9 GB),
+aber jeder Knopfdruck hinterließ drei Ordner, und sie blieben bis zum
+Neustart.
+
+Jetzt gehen die Ordner dieses Laufs in einem `finally` weg — auch wenn eine
+Gruppe mit einer Ausnahme abbricht, was genau der Fall war, der sie
+hinterließ. Rückstände **früherer** Läufe räumt die Prüfung selbst ab, mit
+drei Wachen: nur die eigenen Vorsilben, nur was dem eigenen Benutzer gehört,
+nur älter als eine Stunde — ein Lauf dauert Sekunden, also kann sie keinem
+gleichzeitigen Lauf die Arbeit wegnehmen.
+
+Dazu eine neue Prüfgruppe *Eigene Rückstände* mit drei Zeilen, beidseitig
+geeicht: macht man `_entfernen()` wirkungslos, werden zwei davon rot. Beim
+ersten Lauf auf dem Entwicklungsrechner hat sie **252** eigene Altlasten
+abgeräumt.
+
+### Behoben — die Symbole trugen ein C2PA-Manifest
+
+Die fünf Dateien unter `icons/` waren gegenüber 1.3.12 gewachsen: jede PNG um
+genau 5 770 Byte, die SVG von 1 880 auf 9 652 Zeichen. Nachgemessen ist der
+**Bildinhalt byteweise gleich** (dieselbe IDAT-Prüfsumme); dazugekommen war
+allein ein `caBX`-Block in den PNG und ein `<metadata><c2pa:manifest>` in der
+SVG — Herkunftsangaben eines Werkzeugs, das die Dateien angefasst hat. Sie
+gehören nicht in ein Plugin-Archiv; die sauberen Dateien aus 1.3.12 sind
+wieder eingesetzt.
+
+### Berichtigt — zwei Lücken und eine Falschaussage im README
+
+Zu 1.3.10 und 1.3.11 fehlte hier jeder Abschnitt, obwohl beide Tags auf GitHub
+stehen; sie sind unten nachgetragen. Umgekehrt stand „Neu in 1.3.8" da, **ohne
+dass es diesen Tag gibt** — siehe dort.
+
 
 ## Neu in 1.3.12 — am Gerät gemessen, und der Retain-Hausstandard
 
@@ -256,6 +360,50 @@ die Zeilen aus der genannten Datei verschwinden. Beides gehört dem System, nich
 dem Plugin: `dietpi-config` würde eine Pluginänderung an dieser Datei beim
 nächsten Lauf ohnehin überschreiben.
 
+## Neu in 1.3.11
+
+**Eine unvollständige Sicherung wird nicht mehr zurückgespielt.**
+
+Bis 1.3.10 war die Vorgabenliste der Ausgangspunkt, und nur was in der
+hochgeladenen Datei stand, wurde darüber geschrieben. Eine Sicherung mit einem
+**einzigen** Schlüssel lief damit ohne Beanstandung durch, wurde gespeichert —
+und alle übrigen Einstellungen fielen auf Werk zurück. Quittiert mit
+„1 Wert übernommen".
+
+Gemessen am VolkswagenID-Plugin 0.9.11 am 03.09.2026 unter PHP 7.4 **und** 8.4:
+dort fiel dabei auch das Aktionstoken auf `''`, und jede im Miniserver
+eingetragene Adresse war **stumm ungültig**. Am 07.09.2026 über den Bestand
+ausgerollt (30 Linien), hier mit `TEXT.SICH_FEHLEND`.
+
+Der Hausstandard sagt: eine halb gültige Datei ändert **gar nichts**. Verglichen
+wird gegen die **Vorgaben**, nicht gegen die Liste der bekannten Schlüssel —
+was ausserhalb der Konfigurationsdatei liegt, fällt nicht auf Werk zurück und
+darf fehlen.
+
+Geändert: `webfrontend/htmlauth/bl_lib.php` und beide Sprachdateien. Sonst
+nichts.
+
+## Neu in 1.3.10
+
+**paho-mqtt 2.x: die Fassung wird abgetastet, nicht angenommen — und der
+Abschied richtig gelesen.**
+
+Am Gerät an paho-mqtt **2.1.0** gemessen (06.09.2026). Zwei Dinge:
+
+* `mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)` schreibt unter 2.x eine
+  `DeprecationWarning` in **jedes** Protokoll, und paho 1.x kennt die
+  Aufzählung überhaupt nicht. Jetzt wird VERSION2 genommen, wo es sie gibt,
+  und auf 1.x sauber zurückgefallen.
+* **Die Rückrufe haben je Fassung verschiedene Argumente.** `on_disconnect`
+  kommt unter VERSION1 mit `(rc)`, unter VERSION2 mit
+  `(flags, rc, properties)`. Wer blind das dritte Argument als Code liest,
+  bekommt unter VERSION2 die *DisconnectFlags* — und meldete **jeden sauberen
+  Abschied als Abriss**. Der Code wird jetzt aus der richtigen Stelle genommen.
+
+Das betrifft jede Linie, die paho benutzt: auf dieser Anlage stehen 1.6.1 und
+2.1.0 **nebeneinander**, je nach Plugin. Geändert: `bin/ble_scanner_ng.py`.
+Sonst nichts.
+
 ## Neu in 1.3.9
 
 **Der Dienst konnte sein Protokoll verlieren, ohne dass es auffiel.**
@@ -292,10 +440,17 @@ verschwindet. Die Bauart ist dort also dieselbe, nur in anderem Gewand, und
 noch nicht behoben.
 
 **Weiter:** die Fassungszeile im Kopf dieser Datei stand noch auf
-1.3.5, während 1.3.8 veröffentlicht war.
+1.3.5. Hier stand „während 1.3.8 veröffentlicht war" — das ist berichtigt:
+veröffentlicht war damals **1.3.7**, einen Tag `v1.3.8` gibt es nicht.
 
 
-## Neu in 1.3.8
+## Neu in 1.3.8 — diese Nummer ist nie veröffentlicht worden
+
+Am 13.09.2026 an der Tag-Liste des Repositoriums gemessen: von `v1.0.0` bis
+`v1.3.12` stehen **23 Tags**, und `v1.3.8` ist **nicht** darunter. Der hier
+beschriebene Stand hat die Anwender also mit **1.3.9** erreicht. Der Abschnitt
+bleibt stehen, weil der Inhalt stimmt — die Überschrift ist kein Datum,
+sondern der Ordnername, unter dem gearbeitet wurde.
 
 - **Das Auswahlfeld zeichnet seinen Pfeil selbst.** Bis 1.3.7 kam er von der
   Oberfläche des LoxBerry. Am 05.09.2026 am Gerät gemessen (LoxBerry 4.0.0.15,
@@ -536,15 +691,22 @@ einbinden will, lässt es als iBeacon werben und trägt die Kennung
 
 ## Was nicht am Gerät gemessen ist
 
-Ehrlichkeitshalber, weil es den Umgang mit Fehlerberichten erleichtert: die
-Fassung 1.3.0 ist gegen PHP 7.4 und 8.4 gerendert, gegen den echten Parser und
-gegen die echte Auswertung des Dienstes gemessen — aber **nicht** an einem
-LoxBerry mit Bluetooth-Adapter. Offen sind damit:
+Ehrlichkeitshalber, weil es den Umgang mit Fehlerberichten erleichtert.
+**Seit 1.3.13 ist ein Teil davon erledigt:** am 13.09.2026 lief diese Linie zum
+ersten Mal an einem LoxBerry mit eingeschaltetem Bluetooth. Gemessen wurden der
+Suchlauf (sieben Geräte), die Adapterlage und der MiBeacon-Dekoder an einem
+echten LYWSDCGQ/01ZM, an **zwei** verschiedenen Satzarten.
+
+Offen bleibt:
 
 * wie dicht `PropertiesChanged` tatsächlich feuert (davon hängt die Breite des
   Glättungsfensters ab; mit `dbus-monitor` zu messen),
-* ob `org.bluez.Battery1` in der BlueZ-Fassung des LoxBerry aktiv ist,
-* die Anordnung der ATC/pvvx-Nutzdaten an einem echten Sensor.
+* ob `org.bluez.Battery1` in der BlueZ-Fassung des LoxBerry aktiv ist — dafür
+  fehlt ein verbindungsfähiges Gerät mit Batteriedienst,
+* die Anordnung der ATC/pvvx- und RuuviTag-Nutzdaten an einem echten Sensor;
+  diese drei Dekoder sind weiter nur gegen ihre Formatbeschreibung geprüft,
+* ob ein verschlüsseltes MiBeacon-Paket richtig als solches erkannt wird —
+  geprüft ist das an einem **gebauten** Paket, nicht an einem gebundenen Gerät.
 
 Die Selbstprüfung im Reiter *Test* führt diese Punkte als Strich, nicht als
 Haken.

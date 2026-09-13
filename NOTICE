@@ -119,6 +119,16 @@ Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
          sudo-Regel, also eine systemweite Rechteaenderung durch ein Plugin.
        * Entschluesselung originaler Xiaomi-Mi-Beacon-Pakete.
 
+1.3.13 Xiaomi-/Mijia-Sensoren werden gelesen (MiBeacon, ServiceData
+       0xFE95, unverschluesselt; an einem LYWSDCGQ/01ZM an zwei Satzarten
+       gemessen). Der Dekoder prueft die Absenderadresse gegen die MAC im
+       Paket und meldet verschluesselte Pakete als solche statt zu
+       schweigen. Behoben: die Selbstpruefung liess ihre Arbeitsordner
+       unter /tmp liegen (45 am Geraet gezaehlt), und die Symbole trugen
+       ein C2PA-Manifest. Berichtigt: die fehlenden README-Abschnitte zu
+       1.3.10 und 1.3.11 sowie die Aussage, 1.3.8 sei veroeffentlicht
+       worden - diesen Tag gibt es nicht.
+
 1.3.12 Retain je Thema nach dem Hausstandard vom 03.09.2026 (21 von 29
        Themenstaemmen zurueckbehalten; das Lebenszeichen server/ts nie), und
        fuenf am Geraet gemessene Behebungen: der Dienst wurde nach einer

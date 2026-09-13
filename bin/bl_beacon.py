@@ -45,6 +45,7 @@ import struct
 
 EDDYSTONE_UUID = "0000feaa-0000-1000-8000-00805f9b34fb"
 ATC_UUID = "0000181a-0000-1000-8000-00805f9b34fb"
+MIBEACON_UUID = "0000fe95-0000-1000-8000-00805f9b34fb"
 APPLE = 0x004C
 RUUVI = 0x0499
 
@@ -267,17 +268,148 @@ def ruuvi(mdata):
 
 
 # ---------------------------------------------------------------------------
+# MiBeacon (Xiaomi / Mijia), ServiceData 0000fe95
+# ---------------------------------------------------------------------------
+
+# Die Geraetetypen, die hier benannt werden koennen. Die Liste dient nur der
+# Anzeige - ein unbekannter Typ wird trotzdem gelesen, solange die Saetze
+# stimmen. Sie zu erweitern kostet nichts und aendert nichts am Verhalten.
+MI_TYPEN = {
+    0x01AA: "LYWSDCGQ/01ZM",      # der runde Mi-Fuehler, am 13.09.2026 gemessen
+    0x045B: "LYWSD02",
+    0x055B: "LYWSD03MMC",
+    0x0387: "MHO-C303",
+    0x02DF: "JQJCY01YM",
+    0x0098: "HHCCJCY01",          # Flower Care
+    0x03BC: "GCLS002",
+    0x0576: "CGD1",
+    0x066F: "CGDK2",
+}
+
+# Rahmenbits. DIESE ZUORDNUNG WAR MEIN FEHLER und ist die Stelle, an der ein
+# Nachbau am leichtesten scheitert: ich hatte 0x0040 fuer "verschluesselt"
+# gehalten. Gefangen hat es die Eichung unten - das gemessene Paket waere als
+# unlesbar gemeldet worden, obwohl es sauber dekodiert.
+MI_VERSCHLUESSELT = 0x0008
+MI_MAC_DABEI = 0x0010
+MI_CAPABILITY = 0x0020
+MI_WERTE_DABEI = 0x0040
+
+
+def mibeacon(sdata, absender=""):
+    r"""ServiceData unter 0000fe95 (Xiaomi / Mijia), unverschluesselte Fassung.
+
+    AM GERAET GEMESSEN am 13.09.2026 an einem LYWSDCGQ/01ZM (MJ_HT_V1), und
+    zwar an zwei verschiedenen Satzarten - das ist der Unterschied zu atc()
+    und ruuvi(), die nur gegen die Beschreibung geprueft sind.
+
+    EINE EINSCHRAENKUNG, damit das Beispiel nicht mehr behauptet, als es ist:
+    die ADRESSE im Beispiel unten und in der Eichung ist durch eine
+    Platzhalter-MAC ersetzt (AA:BB:CC:DD:EE:FF). Die Adresse eines Geraets in
+    einem bewohnten Haus gehoert nicht in ein veroeffentlichtes Archiv - das
+    Freigabetor des Hauses hat sie zu Recht beanstandet. Alle uebrigen Byte,
+    und damit die Werte 26,6 GradC und 48,2 %, sind die gemessenen.
+
+        50 20  AA01  83  FF EE DD CC BB AA  0D10 04 0A01 E201
+        \___/  \__/  \_/ \______________/   \__/ \_/ \_______/
+        Rahmen Typ  Zaehler  MAC rueckwaerts Art Laenge Werte
+        -> 26,6 GradC / 48,2 %
+
+    Aufbau:
+      * Rahmen  2 Byte, klein zuerst. Bits siehe MI_* oben.
+      * Typ     2 Byte, Geraetetyp (MI_TYPEN).
+      * Zaehler 1 Byte, steigt je Werbung - wird als "folge" veroeffentlicht.
+      * MAC     6 Byte RUECKWAERTS, nur wenn MI_MAC_DABEI gesetzt ist.
+      * dann beliebig viele Saetze: Art 2 Byte, Laenge 1 Byte, Werte.
+
+    DIE ABSENDERPRUEFUNG IST DER WICHTIGE TEIL. Das Paket traegt die MAC des
+    Geraets, das den Wert GEMESSEN hat - und ein Nachbarpaket kann dieselbe
+    UUID tragen. Wer die beiden nicht gegeneinander haelt, schreibt fremde
+    Temperaturen in den eigenen Tag. Stimmen sie nicht, wird NICHTS geliefert.
+
+    Verschluesselte Pakete (MI_VERSCHLUESSELT, bei neueren Geraeten und nach
+    dem Binden in der Mi-Home-App der Normalfall) brauchen den Bindungs-
+    schluessel. Den gibt es hier nicht, also wird kein Wert erfunden - es wird
+    aber auch nicht geschwiegen: das Ergebnis traegt "hinweis" und leere
+    Werte, damit die Oberflaeche den Grund nennen kann.
+    """
+    roh = (sdata or {}).get(MIBEACON_UUID)
+    if not roh or len(roh) < 5:
+        return None
+
+    rahmen, typ = struct.unpack("<HH", roh[0:4])
+    zaehler = roh[4]
+    out = {"art": "mibeacon", "kennung": "", "ref_1m": None, "werte": {},
+           "geraet": MI_TYPEN.get(typ, "0x%04X" % typ)}
+
+    i = 5
+    if rahmen & MI_MAC_DABEI:
+        if len(roh) < i + 6:
+            return None
+        mac = ":".join("%02X" % b for b in roh[i:i + 6][::-1])
+        i += 6
+        if absender and mac != str(absender).upper():
+            return None
+    if rahmen & MI_CAPABILITY:
+        i += 1
+
+    if rahmen & MI_VERSCHLUESSELT:
+        out["hinweis"] = "verschluesselt"
+        return out
+
+    if not rahmen & MI_WERTE_DABEI:
+        return None
+
+    _sammle(out["werte"], "folge", zaehler)
+    while i + 3 <= len(roh):
+        art, laenge = struct.unpack("<HB", roh[i:i + 3])
+        i += 3
+        daten = roh[i:i + laenge]
+        i += laenge
+        if len(daten) < laenge:
+            break
+        # Nur die Saetze, fuer die es ein Thema gibt (SENSORTHEMEN). Ein
+        # Bodenfeuchte- oder Leitwertsatz eines Blumenfuehlers wird bewusst
+        # uebergangen statt unter einem erfundenen Namen veroeffentlicht.
+        if art == 0x1004 and laenge == 2:
+            _sammle(out["werte"], "temperatur",
+                    round(struct.unpack("<h", daten)[0] / 10.0, 1))
+        elif art == 0x1006 and laenge == 2:
+            _sammle(out["werte"], "feuchte",
+                    round(struct.unpack("<H", daten)[0] / 10.0, 1))
+        elif art == 0x100A and laenge == 1:
+            _sammle(out["werte"], "batterie", float(daten[0]))
+        elif art == 0x100D and laenge == 4:
+            grad, feucht = struct.unpack("<hH", daten)
+            _sammle(out["werte"], "temperatur", round(grad / 10.0, 1))
+            _sammle(out["werte"], "feuchte", round(feucht / 10.0, 1))
+
+    # "folge" allein ist kein Messwert - dann ist nichts Brauchbares dabei.
+    if set(out["werte"]) <= {"folge"}:
+        return None
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Zusammenfuehrung
 # ---------------------------------------------------------------------------
 
-def deuten(mdata, sdata):
+def deuten(mdata, sdata, absender=""):
     """Alle Dekoder der Reihe nach. Rueckgabe: dict oder None.
 
     Ergebnis:
-        art      "ibeacon" | "eddystone" | "atc" | "ruuvi"
+        art      "ibeacon" | "eddystone" | "atc" | "ruuvi" | "mibeacon"
         kennung  stabile Kennung, wenn das Format eine traegt (sonst "")
         ref_1m   RSSI auf einem Meter, wenn das Format ihn traegt
         werte    {"temperatur": ..., "feuchte": ..., "batterie": ...}
+        hinweis  nur wenn ein Format etwas zu SAGEN hat, ohne Werte liefern
+                 zu koennen (MiBeacon verschluesselt)
+
+    "absender" ist die MAC, von der das Paket KAM. MiBeacon traegt die MAC des
+    messenden Geraets im Paket; beide muessen uebereinstimmen, sonst werden
+    fremde Werte einem Tag zugeschrieben. Wer den Absender nicht kennt, laesst
+    das Feld leer - dann entfaellt die Pruefung, und das steht hier, damit es
+    eine Entscheidung ist und kein Versehen.
     """
     for fn, arg in ((ibeacon, mdata), (ruuvi, mdata),
                     (eddystone, sdata), (atc, sdata)):
@@ -287,7 +419,30 @@ def deuten(mdata, sdata):
             erg = None
         if erg:
             return erg
-    return None
+    try:
+        erg = mibeacon(sdata, absender)
+    except (struct.error, IndexError, TypeError, ValueError):
+        erg = None
+    return erg or None
+
+
+def beschriftung(gedeutet):
+    """Was in der Oberflaeche unter dem Namen steht - EINE Quelle fuer drei
+    Aufrufstellen (Dienst, Abbild, Geraetesuche).
+
+    Ohne das stuende bei einem verschluesselten Xiaomi-Paket nur "mibeacon" da
+    und daneben keine Werte: der Anwender sucht dann den Fehler bei sich. Mit
+    dem Hinweis steht der Grund daneben. Das ist dieselbe Linie wie bei der
+    Adapterlage - nicht schweigen, sondern sagen, warum nichts kommt.
+    """
+    if not gedeutet:
+        return ""
+    art = str(gedeutet.get("art", "") or "")
+    hinweis = str(gedeutet.get("hinweis", "") or "")
+    geraet = str(gedeutet.get("geraet", "") or "")
+    if geraet and geraet not in art:
+        art = (art + " " + geraet).strip()
+    return (art + " (" + hinweis + ")") if hinweis and art else (art or hinweis)
 
 
 # Themennamen der Sensorwerte. Die Oberflaeche und die Loxone-Vorlage lesen
@@ -389,6 +544,55 @@ def eichung():
     pruefe("Ruuvi Feuchte", erg and erg["werte"].get("feuchte"), 50.0)
     pruefe("Ruuvi Druck", erg and erg["werte"].get("druck"), 1013.25)
     pruefe("Ruuvi Batterie mV", erg and erg["werte"].get("batterie_mv"), 3000)
+
+    # --- MiBeacon, AM GERAET GEMESSEN am 13.09.2026 (LYWSDCGQ/01ZM)
+    #     Satzart 0x100D: Temperatur und Feuchte zusammen.
+    #     Die MAC ist ein Platzhalter (siehe mibeacon()); die Werte sind echt.
+    mi = bytes.fromhex("5020AA0183FFEEDDCCBBAA0D10040A01E201")
+    erg = mibeacon({MIBEACON_UUID: mi}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon Geraet", erg and erg["geraet"], "LYWSDCGQ/01ZM")
+    pruefe("MiBeacon Temperatur", erg and erg["werte"].get("temperatur"), 26.6)
+    pruefe("MiBeacon Feuchte", erg and erg["werte"].get("feuchte"), 48.2)
+    pruefe("MiBeacon Folge", erg and erg["werte"].get("folge"), 0x83)
+    #     Zweite gemessene Werbung desselben Geraets, Satzart 0x1004 - nur
+    #     Temperatur. Beide Arten kommen vor; ein Dekoder, der nur 0x100D
+    #     kennt, schweigt bei der Haelfte der Pakete.
+    mi2 = bytes.fromhex("5020AA016BFFEEDDCCBBAA041002 0901".replace(" ", ""))
+    erg = mibeacon({MIBEACON_UUID: mi2}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon zweite Satzart", erg and erg["werte"].get("temperatur"), 26.5)
+    pruefe("MiBeacon zweite Satzart ohne Feuchte",
+           erg and "feuchte" in erg["werte"], False)
+    #     EICHUNG der Absenderpruefung: dasselbe Paket, fremder Absender.
+    #     Nimmt man die Pruefung heraus, wird diese Zeile rot - und fremde
+    #     Temperaturen landen im eigenen Tag.
+    pruefe("MiBeacon fremder Absender verworfen",
+           mibeacon({MIBEACON_UUID: mi}, "11:22:33:44:55:66"), None)
+    #     EICHUNG der Bitmaske: 0x08 gesetzt heisst verschluesselt. Haelt man
+    #     wie ich zuerst 0x40 dafuer, wird das GEMESSENE Paket oben als
+    #     unlesbar gemeldet - dann sind die drei Zeilen davor rot.
+    miv = bytes.fromhex("5820AA0183FFEEDDCCBBAA9999")
+    erg = mibeacon({MIBEACON_UUID: miv}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon verschluesselt erkannt",
+           erg and erg.get("hinweis"), "verschluesselt")
+    pruefe("MiBeacon verschluesselt ohne erfundene Werte",
+           erg and erg["werte"], {})
+    #     Ein Paket ohne Wertebit ist kein Messpaket.
+    pruefe("MiBeacon ohne Wertebit",
+           mibeacon({MIBEACON_UUID: bytes.fromhex("1020AA0183FFEEDDCCBBAA")},
+                    "AA:BB:CC:DD:EE:FF"), None)
+    #     Ueber den Verteiler, mit Absender.
+    erg = deuten({}, {MIBEACON_UUID: mi}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon ueber deuten()", erg and erg["art"], "mibeacon")
+
+    # --- Beschriftung: der Grund muss in der Anzeige ankommen.
+    pruefe("Beschriftung mit Geraet",
+           beschriftung({"art": "mibeacon", "geraet": "LYWSDCGQ/01ZM"}),
+           "mibeacon LYWSDCGQ/01ZM")
+    pruefe("Beschriftung mit Hinweis",
+           beschriftung({"art": "mibeacon", "geraet": "LYWSD03MMC",
+                         "hinweis": "verschluesselt"}),
+           "mibeacon LYWSD03MMC (verschluesselt)")
+    pruefe("Beschriftung ohne alles", beschriftung(None), "")
 
     # --- Gegenprobe: unsinnige Werte muessen VERWORFEN werden.
     #     Nimmt man die Plausibilitaetsgrenzen heraus, wird diese Zeile rot.

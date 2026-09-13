@@ -88,7 +88,10 @@ def selbst_suchen(cfg):
                 alt = gesehen.get(mac)
                 gedeutet = None
                 if werte.get("mdata") or werte.get("sdata"):
-                    gedeutet = bl_beacon.deuten(werte.get("mdata"), werte.get("sdata"))
+                    # Der Absender MUSS mit: MiBeacon traegt die MAC des messenden
+                    # Geraets, und nur bei Gleichheit gehoert der Wert dahin.
+                    gedeutet = bl_beacon.deuten(werte.get("mdata"),
+                                                werte.get("sdata"), mac)
                 if alt is None:
                     gesehen[mac] = {
                         "mac": mac,
@@ -99,7 +102,7 @@ def selbst_suchen(cfg):
                         "zuletzt": int(time.time()),
                         "adresstyp": gem.adresstyp_deuten(mac, werte.get("adresstyp", "")),
                         "gekoppelt": bool(werte.get("paired") or werte.get("trusted")),
-                        "beaconart": (gedeutet or {}).get("art", ""),
+                        "beaconart": bl_beacon.beschriftung(gedeutet),
                         "beaconkennung": (gedeutet or {}).get("kennung", ""),
                         "sensor": (gedeutet or {}).get("werte", {}),
                     }
@@ -113,7 +116,7 @@ def selbst_suchen(cfg):
                 if werte.get("name") and not alt["name"]:
                     alt["name"] = werte["name"]
                 if gedeutet:
-                    alt["beaconart"] = gedeutet.get("art", alt["beaconart"])
+                    alt["beaconart"] = bl_beacon.beschriftung(gedeutet) or alt["beaconart"]
                     if gedeutet.get("kennung"):
                         alt["beaconkennung"] = gedeutet["kennung"]
                     if gedeutet.get("werte"):

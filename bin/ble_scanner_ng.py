@@ -551,7 +551,11 @@ class Dienst:
                 eintrag["rssi_avg"] = rssi
 
             if self._zahl("beacon", 1) == 1 and (werte.get("mdata") or werte.get("sdata")):
-                gedeutet = bl_beacon.deuten(werte.get("mdata"), werte.get("sdata"))
+                # Der Absender wird MITGEGEBEN: MiBeacon traegt die MAC des
+                # messenden Geraets im Paket, und nur wenn beide gleich sind,
+                # gehoert der Wert diesem Tag.
+                gedeutet = bl_beacon.deuten(werte.get("mdata"),
+                                            werte.get("sdata"), mac)
                 if gedeutet:
                     eintrag["beacon"] = gedeutet
                     if gedeutet.get("kennung", "").startswith("IB:"):
@@ -837,7 +841,7 @@ class Dienst:
             # "beacon" ist vorhanden, aber None, solange nichts dekodiert
             # wurde - .get("beacon", {}) liefert dann None, nicht {}.
             "sensor": ((eintrag or {}).get("beacon") or {}).get("werte", {}),
-            "beaconart": ((eintrag or {}).get("beacon") or {}).get("art", ""),
+            "beaconart": bl_beacon.beschriftung((eintrag or {}).get("beacon")),
         }
 
     def _referenz(self, tag, eintrag):
@@ -1094,7 +1098,7 @@ class Dienst:
                     "zuletzt": int(w.get("zeit", 0)),
                     "adresstyp": gem.adresstyp_deuten(mac, w.get("adresstyp", "")),
                     "messungen": len(w.get("messungen", [])),
-                    "beaconart": (w.get("beacon") or {}).get("art", ""),
+                    "beaconart": bl_beacon.beschriftung(w.get("beacon")),
                     "beaconkennung": (w.get("beacon") or {}).get("kennung", ""),
                     "sensor": (w.get("beacon") or {}).get("werte", {}),
                     "gekoppelt": bool(w.get("paired") or w.get("trusted")),

@@ -27,6 +27,7 @@ kein Haken.
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -58,13 +59,128 @@ class Pruefung:
                             "ok": None, "anmerkung": grund})
 
 
+# ---------------------------------------------------------------------------
+# Arbeitsordner - und ihr Abraeumen
+# ---------------------------------------------------------------------------
+#
+# BEFUND, am Geraet gemessen am 13.09.2026: unter /tmp lagen 45 Arbeitsordner
+# dieser Selbstpruefung (35 x ble_selbsttest_, 5 x ble_cfg_, 5 x ble_log_),
+# neun davon von Laeufen ueber die Oberflaeche. Die Datei rief dreimal
+# tempfile.mkdtemp() und kein einziges Mal rmtree. Auf dem LoxBerry liegt /tmp
+# auf einer Ramdisk, die Ordner blieben also bis zum Neustart liegen - kein
+# Platzproblem (3,3 MB von 1,9 GB), aber jeder Knopfdruck hinterliess drei.
+#
+# Dieselbe Klasse wie beim Freigabepruefer des Hauses, der sich sein eigenes
+# __pycache__ anlegte: ein Pruefstand, der Spuren hinterlaesst, ist ein
+# Pruefstand, dem man beim Aufraeumen nachraeumen muss.
+
+VORSILBEN = ("ble_selbsttest_", "ble_cfg_", "ble_log_", "ble_probe_")
+
+# Die Ordner DIESES Laufs. Sie werden erst am Ende entfernt, nicht sofort:
+# _dienst_bauen() biegt gem.CONFIG_FILE dorthin, und spaetere Gruppen lesen
+# noch daraus.
+_ORDNER = []
+
+
+def _arbeitsordner(vorsilbe):
+    """Einen Arbeitsordner anlegen UND vormerken."""
+    ordner = tempfile.mkdtemp(prefix=vorsilbe)
+    _ORDNER.append(ordner)
+    return ordner
+
+
+def _entfernen(pfad):
+    """Einen Ordner wegnehmen. Rueckgabe: ist er wirklich weg?
+
+    Wirkungspruefung statt Zuversicht - rmtree mit ignore_errors schweigt,
+    wenn es nicht gelingt.
+    """
+    shutil.rmtree(pfad, ignore_errors=True)
+    return not os.path.isdir(pfad)
+
+
+def _alte_wegraeumen(altgrenze_s=3600):
+    """Rueckstaende FRUEHERER Laeufe abraeumen. Rueckgabe: Anzahl.
+
+    Drei Wachen, damit das nicht einem anderen Lauf die Arbeit wegnimmt:
+      * nur Ordner mit einer unserer Vorsilben,
+      * nur solche, die UNS gehoeren (nicht die eines anderen Benutzers),
+      * nur solche, die aelter als eine Stunde sind - ein Lauf dauert Sekunden.
+    """
+    basis = tempfile.gettempdir()
+    jetzt = time.time()
+    # os.getuid() gibt es unter Windows nicht; dort entfaellt die Wache, und
+    # das ist in Ordnung - dort laeuft kein zweiter Benutzer gegen dasselbe
+    # Verzeichnis.
+    getuid = getattr(os, "getuid", None)
+    eigen = getuid() if getuid else None
+    weg = 0
+    try:
+        namen = os.listdir(basis)
+    except OSError:
+        return 0
+    for name in namen:
+        if not name.startswith(VORSILBEN):
+            continue
+        pfad = os.path.join(basis, name)
+        if not os.path.isdir(pfad):
+            continue
+        try:
+            st = os.stat(pfad)
+        except OSError:
+            continue
+        if eigen is not None and st.st_uid != eigen:
+            continue
+        if jetzt - st.st_mtime < altgrenze_s:
+            continue
+        if _entfernen(pfad):
+            weg += 1
+    return weg
+
+
+def _rueckstaende():
+    """Wie viele Arbeitsordner unserer Art liegen noch da? (nur unsere)"""
+    basis = tempfile.gettempdir()
+    getuid = getattr(os, "getuid", None)
+    eigen = getuid() if getuid else None
+    zahl = 0
+    try:
+        namen = os.listdir(basis)
+    except OSError:
+        return 0
+    for name in namen:
+        if not name.startswith(VORSILBEN):
+            continue
+        pfad = os.path.join(basis, name)
+        if not os.path.isdir(pfad):
+            continue
+        if eigen is not None:
+            try:
+                if os.stat(pfad).st_uid != eigen:
+                    continue
+            except OSError:
+                continue
+        zahl += 1
+    return zahl
+
+
+def _aufraeumen():
+    """Die Ordner dieses Laufs entfernen. Rueckgabe: Anzahl."""
+    weg = 0
+    for ordner in _ORDNER:
+        if _entfernen(ordner):
+            weg += 1
+    del _ORDNER[:]
+    return weg
+
+
 def _dienst_bauen(cfgtext):
     """Einen echten Dienst mit einer Konfigurationsdatei aufsetzen.
 
     MQTT wird nicht gestartet; senden() wird mitgeschrieben.
     """
     import ble_scanner_ng as dienstmodul
-    ordner = tempfile.mkdtemp(prefix="ble_selbsttest_")
+    ordner = _arbeitsordner("ble_selbsttest_")
     pfad = os.path.join(ordner, "ble_scanner_ng.cfg")
     with open(pfad, "w", encoding="utf-8") as fh:
         fh.write(cfgtext)
@@ -124,7 +240,7 @@ def alles_pruefen():
     # =====================================================================
     G = "Beacon-Dekoder"
     ok, gesamt, meldungen = bl_beacon.eichung()
-    p.merke(G, "Eichung der vier Formate: %d von %d" % (ok, gesamt),
+    p.merke(G, "Eichung der fuenf Formate: %d von %d" % (ok, gesamt),
             ok == gesamt, "; ".join(meldungen[:3]))
 
     # =====================================================================
@@ -139,7 +255,7 @@ def alles_pruefen():
          "AA:BB:CC:DD:EE:FF", "Name", False),
         ("tag1=UNSINN", 0, "", "", False),
     ]
-    ordner = tempfile.mkdtemp(prefix="ble_cfg_")
+    ordner = _arbeitsordner("ble_cfg_")
     for nr, (zeile, anzahl, kennung, name, alt_erwartet) in enumerate(faelle, 1):
         pfad = os.path.join(ordner, "f%d.cfg" % nr)
         with open(pfad, "w", encoding="utf-8") as fh:
@@ -374,7 +490,7 @@ def alles_pruefen():
 
     # =====================================================================
     G = "Protokoll"
-    ordner8 = tempfile.mkdtemp(prefix="ble_log_")
+    ordner8 = _arbeitsordner("ble_log_")
     logdatei = os.path.join(ordner8, "gross.log")
     with open(logdatei, "w", encoding="utf-8") as fh:
         for i in range(40000):
@@ -555,6 +671,25 @@ def alles_pruefen():
             % ("da" if _helfer_da else "fehlt", "da" if _regel_da else "fehlt"))
 
     # =====================================================================
+    G = "Eigene Rückstände"
+    # Ein Pruefstand, der Spuren hinterlaesst, faellt irgendwem auf die Fuesse -
+    # hier lagen 45 Ordner unter /tmp, bevor es diese Gruppe gab.
+    _probe = _arbeitsordner("ble_probe_")
+    p.merke(G, "ein Arbeitsordner entsteht", os.path.isdir(_probe), _probe)
+    p.merke(G, "und wird wieder entfernt", _entfernen(_probe),
+            "geprüft, nicht angenommen")
+    if _probe in _ORDNER:
+        _ORDNER.remove(_probe)
+    # Rueckstaende frueherer Laeufe: erst abraeumen, dann NACHZAEHLEN. Die
+    # Zeile bleibt rot, solange etwas liegt - eingerechnet die Ordner dieses
+    # Laufs, die erst am Ende weggehen.
+    _alt = _alte_wegraeumen()
+    _rest = _rueckstaende() - len(_ORDNER)
+    p.merke(G, "keine Rückstände früherer Läufe", _rest <= 0,
+            ("%d abgeräumt, " % _alt if _alt else "")
+            + ("keiner übrig" if _rest <= 0 else "%d liegen noch" % _rest))
+
+    # =====================================================================
     G = "Nicht prüfbar ohne Gerät"
     p.offen(G, "BlueZ über D-Bus (Suche, RSSI, RemoveDevice)",
             "kein Bluetooth-Adapter und kein laufendes bluetoothd erreichbar")
@@ -563,9 +698,10 @@ def alles_pruefen():
     p.offen(G, "Wie dicht PropertiesChanged feuert",
             "am Gerät mit dbus-monitor zu messen; davon hängt das Fenster der "
             "Glättung ab")
-    p.offen(G, "ATC/pvvx-Anordnung an einem echten Sensor",
-            "die Dekoder sind gegen die Formatbeschreibung geprüft, nicht gegen "
-            "ein Gerät")
+    p.offen(G, "ATC/pvvx- und RuuviTag-Anordnung an einem echten Sensor",
+            "gegen die Formatbeschreibung geprüft, nicht gegen ein Gerät - "
+            "MiBeacon ist seit 1.3.13 die Ausnahme: an einem LYWSDCGQ/01ZM "
+            "gemessen, an zwei Satzarten")
 
     return p.zeilen
 
@@ -578,7 +714,13 @@ def main():
             strom.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
-    zeilen = alles_pruefen()
+    # IN JEDEM FALL abraeumen - auch wenn eine Gruppe mit einer Ausnahme
+    # abbricht. Genau dieser Fall hinterliess die Ordner, die am 13.09.2026
+    # unter /tmp lagen.
+    try:
+        zeilen = alles_pruefen()
+    finally:
+        _aufraeumen()
     ok = sum(1 for z in zeilen if z["ok"] is True)
     rot = sum(1 for z in zeilen if z["ok"] is False)
     offen = sum(1 for z in zeilen if z["ok"] is None)
