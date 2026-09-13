@@ -172,6 +172,17 @@ function bl_tags_aus_post(&$mangel)
             $mangel[] = sprintf(bl_t('MANGEL.TAG_REF'), $kennung, $opt['ref']);
             unset($opt['ref']);
         }
+        // Ein Alias darf nicht heissen wie ein Zweig, den der Themenbaum
+        // selbst belegt: "summary" erzeugte "summary/present" und stritte mit
+        // der Zusammenfassung um dasselbe Thema - und die Retain-Tabelle
+        // ordnete es dem falschen Stamm zu.
+        if (isset($opt['alias'])
+            && in_array(strtolower(bl_saeubern($opt['alias'])),
+                        bl_reservierte_zweige(), true)) {
+            $mangel[] = sprintf(bl_t('MANGEL.ALIAS_RESERVIERT'), $kennung,
+                                $opt['alias'], implode(', ', bl_reservierte_zweige()));
+            unset($opt['alias']);
+        }
         if (isset($opt['batt'])) {
             $opt['batt'] = ($opt['batt'] === '1') ? '1' : '';
             if ($opt['batt'] === '') { unset($opt['batt']); }
@@ -626,12 +637,9 @@ if (class_exists('LBWeb', false)) {
 <span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
 </div>
 <div class="sm-knopfreihe">
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="start"><?= bl_e(bl_t('KNOPF.START')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="stop"><?= bl_e(bl_t('KNOPF.STOP')) ?></button></form>
-  <?php echo bl_fmt(); ?>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="start"><?= bl_e(bl_t('KNOPF.START')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="stop"><?= bl_e(bl_t('KNOPF.STOP')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.DIENST_SOFORT')) ?></p>
 
@@ -932,16 +940,17 @@ if (class_exists('LBWeb', false)) {
 <h2><?= bl_e(bl_t('TEXT.THEMEN_TABELLE')) ?></h2>
 <div class="sm-breit">
 <table class="sm-tbl">
-<tr><th style="width:34%;"><?= bl_e(bl_t('TEXT.SP_THEMA')) ?></th><th style="width:10%;"><?= bl_e(bl_t('TEXT.SP_ART')) ?></th><th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
+<tr><th style="width:30%;"><?= bl_e(bl_t('TEXT.SP_THEMA')) ?></th><th style="width:9%;"><?= bl_e(bl_t('TEXT.SP_ART')) ?></th><th style="width:9%;"><?= bl_e(bl_t('TEXT.SP_RETAIN')) ?></th><th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
 <?php foreach (bl_allgemeine_themen() as $k => $info) { ?>
-<tr><td><span class="sm-mono"><?= bl_e($bl_praefix . '/' . $k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
+<tr><td><span class="sm-mono"><?= bl_e($bl_praefix . '/' . $k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td class="<?= bl_retain_fuer($k) ? 'sm-an' : '' ?>"><?= bl_e(bl_retain_text($k)) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
 <?php } ?>
 <?php foreach ($bl_themen_tag as $k => $info) { ?>
-<tr><td><span class="sm-mono"><?= bl_e($bl_praefix) ?>/&lt;T&gt;/<?= bl_e($k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
+<tr><td><span class="sm-mono"><?= bl_e($bl_praefix) ?>/&lt;T&gt;/<?= bl_e($k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td class="<?= bl_retain_fuer($k) ? 'sm-an' : '' ?>"><?= bl_e(bl_retain_text($k)) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
 <?php } ?>
 </table>
 </div>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.T_STEHT_FUER')) ?></p>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RETAIN_ERKLAERUNG')) ?></p>
 
 <?php if ($bl_tags) { ?>
 <h2><?= bl_e(bl_t('TEXT.THEMEN_DER_TAGS')) ?></h2>
@@ -1121,43 +1130,30 @@ foreach ($bl_zeilen as $z) {
 
 <h3><?= bl_e(bl_t('TEXT.G_ANSEHEN')) ?></h3>
 <div class="sm-knopfreihe">
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="selbsttest"><?= bl_e(bl_t('KNOPF.SELBSTTEST')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="status"><?= bl_e(bl_t('KNOPF.STATUS')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="tags"><?= bl_e(bl_t('KNOPF.TAGS')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="sichtbar"><?= bl_e(bl_t('KNOPF.SICHTBAR')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="themen"><?= bl_e(bl_t('KNOPF.THEMEN')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="verlauf"><?= bl_e(bl_t('KNOPF.VERLAUF')) ?></button></form>
-  <?php echo bl_fmt(); ?>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="selbsttest"><?= bl_e(bl_t('KNOPF.SELBSTTEST')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="status"><?= bl_e(bl_t('KNOPF.STATUS')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="tags"><?= bl_e(bl_t('KNOPF.TAGS')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="sichtbar"><?= bl_e(bl_t('KNOPF.SICHTBAR')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="themen"><?= bl_e(bl_t('KNOPF.THEMEN')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="verlauf"><?= bl_e(bl_t('KNOPF.VERLAUF')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
 
 <h3><?= bl_e(bl_t('TEXT.G_TECHNIK')) ?></h3>
 <div class="sm-knopfreihe">
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="bluetooth"><?= bl_e(bl_t('KNOPF.BLUETOOTH')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="konfig"><?= bl_e(bl_t('KNOPF.KONFIG')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="umgebung"><?= bl_e(bl_t('KNOPF.UMGEBUNG')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="mqttinfo"><?= bl_e(bl_t('KNOPF.MQTTINFO')) ?></button></form>
-  <?php echo bl_fmt(); ?>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="bluetooth"><?= bl_e(bl_t('KNOPF.BLUETOOTH')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="btein"><?= bl_e(bl_t('KNOPF.BTEIN')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="konfig"><?= bl_e(bl_t('KNOPF.KONFIG')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="umgebung"><?= bl_e(bl_t('KNOPF.UMGEBUNG')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="mqttinfo"><?= bl_e(bl_t('KNOPF.MQTTINFO')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
 
 <h3><?= bl_e(bl_t('TEXT.G_AKTION')) ?></h3>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.AKTION_SOFORT')) ?></p>
 <div class="sm-knopfreihe">
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="stop"><?= bl_e(bl_t('KNOPF.STOP')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="probewert"><?= bl_e(bl_t('KNOPF.PROBEWERT')) ?></button></form>
-  <?php echo bl_fmt(); ?>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="batterie"><?= bl_e(bl_t('KNOPF.BATTERIE')) ?></button></form>
-  <?php echo bl_fmt(); ?>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="stop"><?= bl_e(bl_t('KNOPF.STOP')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="probewert"><?= bl_e(bl_t('KNOPF.PROBEWERT')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="batterie"><?= bl_e(bl_t('KNOPF.BATTERIE')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
 
 <h3><?= bl_e(bl_t('TEXT.G_KALIBRIEREN')) ?></h3>

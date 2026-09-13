@@ -40,6 +40,14 @@ PCONFIG=$LBPCONFIG/$PDIR
 # Gesucht wird jetzt argumentweise ueber /proc, so wie es die Oberflaeche
 # schon lange tut. Das trifft weder einen Editor mit offener Datei noch ein
 # grep auf dem Quelltext.
+# Merker: dies ist ein UPGRADE. preupgrade.sh laeuft nur dann - gemessen am
+# Quelltext des Installers (plugininstall.pl, Zeile 845: "if ($isupgrade)").
+# postinstall.sh laeuft dagegen IMMER und darf den Dienst deshalb nur auf
+# einer Neuinstallation starten; den Upgrade-Fall erledigt postupgrade.sh,
+# nachdem es die Konfiguration zurueckgespielt hat.
+mkdir -p "$PDATA" 2>/dev/null
+: > "$PDATA/upgrade_laeuft"
+
 PIDDATEI="$PDATA/dienst.pid"
 P=""
 if [ -f "$PIDDATEI" ]; then

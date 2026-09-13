@@ -190,6 +190,114 @@ function bl_defaults()
     );
 }
 
+/* ==================================================================
+ * Retain je Thema - Hausstandard seit 03.09.2026
+ *
+ * "Zustaende retained, Messwerte mit Zeitbezug nicht, das Lebenszeichen nie."
+ *
+ * Diese Tabelle muss Eintrag fuer Eintrag zu RETAIN in bin/bl_common.py
+ * passen; die Pruefzeile "Retain je Thema" im Reiter Test haelt beide
+ * gegeneinander und wird rot, sobald eine Seite abweicht. Gelesen wird die
+ * Python-Seite ueber "bl_lesen.py --vorgaben".
+ *
+ * Bis 1.3.11 gab es die Unterscheidung gar nicht: der Dienst schickte ALLES
+ * zurueckbehalten hinaus, einschliesslich des Lebenszeichens server/ts.
+ * ================================================================== */
+
+function bl_retain()
+{
+    return array(
+        // -- Zustaende je Tag
+        'present'        => true,
+        'level'          => true,
+        'name'           => true,
+        'raum'           => true,
+        // -- absolute Zeitstempel: koennen nicht "aktuell erscheinen"
+        'last_seen_ts'   => true,
+        'present_since'  => true,
+        'battery_ts'     => true,
+        'raum_seit'      => true,
+        // -- Batteriestand: einmal taeglich, "zuletzt gueltiger Wert"
+        'battery'        => true,
+        // -- Zustaende des Dienstes
+        'server/online'          => true,
+        'server/ok'              => true,
+        'server/adapter_ok'      => true,
+        'server/letzte_sichtung' => true,
+        'server/version'         => true,
+        'server/scanner'         => true,
+        // -- Zusammenfassung
+        'summary/present'     => true,
+        'summary/tags'        => true,
+        'summary/tags_gesamt' => true,
+        // -- Personen und zweiter Themenzweig je Scanner
+        'person/present'      => true,
+        'person/last_seen_ts' => true,
+        'scanner/present'     => true,
+
+        // -- Messwerte mit Zeitbezug: NICHT retained
+        'rssi'          => false,
+        'rssi_avg'      => false,
+        'distance'      => false,
+        'sensor'        => false,
+        'scanner/rssi'  => false,
+        // -- eine Dauer altert von selbst
+        'last_seen'     => false,
+        // -- das Lebenszeichen
+        'server/ts'     => false,
+        // -- regelmaessig leer; eine leere Nutzlast loescht ein retained Thema
+        'summary/names' => false,
+    );
+}
+
+/** Zweignamen, die der Themenbaum belegt - dieselbe Liste wie in Python. */
+function bl_reservierte_zweige()
+{
+    return array('server', 'summary', 'person', 'scanner', 'sensor');
+}
+
+/**
+ * Aus einem Thema oder einem Quelltextmuster den Stamm machen.
+ * Gleiche Regel wie thema_stamm() in bl_common.py.
+ */
+function bl_thema_stamm($thema)
+{
+    $teile = array();
+    foreach (explode('/', (string) $thema) as $x) {
+        if ($x === '' || preg_match('/^\{\d\}$/', $x)) {
+            continue;
+        }
+        $teile[] = $x;
+    }
+    if (!$teile) {
+        return '';
+    }
+    if (in_array('sensor', $teile, true)) {
+        return 'sensor';
+    }
+    if (in_array($teile[0], array('server', 'summary'), true)) {
+        return $teile[0] . '/' . (isset($teile[1]) ? $teile[1] : '');
+    }
+    if (in_array($teile[0], array('person', 'scanner'), true)) {
+        return $teile[0] . '/' . $teile[count($teile) - 1];
+    }
+    return $teile[count($teile) - 1];
+}
+
+/** Geht dieses Thema zurueckbehalten hinaus? Unbekannter Stamm: nein. */
+function bl_retain_fuer($thema)
+{
+    $tab = bl_retain();
+    $stamm = bl_thema_stamm($thema);
+    return isset($tab[$stamm]) ? (bool) $tab[$stamm] : false;
+}
+
+/** Anzeigetext fuer die Thementabelle. */
+function bl_retain_text($thema)
+{
+    return bl_retain_fuer($thema) ? bl_t('TEXT.RETAIN_JA') : bl_t('TEXT.RETAIN_NEIN');
+}
+
 /** Erlaubte Zusatzangaben je Tag - dieselbe Liste wie TAG_OPTIONEN in Python. */
 function bl_tag_optionen()
 {

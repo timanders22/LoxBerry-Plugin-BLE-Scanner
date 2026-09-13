@@ -105,17 +105,47 @@ STEUER_FILE = _SHM + "/ble_scanner_ng_steuer.json"
 # Rueckfall fuer den nicht installierten Zustand; der Reiter Test misst
 # nach, ob beide uebereinstimmen.
 
-VERSION_RUECKFALL = "1.3.0"
+# Letzte Rueckfallebene. Sie soll NIE zu sehen sein - und genau deshalb ist
+# sie eine Falle: bis 1.3.11 stand hier unveraendert "1.3.0", waehrend das
+# Plugin bei 1.3.11 war. Gemessen am 13.09.2026 im Sandkasten: der Dienst
+# meldete "BLE-Scanner NG 1.3.0 startet". Auf einer Installation fiel es nicht
+# auf, weil fassung.txt davorsteht; im ausgepackten Archiv und in jedem
+# Pruefstand stand die falsche Nummer. Werkzeuge/fassung_setzen.py kennt diese
+# Konstante nicht (gemessen: 0 Treffer), sie wandert also bei keinem Anheben
+# mit.
+#
+# Deshalb kommt jetzt die plugin.cfg davor: die gibt es im ausgepackten Archiv
+# (und nur dort - der Installer kopiert sie nirgendwohin), und sie wird von
+# fassung_setzen.py gepflegt. Damit ist die Konstante nur noch fuer den Fall
+# da, dass beides fehlt.
+VERSION_RUECKFALL = "1.3.12"
 
 
 def fassung():
-    """Fassungsnummer: aus <configdir>/fassung.txt, sonst der Rueckfall."""
+    """Fassungsnummer - in dieser Reihenfolge:
+
+    1. <configdir>/fassung.txt   - von postinstall.sh aus $PVERSION geschrieben;
+                                   das ist der Stand, der INSTALLIERT ist.
+    2. plugin.cfg neben dem Plugin - gibt es nur im ausgepackten Archiv.
+    3. die Konstante oben        - soll nie gebraucht werden.
+    """
     try:
         with open(os.path.join(CONFIG_DIR, "fassung.txt"),
                   "r", encoding="utf-8") as fh:
             wert = fh.read().strip()
         if re.fullmatch(r"\d+(\.\d+){0,3}", wert):
             return wert
+    except OSError:
+        pass
+    # Zwei Ebenen ueber bin/ liegt im Archiv die plugin.cfg.
+    try:
+        pfad = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "plugin.cfg")
+        with open(pfad, "r", encoding="utf-8", errors="replace") as fh:
+            for zeile in fh:
+                m = re.match(r"\s*VERSION\s*=\s*([0-9.]+)", zeile)
+                if m:
+                    return m.group(1).strip()
     except OSError:
         pass
     return VERSION_RUECKFALL
@@ -178,6 +208,139 @@ VORGABEN = {
 
 # Erlaubte Schluessel der Zusatzangaben je Tag (viertes Feld der Tag-Zeile).
 TAG_OPTIONEN = ("abw", "min", "ref", "alias", "person", "batt", "raum")
+
+# Zweignamen, die der Themenbaum selbst belegt. Ein Tag-Alias darf NICHT so
+# heissen, sonst kollidiert "<alias>/present" mit "summary/present" und die
+# Retain-Tabelle unten ordnet das Thema dem falschen Stamm zu. Die Oberflaeche
+# weist einen solchen Alias ab und sagt es.
+RESERVIERTE_ZWEIGE = ("server", "summary", "person", "scanner", "sensor")
+
+
+# ---------------------------------------------------------------------------
+# Retain je Thema - Hausstandard seit 03.09.2026
+# ---------------------------------------------------------------------------
+#
+# "Zustaende retained, Messwerte mit Zeitbezug nicht, das Lebenszeichen nie."
+#
+# Bis 1.3.11 ging ALLES zurueckbehalten hinaus - senden() hatte retain=True
+# als Vorgabe, und _senden() hat den Wert nie mitgegeben. Damit war auch
+# server/ts retained, also das Lebenszeichen: zurueckbehalten zeigt es auf
+# Dauer "lebt", und genau dafuer ist es nicht da. Gemessen am 13.09.2026 am
+# Gerät: unter blescanner/# lag gar nichts zurueckbehalten, weil der Dienst
+# dort nie gearbeitet hat - der Fehler war also noch ohne Folgen, aber im
+# Quelltext vorhanden.
+#
+# Drei Regeln, die der Hausstandard dazu ausdruecklich nennt:
+#   * Entschieden wird je THEMENSTAMM, nicht je Aufruf. Ein Aufruf, der
+#     Lebenszeichen und Zustand zusammen schickt, koennte sonst nur eines
+#     von beiden richtig machen.
+#   * Ein Thema ohne Eintrag in dieser Tabelle geht FLUECHTIG hinaus. Was
+#     niemand eingeordnet hat, darf nicht auf Dauer im Broker stehen.
+#   * Ein LEERER Wert geht nie retained hinaus - eine leere Nutzlast loescht
+#     ein zurueckbehaltenes Thema. Themen, die regelmaessig leer sind
+#     (summary/names, wenn niemand da ist), stehen deshalb ohnehin auf False.
+#
+# Die Tabelle ist die EINE Quelle: die Oberflaeche liest sie ueber
+# bl_lesen.py --vorgaben und zeigt sie in der Thementabelle an; eine
+# Pruefzeile im Reiter Test haelt beide Seiten und den Sendecode gegeneinander.
+RETAIN = {
+    # -- Zustaende je Tag: retained, damit Loxone nach einem Neustart des
+    #    Miniservers oder des Gateways sofort den Stand hat.
+    "present":        True,
+    "level":          True,
+    "name":           True,
+    "raum":           True,
+    # -- Zeitstempel: retained. Ein ABSOLUTER Zeitstempel kann nicht
+    #    "aktuell erscheinen" - er sagt genau, wann. Loxone rechnet das
+    #    Alter daraus selbst; ohne Retain fehlte die Angabe nach jedem
+    #    Neustart des Miniservers.
+    "last_seen_ts":   True,
+    "present_since":  True,
+    "battery_ts":     True,
+    "raum_seit":      True,
+    # -- Batteriestand: retained. Abwaegung, und sie steht hier, weil sie
+    #    nicht selbsterklaerend ist: der Wert entsteht einmal taeglich ueber
+    #    eine Verbindung (batterie_uhrzeit). Ohne Retain fehlte er nach einem
+    #    Neustart des Miniservers bis zu 24 Stunden - und der Zweck, vor der
+    #    leeren Knopfzelle zu warnen, waere dahin. Als "zuletzt gueltiger
+    #    Wert" samt eigenem Zeitstempel daneben kann er nicht fuer aktuell
+    #    gehalten werden. Der laufend aus den Werbedaten gelesene
+    #    Spannungswert ist dagegen ein Messwert und steht unter "sensor".
+    "battery":        True,
+    # -- Zustaende des Dienstes: retained
+    "server/online":          True,
+    "server/ok":              True,
+    "server/adapter_ok":      True,
+    "server/letzte_sichtung": True,
+    "server/version":         True,
+    "server/scanner":         True,
+    # -- Zusammenfassung: Zaehlwerte sind Zustaende
+    "summary/present":      True,
+    "summary/tags":         True,
+    "summary/tags_gesamt":  True,
+    # -- Personen
+    "person/present":       True,
+    "person/last_seen_ts":  True,
+    # -- zweiter Themenzweig je Scanner
+    "scanner/present":      True,
+
+    # -- Messwerte mit Zeitbezug: NICHT retained. Nach einem Ausfall darf
+    #    kein alter Wert als aktuell erscheinen; der virtuelle Eingang traegt
+    #    dann seinen Fehlwert nach Ablauf.
+    "rssi":          False,
+    "rssi_avg":      False,
+    "distance":      False,
+    "sensor":        False,      # Temperatur, Feuchte, Druck, Spannung
+    "scanner/rssi":  False,
+    # -- last_seen ist eine DAUER und altert damit von selbst. Zurueckbehalten
+    #    waere "vor 3 s gesehen" nach einer Woche noch zu lesen. Der
+    #    zugehoerige Zeitstempel last_seen_ts ist der retained Weg.
+    "last_seen":     False,
+    # -- Das Lebenszeichen: NIE retained.
+    "server/ts":     False,
+    # -- Regelmaessig leer (niemand anwesend). Eine leere Nutzlast loescht ein
+    #    retained Thema; die Zahl derselben Sache (summary/present) ist der
+    #    retained Weg und ist nie leer.
+    "summary/names": False,
+}
+
+
+def thema_stamm(unterthema):
+    """Aus einem Thema den Stamm machen, unter dem RETAIN es fuehrt.
+
+    Nimmt sowohl ein fertiges Thema als auch ein Muster aus dem Quelltext
+    ("{0}/present"), damit die Pruefzeile im Reiter Test denselben Weg geht
+    wie der Dienst. Platzhalter der Form {0} werden verworfen.
+
+        AABBCCDDEEFF/present          -> present
+        AABBCCDDEEFF/sensor/temperatur-> sensor
+        server/ts                     -> server/ts
+        person/Anna/present           -> person/present
+        scanner/haus/AABBCC/rssi      -> scanner/rssi
+    """
+    teile = [x for x in str(unterthema or "").split("/")
+             if x and not re.fullmatch(r"\{\d\}", x)]
+    if not teile:
+        return ""
+    if "sensor" in teile:
+        return "sensor"
+    if teile[0] in ("server", "summary"):
+        return teile[0] + "/" + (teile[1] if len(teile) > 1 else "")
+    if teile[0] in ("person", "scanner"):
+        return teile[0] + "/" + teile[-1]
+    return teile[-1]
+
+
+def retain_fuer(unterthema, wert=""):
+    """Geht dieses Thema zurueckbehalten hinaus?
+
+    Ein leerer Wert NIE - er wuerde ein vorhandenes retained Thema loeschen,
+    und dafuer gibt es den eigenen Weg Mqtt.loeschen(). Ein unbekannter Stamm
+    ebenfalls nicht.
+    """
+    if str(wert) == "":
+        return False
+    return bool(RETAIN.get(thema_stamm(unterthema), False))
 
 
 def mac_normieren(wert):
@@ -243,6 +406,16 @@ def thema_saeubern(name):
         name = name.replace(alt, neu)
     name = re.sub(r"[^A-Za-z0-9_-]+", "_", name)
     return name.strip("_")
+
+
+def alias_zulaessig(alias):
+    """Taugt dieser Alias als Themenzweig?
+
+    Nein, wenn er einen der Namen traegt, die der Themenbaum selbst belegt -
+    ein Tag mit dem Alias "summary" erzeugte "summary/present" und stritte
+    mit der Zusammenfassung um dasselbe Thema.
+    """
+    return thema_saeubern((alias or "").strip()).lower() not in RESERVIERTE_ZWEIGE
 
 
 def thema_der_kennung(art, kennung, alias=""):
@@ -591,6 +764,237 @@ PROPS_IF = "org.freedesktop.DBus.Properties"
 OBJMGR_IF = "org.freedesktop.DBus.ObjectManager"
 
 
+def bluez_richtlinie():
+    """Wie erlaubt die mitgelieferte D-Bus-Richtlinie den Zugriff auf org.bluez?
+
+    Rueckgabe: (art, datei) mit art in
+        "alle"      eine Regel fuer <policy context="default"> - JEDER Benutzer
+                    darf senden, eine Gruppenmitgliedschaft ist unnoetig
+        "gruppe"    eine Regel fuer <policy group="..."> - die Gruppe wird
+                    gebraucht
+        "keine"     weder das eine noch das andere
+        "unbekannt" keine Richtliniendatei gefunden
+
+    WARUM DAS HIER STEHT: bis 1.3.11 behauptete dieses Plugin an vier Stellen,
+    BlueZ bringe eine Regel fuer die Gruppe bluetooth mit - gemessen an
+    bluez 5.64. Am 13.09.2026 an bluez 5.82-1.1+rpt2 nachgemessen: die Datei
+    /usr/share/dbus-1/system.d/bluetooth.conf enthaelt KEINE Gruppenregel
+    mehr, sondern
+
+        <policy context="default">
+          <allow send_destination="org.bluez"/>
+        </policy>
+
+    also eine Erlaubnis fuer alle. Die Gruppe bluetooth existiert dort (gid
+    116) und ist LEER - sie wird nicht mehr gebraucht. Die Installation hat
+    trotzdem zweimal gewarnt, die Gruppenzuordnung genuege nicht. Das war eine
+    Falschaussage, und sie schickte den Anwender auf die Suche nach einem
+    Rechteproblem, das es nicht gab.
+    """
+    for k in ("/etc/dbus-1/system.d/bluetooth.conf",
+              "/usr/share/dbus-1/system.d/bluetooth.conf"):
+        try:
+            with open(k, "r", encoding="utf-8", errors="replace") as fh:
+                inhalt = fh.read()
+        except OSError:
+            continue
+        # Die Erlaubnis muss im Abschnitt stehen, nicht irgendwo in der Datei:
+        # je <policy>-Block einzeln ansehen.
+        for block in re.findall(r"<policy\b[^>]*>.*?</policy>", inhalt, re.S):
+            if "send_destination=\"org.bluez\"" not in block:
+                continue
+            if re.match(r"<policy\s+context=\"default\"", block):
+                return "alle", k
+        for block in re.findall(r"<policy\b[^>]*>.*?</policy>", inhalt, re.S):
+            if "send_destination=\"org.bluez\"" in block \
+                    and "group=" in block.split(">", 1)[0]:
+                return "gruppe", k
+        return "keine", k
+    return "unbekannt", ""
+
+
+def bluez_zugriff_hinweis():
+    """Ein Satz, der zur gemessenen Richtlinie passt - nicht zu einer erinnerten."""
+    art, datei = bluez_richtlinie()
+    if art == "alle":
+        return ("Der D-Bus weist den Zugriff auf org.bluez ab, obwohl die "
+                "Richtlinie in " + datei + " ihn jedem Benutzer erlaubt "
+                "(<policy context=\"default\">). Dann liegt es nicht an einer "
+                "Gruppe. Pruefen, ob eine zweite Richtliniendatei unter "
+                "/etc/dbus-1/system.d/ dagegensteht, und ob der D-Bus nach einer "
+                "Aenderung neu eingelesen wurde.")
+    if art == "gruppe":
+        return ("Der D-Bus weist den Zugriff auf org.bluez ab. Die Richtlinie in "
+                + datei + " erlaubt ihn der Gruppe bluetooth - pruefen mit: "
+                "id loxberry. Fehlt sie: sudo usermod -a -G bluetooth loxberry. "
+                "ACHTUNG: eine neue Gruppe wirkt erst in einer neuen Sitzung; "
+                "nach einem Neustart des LoxBerry ist das erledigt.")
+    if art == "keine":
+        return ("Der D-Bus weist den Zugriff auf org.bluez ab, und in " + datei
+                + " steht weder eine Regel fuer alle Benutzer noch fuer eine "
+                "Gruppe. Ist bluez vollstaendig installiert?")
+    return ("Der D-Bus weist den Zugriff auf org.bluez ab, und es wurde keine "
+            "D-Bus-Richtlinie fuer BlueZ gefunden. Ist bluez installiert?")
+
+
+# Der Helfer, der das eingebaute Bluetooth einschaltet - EINE Quelle.
+#
+# Er liegt bewusst AUSSERHALB des Plugin-Ordners: postroot.sh schreibt ihn
+# dorthin (root, 0755), und /etc/sudoers.d/ble_scanner_ng nennt genau diesen
+# Pfad ohne Argumente. Eine sudo-Regel auf eine Datei unter bin/ waere ein Weg
+# nach Root, weil dieses Verzeichnis loxberry gehoert (Regeln/06).
+#
+# Derselbe Pfad steht in drei weiteren Dateien - postroot.sh, sudoers/sudoers
+# und bl_test.php (bl_bt_helfer()). Die Selbstpruefung haelt sie gegeneinander;
+# ohne das driftet einer davon beim naechsten Umbau weg.
+BT_HELFER = "/usr/local/sbin/ble_scanner_ng_bluetooth"
+
+
+def bt_schalter_lage():
+    """Ist der Schalter "Bluetooth einschalten" benutzbar?
+
+    Rueckgabe: (helfer_da, regel_da). Beides wird gebraucht: ohne den Helfer
+    gibt es nichts zu rufen, ohne die sudo-Regel scheitert der Ruf an den
+    Rechten. Die Regel legt LoxBerry aus sudoers/sudoers ab und entfernt sie
+    beim Deinstallieren selbst.
+    """
+    helfer_da = os.path.isfile(BT_HELFER) and os.access(BT_HELFER, os.X_OK)
+    regel_da = False
+    for kandidat in ("/etc/sudoers.d/ble_scanner_ng",
+                     os.path.join(os.environ.get("LBHOMEDIR", "/opt/loxberry"),
+                                  "system", "sudoers", "ble_scanner_ng")):
+        if os.path.isfile(kandidat):
+            regel_da = True
+            break
+    return helfer_da, regel_da
+
+
+def bt_hardware_vorhanden():
+    """Kennt der Geraetebaum ueberhaupt ein Bluetooth-Geraet?
+
+    Das ist die Frage NACH "/sys/class/bluetooth fehlt" und vor jeder
+    Empfehlung: fehlt der Adapter, weil keine Hardware da ist - oder weil der
+    Treiber nicht geladen wurde?
+
+    Zwei unabhaengige Belege, beide ohne Rechte lesbar:
+      * der Geraetebaum fuehrt unter serial@*/ einen Kindknoten "bluetooth"
+        (auf einem Raspberry Pi 4 der CYW43455 am PL011-UART),
+      * oder der serdev-Bus fuehrt ein Geraet, dessen modalias auf ein
+        Bluetooth-Modul zeigt (z. B. "Cbrcm,bcm43438-bt").
+
+    Am 13.09.2026 an dieser Anlage gemessen: beides trifft zu, und trotzdem
+    gab es kein hci0 - siehe bt_treiber_gesperrt().
+    """
+    import glob
+    for muster in ("/proc/device-tree/soc/serial@*/bluetooth",
+                   "/proc/device-tree/soc/*/bluetooth"):
+        if glob.glob(muster):
+            return True
+    for pfad in glob.glob("/sys/bus/serial/devices/*/modalias"):
+        try:
+            with open(pfad, "r", encoding="utf-8", errors="replace") as fh:
+                if "-bt" in fh.read().lower():
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def bt_treiber_gesperrt():
+    """Sperrt eine modprobe-Blacklist die Bluetooth-Treiber?
+
+    Rueckgabe: (datei, [gesperrte Module]) oder (None, []).
+
+    DER ANLASS, gemessen am 13.09.2026: auf diesem LoxBerry fehlte hci0, und
+    es sah nach fehlender Hardware aus. Tatsaechlich war alles da - Geraetebaum
+    in Ordnung, das BT-Kind am serdev-Bus angemeldet, Firmware
+    (BCM4345C0.hcd) vorhanden, bluetooth.service und hciuart enabled. Gehalten
+    hat es eine einzige Datei:
+
+        /etc/modprobe.d/dietpi-disable_bluetooth.conf  (13.04.2023)
+            blacklist hci_uart
+            blacklist hidp
+            blacklist rfcomm
+            blacklist btbcm
+            blacklist bnep
+            blacklist bluetooth
+
+    Das ist eine ABSICHT des Systembesitzers (DietPi schaltet Bluetooth bei der
+    Einrichtung ab), keine Stoerung. Das Plugin nimmt sie nicht zurueck - es
+    sagt, wo sie steht und wie man sie aufhebt.
+    """
+    import glob
+    interessant = ("bluetooth", "hci_uart", "btbcm", "btusb", "bnep")
+    for datei in sorted(glob.glob("/etc/modprobe.d/*.conf")):
+        gefunden = []
+        try:
+            with open(datei, "r", encoding="utf-8", errors="replace") as fh:
+                for zeile in fh:
+                    teile = zeile.strip().split()
+                    if len(teile) >= 2 and teile[0] == "blacklist" \
+                            and teile[1] in interessant:
+                        gefunden.append(teile[1])
+        except OSError:
+            continue
+        if gefunden:
+            return datei, gefunden
+    return None, []
+
+
+def bt_abhilfe(datei, module):
+    """Ein Satz, der sagt, was zu tun ist - ohne es selbst zu tun."""
+    if datei:
+        return ("Die Hardware ist vorhanden, aber die Treiber sind gesperrt: "
+                + datei + " fuehrt 'blacklist " + ", ".join(module) + "'. "
+                "Einmalig einschalten, ohne Neustart: "
+                "sudo modprobe btbcm hci_uart && sudo systemctl start bluetooth. "
+                "Dauerhaft auf einem DietPi: dietpi-config, Advanced Options, "
+                "Bluetooth - oder die Zeilen in der genannten Datei entfernen. "
+                "Das Plugin aendert diese Datei nicht: sie ist eine Einstellung "
+                "des Systems, nicht des Plugins.")
+    return ("Die Hardware ist vorhanden, aber es ist kein Treiber geladen. "
+            "Pruefen mit: systemctl status bluetooth und journalctl -k | grep -i blue.")
+
+
+def adapterlage(adapter="hci0"):
+    """Gibt es ueberhaupt Bluetooth? Rueckgabe: (zustand, text).
+
+    zustand: True  ein Adapter ist da und bluetoothd laeuft
+             False es fehlt etwas, und der Text sagt was
+             None  nicht feststellbar
+
+    Diese Frage beantwortet KEIN Abbild des Dienstes - der entsteht ja erst,
+    wenn der Dienst laufen kann. Bis 1.3.11 fehlte sie in der Selbstpruefung;
+    am 13.09.2026 stand dort bei einem LoxBerry ohne Bluetooth ein Strich
+    ("noch keine Sichtung seit dem Start"), wo ein Kreuz mit Grund hingehoert.
+    """
+    if not os.path.isdir("/sys/class/bluetooth"):
+        # "Kein Adapter" ist erst die halbe Antwort. Die ganze unterscheidet,
+        # ob Hardware fehlt oder nur der Treiber nicht geladen wurde - das
+        # eine braucht einen USB-Stecker, das andere zwei Befehle.
+        if bt_hardware_vorhanden():
+            datei, module = bt_treiber_gesperrt()
+            return False, ("Der Kernel hat kein Bluetooth-Geraet angemeldet "
+                           "(/sys/class/bluetooth fehlt), obwohl der "
+                           "Geraetebaum eines fuehrt. " + bt_abhilfe(datei, module))
+        return False, ("Der Kernel kennt kein Bluetooth-Geraet: "
+                       "/sys/class/bluetooth fehlt, und auch der Geraetebaum "
+                       "fuehrt keines. Damit startet auch bluetooth.service "
+                       "nicht (ConditionPathIsDirectory). Hier hilft nur ein "
+                       "USB-Bluetooth-Adapter.")
+    try:
+        eintraege = sorted(os.listdir("/sys/class/bluetooth"))
+    except OSError:
+        return None, "/sys/class/bluetooth ist nicht lesbar."
+    if not eintraege:
+        return False, ("/sys/class/bluetooth ist leer - es ist kein Adapter "
+                       "angemeldet.")
+    if adapter not in eintraege:
+        return False, ("Vorhanden ist " + ", ".join(eintraege)
+                       + " - eingestellt ist aber " + str(adapter) + ".")
+    return True, ", ".join(eintraege)
+
+
 class BlueZFehlt(Exception):
     """python3-dbus fehlt oder BlueZ antwortet nicht."""
 
@@ -619,14 +1023,28 @@ def dbus_fehler_deuten(fehler, adapter="hci0"):
     Gruppen des Webservers.
     """
     text = str(fehler)
-    if "AccessDenied" in text or "Rejected send message" in text:
-        return ("Der D-Bus weist den Zugriff auf org.bluez ab. Die Gruppe bluetooth "
-                "ist der vorgesehene Weg dorthin - pruefen mit: id loxberry. "
-                "Fehlt sie: sudo usermod -a -G bluetooth loxberry. "
-                "ACHTUNG: eine neue Gruppe wirkt erst in einer neuen Sitzung. Wird "
-                "der Dienst aus der Oberflaeche gestartet, erbt er die Gruppen des "
-                "Webservers - nach einem Neustart des LoxBerry ist das erledigt. "
+    # Erst die Frage, die alles andere erledigt: gibt es ueberhaupt einen
+    # Bluetooth-Adapter? Ohne den startet systemd bluetooth.service gar nicht
+    # (ConditionPathIsDirectory=/sys/class/bluetooth), und jede Anfrage an
+    # org.bluez laeuft in die Aktivierungs-Zeitgrenze.
+    ohne_geraet = not os.path.isdir("/sys/class/bluetooth")
+    if "TimedOut" in text or "NoReply" in text \
+            or "Failed to activate service" in text:
+        if ohne_geraet:
+            _zustand, _grund = adapterlage(adapter)
+            return ("Der Dienst org.bluez liess sich nicht aktivieren, weil kein "
+                    "Bluetooth-Geraet angemeldet ist. " + _grund
+                    + " Urspruenglicher Fehler: " + text)
+        return ("Der Dienst org.bluez liess sich nicht ansprechen und die "
+                "Wartezeit ist abgelaufen - bluetoothd laeuft nicht oder "
+                "antwortet nicht. Pruefen mit: systemctl status bluetooth. "
+                "Starten mit: sudo systemctl enable --now bluetooth. "
                 "Urspruenglicher Fehler: " + text)
+    if ohne_geraet:
+        _zustand, _grund = adapterlage(adapter)
+        return (_grund + " Urspruenglicher Fehler: " + text)
+    if "AccessDenied" in text or "Rejected send message" in text:
+        return (bluez_zugriff_hinweis() + " Urspruenglicher Fehler: " + text)
     if "ServiceUnknown" in text or "was not provided by any .service" in text:
         return ("Der Dienst org.bluez antwortet nicht - bluetoothd laeuft nicht. "
                 "Pruefen mit: systemctl status bluetooth. Starten mit: "

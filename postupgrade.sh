@@ -60,6 +60,44 @@ fi
 
 chmod 755 "$PBIN"/*.py 2>/dev/null
 
+# --- Gemeinsame Hilfen ------------------------------------------------------
+#
+# WARUM OHNE "su": dieses Skript laeuft bereits als loxberry. LoxBerry ruft
+# postinstall.sh und postupgrade.sh mit "sudo -n -u loxberry" auf
+# (plugininstall.pl, Zeile 1311 bzw. 1336); nur preroot und postroot laufen
+# als root. Ein "su loxberry -c" verlangt dann ein Kennwort und scheitert mit
+# "su: Authentication failure", Rueckgabewert 1 - am Geraet gemessen am
+# 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
+# einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
+# umleitete, stand darueber auch nichts im Protokoll.
+dienst_pid() {
+    for d in /proc/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -qx ".*/ble_scanner_ng\.py"; then
+            basename "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+dienst_starten() {
+    mkdir -p "$PLOG" "$PDATA" 2>/dev/null
+    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng.log" 2>&1 &
+    echo $! > "$PDATA/dienst.pid"
+    sleep 2
+    # Geprueft wird die WIRKUNG, nicht der Rueckgabewert von nohup - der ist
+    # immer 0.
+    if P=$(dienst_pid); then
+        echo "<OK> Der Dienst laeuft (PID $P)."
+        return 0
+    fi
+    echo "<INFO> Der Dienst liess sich nicht starten. Das Protokoll steht im"
+    echo "<INFO> Reiter Logdateien; starten laesst er sich dort im Reiter"
+    echo "<INFO> Einstellungen mit 'Dienst starten'."
+    return 1
+}
+
 # --- Fassungsnummer an EINE Stelle schreiben --------------------------------
 #
 # bl_common.py und bl_lib.php lesen sie von hier. Bis 1.2.10 stand sie an
@@ -84,19 +122,15 @@ fi
 #
 # Gestartet wird nur, wenn er VORHER lief (Merker aus preupgrade.sh) - sonst
 # liefe ein bewusst angehaltener Dienst nach jedem Update wieder an.
+# Den Merker aus preupgrade.sh wegraeumen - postinstall.sh hat ihn gelesen.
+rm -f "$PDATA/upgrade_laeuft" 2>/dev/null
+
 if [ -f "$PDATA/lief_vor_update" ]; then
     rm -f "$PDATA/lief_vor_update"
-    mkdir -p "$PLOG" "$PDATA" 2>/dev/null
-    chown loxberry:loxberry "$PLOG" "$PDATA" 2>/dev/null
-    su loxberry -c "nohup '$PBIN/ble_scanner_ng.py' >> '$PLOG/ble_scanner_ng.log' 2>&1 & echo \$! > '$PDATA/dienst.pid'"
-    chown loxberry:loxberry "$PDATA/dienst.pid" 2>/dev/null
-    sleep 2
-    if [ -s "$PDATA/dienst.pid" ] && kill -0 "$(cat "$PDATA/dienst.pid")" 2>/dev/null; then
-        echo "<OK> Der Dienst laeuft wieder (PID $(cat "$PDATA/dienst.pid"))."
+    if P=$(dienst_pid); then
+        echo "<OK> Der Dienst laeuft bereits (PID $P)."
     else
-        echo "<WARNING> Der Dienst liess sich nicht wieder starten."
-        echo "<WARNING> Nachsehen im Reiter Logdateien, dann im Reiter Einstellungen"
-        echo "<WARNING> auf 'Dienst starten' druecken."
+        dienst_starten
     fi
 else
     echo "<INFO> Der Dienst lief vor dem Update nicht und wurde nicht gestartet."

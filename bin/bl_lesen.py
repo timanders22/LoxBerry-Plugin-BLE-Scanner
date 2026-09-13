@@ -29,6 +29,11 @@ def main():
     if "--vorgaben" in argumente:
         print(json.dumps({"vorgaben": gem.VORGABEN,
                           "tag_optionen": list(gem.TAG_OPTIONEN),
+                          # Die Retain-Tabelle geht mit hinaus, damit die
+                          # Oberflaeche sie nicht ein zweites Mal tippen muss
+                          # und eine Pruefzeile beide Seiten vergleichen kann.
+                          "retain": gem.RETAIN,
+                          "reserviert": list(gem.RESERVIERTE_ZWEIGE),
                           "version": gem.VERSION}, ensure_ascii=False))
         return 0
 

@@ -59,7 +59,17 @@ LOG_DATEI = os.path.join(gem.LOG_DIR, "ble_scanner_ng.log")
 
 
 def _log_einrichten():
-    handlers = [logging.StreamHandler(sys.stdout)]
+    # Nach STDERR, nicht nach stdout.
+    #
+    # daemon/daemon und bl_dienst() starten mit ">> $log 2>&1" - im Protokoll
+    # landet also beides. Aber stdout ist die Leitung, auf der Werkzeuge ihre
+    # Antwort ausgeben: bl_selbsttest.py --json und bl_lesen.py binden dieses
+    # Modul ein, und sein Protokoll schob sich dann VOR das JSON. Gemessen am
+    # 13.09.2026 am Gerät: die Pruefzeile "Besteht die Python-Seite ihre
+    # eigene Pruefung?" stand auf "nicht pruefbar", weil json_decode an zwei
+    # vorangestellten INFO-Zeilen scheiterte. Eine Zeile behebt die ganze
+    # Klasse.
+    handlers = [logging.StreamHandler(sys.stderr)]
     if os.environ.get("BLE_LOGDATEI") == "1":
         try:
             os.makedirs(gem.LOG_DIR, exist_ok=True)
@@ -183,7 +193,12 @@ class Mqtt:
                 self.client = mqtt.Client()      # paho-mqtt 1.x
         if zugang["user"]:
             self.client.username_pw_set(zugang["user"], zugang["pass"] or "")
-        self.client.will_set(self.praefix + "/server/online", "0", retain=True)
+        # Das Testament traegt denselben Retain-Stand wie das Thema selbst -
+        # server/online ist ein Zustand (Tabelle: retained). Genau deshalb ist
+        # es NICHT das Lebenszeichen: stirbt der Prozess hart, setzt der Broker
+        # die 0 von selbst. Das Lebenszeichen ist server/ts und geht fluechtig.
+        self.client.will_set(self.praefix + "/server/online", "0",
+                             retain=gem.retain_fuer("server/online", "0"))
 
         def bei_verbindung(_c, _u, _f, rc, *_a):
             if rc == 0:
@@ -235,9 +250,18 @@ class Mqtt:
         log.info("MQTT-Schleife gestartet, Ziel %s:%s", zugang["host"], zugang["port"])
         return True
 
-    def senden(self, unterthema, wert, retain=True):
+    def senden(self, unterthema, wert, retain=None):
+        """Ein Thema veroeffentlichen.
+
+        retain=None heisst: die Tabelle in bl_common entscheidet (Hausstandard
+        vom 03.09.2026). Bis 1.3.11 stand hier retain=True als Vorgabe, und
+        _senden() hat nie etwas anderes mitgegeben - damit ging ALLES
+        zurueckbehalten hinaus, auch das Lebenszeichen server/ts.
+        """
         if not self.client:
             return False
+        if retain is None:
+            retain = gem.retain_fuer(unterthema, wert)
         try:
             erg = self.client.publish(self.praefix + "/" + unterthema,
                                       str(wert), qos=0, retain=retain)
@@ -421,6 +445,14 @@ class Dienst:
         self.testwerte = []
         self.kalibrierung = None          # {"kennung":..., "bis":..., "werte":[]}
         self.ereignisse_gesamt = 0
+        # Die zuletzt geschriebene Uebersicht. Sie wird bei einer Stoerung
+        # WIEDERVERWENDET statt neu gebildet: eine Stoerung darf die zuletzt
+        # gemessenen Werte nicht ueberschreiben - sonst meldete ein
+        # unerreichbares BlueZ "alle abwesend", und das ist eine Aussage, die
+        # niemand gemessen hat.
+        self.letzte_uebersicht = []
+        self.letzte_personen = {}
+        self.stoerung = ""
 
     # -- Hilfen -------------------------------------------------------------
 
@@ -776,6 +808,9 @@ class Dienst:
         self._senden("server/version", gem.VERSION, erzwingen)
         self._senden("server/scanner", self.scanner, erzwingen)
 
+        self.letzte_uebersicht = uebersicht
+        self.letzte_personen = personen
+        self.stoerung = ""
         self.zustand_schreiben(uebersicht, anwesend_gesamt, aktive, personen)
 
     def _uebersicht_zeile(self, tag, zweig, eintrag, anwesend, roh, avg, stufe, alter, zustand):
@@ -1036,6 +1071,8 @@ class Dienst:
     # -- Zustandsdatei ------------------------------------------------------
 
     def zustand_schreiben(self, uebersicht, anwesend_gesamt, aktive, personen):
+        # Der Stoerungstext steht im Abbild, damit die Oberflaeche ihn zeigen
+        # kann. Ueber MQTT genuegen server/ok und server/adapter_ok.
         """Zustandsdatei fuer die Oberflaeche.
 
         Rechte 0640: darin stehen die Namen der ueberwachten Personen und
@@ -1079,6 +1116,7 @@ class Dienst:
             "adapter": self.cfg.get("adapter", "hci0"),
             "betriebsart": self.betriebsart(),
             "adapter_ok": 1 if self.adapter_ok else 0,
+            "stoerung": self.stoerung,
             "letzte_sichtung": int(self.letzte_sichtung_zeit),
             "suchfilter": self.suchfilter,
             "anwesend": anwesend_gesamt,
@@ -1110,6 +1148,32 @@ class Dienst:
             os.replace(temp, gem.STATUS_FILE)
         except (OSError, TypeError, ValueError) as fehler:
             log.warning("Zustandsdatei nicht schreibbar: %s", fehler)
+
+    def stoerung_melden(self, grund):
+        """Eine Stoerung sichtbar machen, ohne Werte zu erfinden.
+
+        WARUM ES DAS BRAUCHT: bis 1.3.11 schwieg der Dienst vollstaendig,
+        solange er BlueZ nicht erreichte. verbinden_mit_geduld() versuchte es
+        alle 30 Sekunden, und die Hauptschleife - und damit auswerten() und
+        zustand_schreiben() - wurde nie erreicht. Am 13.09.2026 am Geraet
+        gemessen: nach 34 Sekunden Laufzeit gab es KEIN Abbild, und damit
+        stand in der Selbstpruefung bei jeder Zeile, die das Abbild braucht,
+        ein Strich. Die Oberflaeche konnte "laeuft, ist aber blind" nicht von
+        "laeuft nicht" unterscheiden, und am Miniserver kam gar nichts an.
+
+        Gemeldet wird NUR das Kennzeichen, nicht der Wert: eine Stoerung darf
+        die zuletzt gemessenen Werte nicht ueberschreiben, sonst hiesse ein
+        unerreichbares BlueZ "alle abwesend".
+        """
+        self.adapter_ok = False
+        self.stoerung = str(grund)
+        self._senden("server/ok", 0, erzwingen=True)
+        self._senden("server/adapter_ok", 0, erzwingen=True)
+        self._senden("server/ts", int(time.time()), erzwingen=True)
+        aktive = sum(1 for t in self.tags if t.get("aktiv") == "1")
+        anwesend = sum(1 for z in self.letzte_uebersicht if z.get("anwesend"))
+        self.zustand_schreiben(self.letzte_uebersicht, anwesend, aktive,
+                               self.letzte_personen)
 
     # -- Steuerdatei --------------------------------------------------------
 
@@ -1396,6 +1460,12 @@ class Dienst:
             except gem.BlueZFehlt as fehler:
                 log.error("%s", fehler)
                 log.error("Neuer Versuch in 30 Sekunden.")
+                # Die Stoerung wird gemeldet, BEVOR gewartet wird - sonst
+                # erfaehrt niemand, dass der Dienst laeuft und nichts sieht.
+                try:
+                    self.stoerung_melden(str(fehler))
+                except Exception as f2:      # noqa: BLE001
+                    log.warning("Störung ließ sich nicht melden: %s", f2)
                 for _ in range(30):
                     if not self.laeuft:
                         return False
@@ -1620,7 +1690,7 @@ class Dienst:
                     log.info("Verbindung zu BlueZ wiederhergestellt")
                 except gem.BlueZFehlt as fehler:
                     log.error("%s", fehler)
-                    self.adapter_ok = False
+                    self.stoerung_melden(str(fehler))
                     for _ in range(15):
                         if not self.laeuft:
                             return

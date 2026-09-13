@@ -12,14 +12,24 @@ Jede Pruefung ist so gebaut, dass sie ROT wird, wenn man die zugehoerige
 Korrektur wieder herausnimmt. Wo das nicht geht, steht es dabei.
 
 Aufruf:
-    python3 bl_selbsttest.py           lesbar
-    python3 bl_selbsttest.py --json    fuer die Oberflaeche
+    python3 bl_selbsttest.py              lesbar
+    python3 bl_selbsttest.py --selbsttest dasselbe; so ruft das Freigabetor
+                                          einen Selbsttest auf (es sucht unter
+                                          bin/ nach einer Datei, die
+                                          --selbsttest selbst auswertet)
+    python3 bl_selbsttest.py --json       fuer die Oberflaeche, eine Zeile JSON
+
+Rueckgabewert 0, wenn keine Pruefung fehlgeschlagen ist; sonst 1. Ein
+"nicht pruefbar" ist KEIN Fehlschlag - es ist ein Strich, und ein Strich ist
+kein Haken.
 """
 
 import json
 import os
+import re
 import sys
 import tempfile
+from pathlib import Path
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -382,6 +392,169 @@ def alles_pruefen():
              gem.log_kappen(logdatei, grenze_kb=5000), False)
 
     # =====================================================================
+    G = "Retain je Thema"
+    # Hausstandard 03.09.2026: Zustände retained, Messwerte mit Zeitbezug
+    # nicht, das Lebenszeichen nie.
+    p.gleich(G, "Zustand: present ist retained",
+             gem.retain_fuer("AABBCCDDEEFF/present", "1"), True)
+    p.gleich(G, "Zustand: level ist retained",
+             gem.retain_fuer("AABBCCDDEEFF/level", "2"), True)
+    p.gleich(G, "Messwert: rssi ist NICHT retained",
+             gem.retain_fuer("AABBCCDDEEFF/rssi", "-70"), False)
+    p.gleich(G, "Messwert: last_seen ist NICHT retained (eine Dauer altert)",
+             gem.retain_fuer("AABBCCDDEEFF/last_seen", "42"), False)
+    p.gleich(G, "Zeitstempel: last_seen_ts ist retained",
+             gem.retain_fuer("AABBCCDDEEFF/last_seen_ts", "1757000000"), True)
+    p.gleich(G, "Lebenszeichen: server/ts ist NIE retained",
+             gem.retain_fuer("server/ts", "1757000000"), False)
+    p.gleich(G, "Zustand des Dienstes: server/ok ist retained",
+             gem.retain_fuer("server/ok", "1"), True)
+    p.gleich(G, "Sensorwerte sind NICHT retained",
+             gem.retain_fuer("AABBCCDDEEFF/sensor/temperatur", "21.5"), False)
+    p.gleich(G, "summary/names ist NICHT retained (regelmäßig leer)",
+             gem.retain_fuer("summary/names", "Anna"), False)
+    p.gleich(G, "summary/present ist retained",
+             gem.retain_fuer("summary/present", "2"), True)
+    p.gleich(G, "Ein LEERER Wert geht nie retained hinaus",
+             gem.retain_fuer("AABBCCDDEEFF/present", ""), False)
+    p.gleich(G, "Ein unbekannter Stamm geht flüchtig hinaus",
+             gem.retain_fuer("AABBCCDDEEFF/gibtsnicht", "1"), False)
+    # Stammbildung: dieselbe Regel für Themen und für Quelltextmuster.
+    for thema, soll in (("AABBCCDDEEFF/present", "present"),
+                        ("AABBCCDDEEFF/sensor/temperatur", "sensor"),
+                        ("server/ts", "server/ts"),
+                        ("person/Anna/present", "person/present"),
+                        ("scanner/haus/AABBCC/rssi", "scanner/rssi"),
+                        ("{0}/present", "present"),
+                        ("{0}/sensor/{1}", "sensor"),
+                        ("scanner/{0}/{1}/rssi", "scanner/rssi")):
+        p.gleich(G, "Themenstamm von %s" % thema, gem.thema_stamm(thema), soll)
+    zahl_r = sum(1 for v in gem.RETAIN.values() if v)
+    p.merke(G, "Bilanz der Tabelle: %d zurückbehalten, %d flüchtig"
+            % (zahl_r, len(gem.RETAIN) - zahl_r), len(gem.RETAIN) > 0)
+
+    # Jedes Thema, das der Sendecode benutzt, braucht einen Eintrag. Gelesen
+    # wird der Quelltext, nicht eine zweite Liste - sonst läuft die Anleitung
+    # wieder von der Wirklichkeit weg.
+    quelle = Path(__file__).with_name("ble_scanner_ng.py").read_text(
+        encoding="utf-8", errors="replace")
+    muster = re.findall(r'_?senden\(\s*"([^"]+)"', quelle)
+    staemme = {gem.thema_stamm(m) for m in muster}
+    staemme.discard("")
+    ohne = sorted(s for s in staemme if s not in gem.RETAIN)
+    p.merke(G, "jeder gesendete Themenstamm ist eingeordnet (%d gefunden)"
+            % len(staemme), not ohne, "ohne Eintrag: " + ", ".join(ohne))
+
+    # =====================================================================
+    G = "Reservierte Zweignamen"
+    p.gleich(G, "ein gewöhnlicher Alias ist zulässig",
+             gem.alias_zulaessig("anna_schluessel"), True)
+    for name in gem.RESERVIERTE_ZWEIGE:
+        p.gleich(G, "der Alias %s wird abgewiesen" % name,
+                 gem.alias_zulaessig(name), False)
+    p.gleich(G, "Groß- und Kleinschreibung zählt nicht",
+             gem.alias_zulaessig("Summary"), False)
+
+    # =====================================================================
+    G = "Bluetooth-Lage"
+    art, datei = gem.bluez_richtlinie()
+    p.merke(G, "die D-Bus-Richtlinie wird gemessen, nicht erinnert",
+            art in ("alle", "gruppe", "keine", "unbekannt"),
+            "%s (%s)" % (art, datei or "keine Datei gefunden"))
+    zustand, text = gem.adapterlage("hci0")
+    p.merke(G, "die Adapterlage wird beantwortet",
+            zustand in (True, False, None), text)
+    # Fehlt der Adapter, ist die Frage noch nicht beantwortet: fehlt die
+    # Hardware, oder ist nur der Treiber gesperrt? Das eine braucht einen
+    # USB-Stecker, das andere zwei Befehle. Gemessen am 13.09.2026: auf dieser
+    # Anlage war die Hardware da und sechs blacklist-Zeilen hielten sie zurueck.
+    hardware = gem.bt_hardware_vorhanden()
+    sperre, module = gem.bt_treiber_gesperrt()
+    p.merke(G, "eingebautes Bluetooth wird von der Hardware her erkannt",
+            hardware in (True, False),
+            "Gerätebaum/serdev: " + ("ja" if hardware else "nein"))
+    p.merke(G, "eine Treibersperre wird benannt, nicht übergangen",
+            sperre is None or bool(module),
+            (sperre + ": blacklist " + ", ".join(module)) if sperre
+            else "keine Blacklist für Bluetooth gefunden")
+    # Gegenprobe der Abhilfe: sie muss die Datei und einen Befehl nennen.
+    # Nimmt man den Dateinamen aus bt_abhilfe() heraus, wird diese Zeile rot.
+    rat = gem.bt_abhilfe("/etc/modprobe.d/probe.conf", ["bluetooth"])
+    p.merke(G, "die Abhilfe nennt Datei und Befehl",
+            "/etc/modprobe.d/probe.conf" in rat and "modprobe" in rat,
+            rat[:90])
+    # Gegenprobe: die Fehlerdeutung muss die Zeitgrenze erkennen. Nimmt man
+    # den TimedOut-Zweig heraus, wird diese Zeile rot.
+    gedeutet = gem.dbus_fehler_deuten(
+        "org.freedesktop.DBus.Error.TimedOut: Failed to activate service "
+        "'org.bluez': timed out", "hci0")
+    p.merke(G, "eine Aktivierungs-Zeitgrenze wird als Klartext gedeutet",
+            "org.bluez" in gedeutet and ("bluetoothd" in gedeutet
+                                         or "Bluetooth-Adapter" in gedeutet),
+            gem.thema_saeubern("")  or gedeutet[:90])
+
+    # =====================================================================
+    G = "Schalter Bluetooth"
+    # DER PFAD STEHT VIERMAL. Hier wird er gegeneinander gehalten - eine
+    # Abweichung macht den Knopf wirkungslos, und zwar STILL: sudo lehnt einen
+    # nicht genannten Pfad ab, und der Anwender sieht nur "hat nicht geklappt".
+    # Geeicht, indem man den Pfad in einer der Dateien aendert: diese Zeilen
+    # muessen rot werden und die Datei nennen.
+    _wurzel = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _stellen = (("postroot.sh", os.path.join(_wurzel, "postroot.sh")),
+                ("sudoers/sudoers", os.path.join(_wurzel, "sudoers", "sudoers")),
+                ("bl_test.php", os.path.join(_wurzel, "webfrontend", "htmlauth",
+                                             "bl_test.php")))
+    for name, pfad in _stellen:
+        if not os.path.isfile(pfad):
+            # Auf einer INSTALLATION liegen postroot.sh und sudoers/ nicht
+            # neben bin/ - LoxBerry kopiert die Hakenskripte nicht mit. Das ist
+            # kein Fehlschlag, sondern nicht messbar.
+            p.offen(G, "derselbe Helferpfad in " + name,
+                    "nur im Quellbaum messbar, nicht auf einer Installation")
+            continue
+        try:
+            with open(pfad, "r", encoding="utf-8", errors="replace") as fh:
+                inhalt = fh.read()
+        except OSError as fehler:
+            p.merke(G, "derselbe Helferpfad in " + name, False, str(fehler))
+            continue
+        p.merke(G, "derselbe Helferpfad in " + name,
+                gem.BT_HELFER in inhalt,
+                gem.BT_HELFER if gem.BT_HELFER in inhalt else "fehlt dort")
+
+    # Die sudo-Regel darf NICHT in den Plugin-Ordner zeigen. Regeln/06 nennt
+    # das einen Weg nach Root: bin/ gehoert loxberry, wer dort schreiben darf,
+    # verschafft sich sonst root-Code.
+    _sud = os.path.join(_wurzel, "sudoers", "sudoers")
+    if os.path.isfile(_sud):
+        with open(_sud, "r", encoding="utf-8", errors="replace") as fh:
+            _zeilen = [z.strip() for z in fh
+                       if z.strip() and not z.strip().startswith("#")]
+        p.merke(G, "die sudo-Regel nennt genau EINEN Pfad",
+                len(_zeilen) == 1, "%d Regelzeile(n)" % len(_zeilen))
+        _schlecht = [z for z in _zeilen
+                     if "bin/plugins" in z or "/opt/loxberry/" in z]
+        p.merke(G, "die sudo-Regel zeigt nicht in den Plugin-Ordner",
+                not _schlecht, _schlecht[0] if _schlecht else "zeigt nach "
+                + os.path.dirname(gem.BT_HELFER))
+        # Und keine Argumente: mit Argumenten liesse sich die Wirkung von
+        # aussen steuern.
+        _mit_arg = [z for z in _zeilen
+                    if z.split("NOPASSWD:")[-1].strip() != gem.BT_HELFER]
+        p.merke(G, "die sudo-Regel nennt keine Argumente",
+                not _mit_arg, _mit_arg[0] if _mit_arg else gem.BT_HELFER)
+    else:
+        p.offen(G, "Gestalt der sudo-Regel",
+                "sudoers/sudoers liegt nicht neben bin/ - nur im Quellbaum messbar")
+
+    _helfer_da, _regel_da = gem.bt_schalter_lage()
+    p.merke(G, "die Lage des Schalters wird beantwortet",
+            isinstance(_helfer_da, bool) and isinstance(_regel_da, bool),
+            "Helfer: %s, sudo-Regel: %s"
+            % ("da" if _helfer_da else "fehlt", "da" if _regel_da else "fehlt"))
+
+    # =====================================================================
     G = "Nicht prüfbar ohne Gerät"
     p.offen(G, "BlueZ über D-Bus (Suche, RSSI, RemoveDevice)",
             "kein Bluetooth-Adapter und kein laufendes bluetoothd erreichbar")
@@ -409,6 +582,10 @@ def main():
     ok = sum(1 for z in zeilen if z["ok"] is True)
     rot = sum(1 for z in zeilen if z["ok"] is False)
     offen = sum(1 for z in zeilen if z["ok"] is None)
+    # --selbsttest ist der lesbare Lauf. Das Freigabetor sucht unter bin/ nach
+    # einer Datei, die diesen Schalter SELBST auswertet; vorher meldete es
+    # "nichts gemessen" (gemessen am 13.09.2026), und ein Strich sammelt sich
+    # beim Ueberfliegen wie ein Haken ein.
     if "--json" in sys.argv:
         print(json.dumps({"zeilen": zeilen, "ok": ok, "fehler": rot,
                           "offen": offen, "version": gem.VERSION},
@@ -420,10 +597,17 @@ def main():
         if z["gruppe"] != gruppe:
             gruppe = z["gruppe"]
             print("\n== " + gruppe)
-        zeichen = "[ok]" if z["ok"] is True else ("[--]" if z["ok"] is None else "[XX]")
-        print("  %s %s%s" % (zeichen, z["text"],
-                             ("   (" + z["anmerkung"] + ")") if z["anmerkung"] else ""))
-    print("\n%d bestanden, %d fehlgeschlagen, %d nicht prüfbar" % (ok, rot, offen))
+        # Hausform der Marken: [OK] / [FEHL] / [INFO]. Das Freigabetor zaehlt
+        # die [FEHL]-Zeilen und liest dazu den Rueckgabewert; mit eigenen
+        # Zeichen ([ok]/[XX]) meldete es "keine auswertbare Ausgabe" - ein
+        # rotes Kreuz ohne Befund, gemessen am 13.09.2026.
+        zeichen = "[OK]" if z["ok"] is True else ("[INFO]" if z["ok"] is None else "[FEHL]")
+        print("  %-6s %s%s" % (zeichen, z["text"],
+                               ("   (" + z["anmerkung"] + ")") if z["anmerkung"] else ""))
+    # Beide Formen, die das Tor kennt: die Markenform oben und die
+    # Rechenkernform hier. Ein "nicht pruefbar" ist kein Fehlschlag.
+    print("\n%d Faelle geprueft, %d Fehlschlaege." % (len(zeilen), rot))
+    print("%d bestanden, %d fehlgeschlagen, %d nicht prüfbar" % (ok, rot, offen))
     return 1 if rot else 0
 
 

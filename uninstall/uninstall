@@ -136,6 +136,34 @@ if [ -f "$ZWEIT" ]; then
     rm -f "$ZWEIT" && echo "<OK> Zweitschrift der Konfiguration entfernt ($ZWEIT)."
 fi
 
+# --- Der Helfer fuer das Einschalten von Bluetooth --------------------------
+#
+# postroot.sh hat ihn nach /usr/local/sbin gelegt - AUSSERHALB des
+# Plugin-Ordners, den LoxBerry selbst abraeumt. Die sudo-Regel
+# (<home>/system/sudoers/ble_scanner_ng) entfernt LoxBerry selbst
+# (plugininstall.pl, Zeile 1609); dieser Helfer bleibt sonst liegen.
+#
+# WARUM DAS NICHT EGAL IST: liegenbleibende Datei plus entfernte Regel ist
+# harmlos, liegenbleibende Datei plus spaeter anders vergebene Regel nicht.
+# Eine Datei in /usr/local/sbin, die root gehoert und niemandem mehr dient,
+# gehoert weg.
+#
+# Laeuft dieses Skript nicht als root, misslingt das rm - dann wird es gesagt
+# statt verschwiegen.
+HELFER=/usr/local/sbin/ble_scanner_ng_bluetooth
+if [ -f "$HELFER" ]; then
+    if rm -f "$HELFER" 2>/dev/null && [ ! -f "$HELFER" ]; then
+        echo "<OK> Helfer fuer Bluetooth entfernt ($HELFER)."
+    else
+        echo "<WARNING> $HELFER liess sich nicht entfernen - von Hand als root:"
+        echo "<WARNING>   rm -f $HELFER"
+    fi
+fi
+
+# Eingeschaltet gelassenes Bluetooth wird NICHT wieder abgeschaltet: ob der
+# Adapter laufen soll, entscheidet das System und nicht dieses Plugin - und
+# ein anderes Plugin koennte ihn inzwischen benutzen.
+
 echo "<INFO> Die Themen im MQTT-Broker bleiben stehen. Wer sie loswerden will,"
 echo "<INFO> loescht sie dort - ein zurueckbehaltenes Thema verschwindet nur"
 echo "<INFO> durch eine Nachricht mit leerer Nutzlast."

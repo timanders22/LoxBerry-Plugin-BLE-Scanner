@@ -1,0 +1,20 @@
+# BLE-Scanner NG - sudo-Regel
+#
+# LoxBerry legt diese Datei beim Installieren nach
+# <home>/system/sudoers/ble_scanner_ng ab (plugininstall.pl, Zeile 1176) und
+# entfernt sie beim Deinstallieren wieder (Zeile 1609). Dieses Verzeichnis IST
+# /etc/sudoers.d - am Geraet am 13.09.2026 ueber die Inode-Nummer nachgemessen.
+#
+# EINE Zeile, EIN Pfad, KEINE Argumente.
+#
+# Der genannte Helfer liegt in /usr/local/sbin (gehoert root, 0755) und wird
+# von postroot.sh geschrieben - NICHT im Plugin-Ordner. Eine Regel auf eine
+# Datei unter bin/ waere ein Weg nach Root, weil dieses Verzeichnis loxberry
+# gehoert und jeder, der dort schreiben darf, sich damit root-Code verschaffen
+# koennte (Regeln/06, "Die sudoers-Vorlage loeschen, wenn sie nicht gebraucht
+# wird"). Deshalb auch keine Argumente: mit Argumenten liesse sich die Wirkung
+# des Aufrufs von aussen steuern.
+#
+# Was der Helfer tut, steht vollstaendig in ihm selbst: die Bluetooth-Module
+# laden und bluetooth.service starten. Er aendert keine Datei unter /etc.
+%loxberry ALL = NOPASSWD: /usr/local/sbin/ble_scanner_ng_bluetooth

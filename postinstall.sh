@@ -11,6 +11,7 @@ PVERSION=$4   # Forth argument is Plugin version
 PLOG=$LBPLOG/$PDIR       # Achtung: liegt auf einer Ramdisk
 PCONFIG=$LBPCONFIG/$PDIR
 PDATA=$LBPDATA/$PDIR
+PBIN=$LBPBIN/$PDIR
 
 # mkdir mit -p und in Anfuehrungszeichen: ohne -p meldet mkdir einen Fehler,
 # sobald das Verzeichnis schon existiert - und genau das ist bei einer
@@ -23,6 +24,44 @@ chown loxberry:loxberry "$PLOG/$PSHNAME.log"
 # Ausfuehrbar machen. Ohne das startet der Daemon beim Systemstart nicht.
 chmod 755 "$LBPBIN/$PDIR"/*.py 2>/dev/null
 
+# --- Gemeinsame Hilfen ------------------------------------------------------
+#
+# WARUM OHNE "su": dieses Skript laeuft bereits als loxberry. LoxBerry ruft
+# postinstall.sh und postupgrade.sh mit "sudo -n -u loxberry" auf
+# (plugininstall.pl, Zeile 1311 bzw. 1336); nur preroot und postroot laufen
+# als root. Ein "su loxberry -c" verlangt dann ein Kennwort und scheitert mit
+# "su: Authentication failure", Rueckgabewert 1 - am Geraet gemessen am
+# 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
+# einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
+# umleitete, stand darueber auch nichts im Protokoll.
+dienst_pid() {
+    for d in /proc/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -qx ".*/ble_scanner_ng\.py"; then
+            basename "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+dienst_starten() {
+    mkdir -p "$PLOG" "$PDATA" 2>/dev/null
+    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng.log" 2>&1 &
+    echo $! > "$PDATA/dienst.pid"
+    sleep 2
+    # Geprueft wird die WIRKUNG, nicht der Rueckgabewert von nohup - der ist
+    # immer 0.
+    if P=$(dienst_pid); then
+        echo "<OK> Der Dienst laeuft (PID $P)."
+        return 0
+    fi
+    echo "<INFO> Der Dienst liess sich nicht starten. Das Protokoll steht im"
+    echo "<INFO> Reiter Logdateien; starten laesst er sich dort im Reiter"
+    echo "<INFO> Einstellungen mit 'Dienst starten'."
+    return 1
+}
+
 # Fassungsnummer an EINE Stelle schreiben. bl_common.py und bl_lib.php lesen
 # sie von hier; bis 1.2.10 stand sie an drei Stellen verschieden im Archiv.
 if [ -n "$PVERSION" ]; then
@@ -31,55 +70,73 @@ if [ -n "$PVERSION" ]; then
     echo "<OK> Fassung $PVERSION vermerkt."
 fi
 
-# Der Dienst laeuft als loxberry und spricht BlueZ ueber D-Bus an. BlueZ
-# erlaubt das Mitgliedern der Gruppe bluetooth.
+# --- Bluetooth-Zugriff: messen, nicht erinnern ------------------------------
 #
-# BEWUSST KEINE eigene D-Bus-Richtlinie unter /etc/dbus-1/system.d/.
+# BIS 1.3.11 STAND HIER EINE FALSCHAUSSAGE, und sie kostete zwei Warnungen bei
+# jeder Installation. Das Plugin behauptete, BlueZ bringe eine Richtlinie fuer
+# die Gruppe bluetooth mit - gemessen an bluez 5.64. Am 13.09.2026 an
+# bluez 5.82-1.1+rpt2 (Raspberry Pi OS trixie) nachgemessen:
 #
-# BlueZ bringt seine Richtlinie selbst mit, und darin steht wortwoertlich:
+#     /usr/share/dbus-1/system.d/bluetooth.conf
+#       <policy user="root">            ... alles
+#       <policy context="default">      <allow send_destination="org.bluez"/>
 #
-#     <!-- allow users of bluetooth group to communicate -->
-#     <policy group="bluetooth">
-#       <allow send_destination="org.bluez"/>
-#     </policy>
+# Eine Gruppenregel gibt es dort NICHT mehr; stattdessen darf JEDER Benutzer
+# senden. Die Gruppe bluetooth existiert (gid 116) und ist leer - sie wird
+# nicht gebraucht. Das Plugin warnte trotzdem, die Gruppenzuordnung genuege
+# nicht: eine Falschaussage, die den Anwender auf die Suche nach einem
+# Rechteproblem schickte, das es nicht gab.
 #
-# (nachgesehen in bluez 5.64, /etc/dbus-1/system.d/bluetooth.conf). Die
-# Gruppe IST der vorgesehene Weg. Eine eigene Datei dorthin zu legen waere
-# eine systemweite Rechteaenderung durch ein Plugin, sie waere doppelt, und
-# beim naechsten BlueZ-Update stuende sie neben der mitgelieferten.
-if getent group bluetooth >/dev/null 2>&1; then
-    if id -nG loxberry 2>/dev/null | tr ' ' '\n' | grep -qx bluetooth; then
-        echo "<OK> Benutzer loxberry ist in der Gruppe bluetooth."
-    elif usermod -a -G bluetooth loxberry 2>/dev/null; then
-        echo "<OK> Benutzer loxberry zur Gruppe bluetooth hinzugefuegt."
-        echo "<INFO> ACHTUNG: eine neue Gruppe wirkt erst in einer NEUEN Sitzung."
-        echo "<INFO> Beim Systemstart ist das erledigt. Wer den Dienst jetzt aus der"
-        echo "<INFO> Oberflaeche startet, erbt womoeglich noch die alten Gruppen des"
-        echo "<INFO> Webservers - dann meldet der Reiter Test 'Zugriff abgewiesen'."
-        echo "<INFO> Abhilfe: LoxBerry einmal neu starten."
-    else
-        echo "<WARNING> Gruppenzuordnung bluetooth konnte nicht gesetzt werden (nicht als root?)."
-        echo "<WARNING> Nachholen mit: sudo usermod -a -G bluetooth loxberry && sudo reboot"
-    fi
-else
-    echo "<WARNING> Gruppe bluetooth nicht vorhanden - ist bluez installiert?"
-fi
-
-# Kennt die mitgelieferte Richtlinie die Gruppe wirklich? Wenn nicht, hilft
-# keine Gruppenzuordnung, und der Anwender soll das erfahren, bevor er
-# stundenlang am Dongle sucht.
+# Und der zweite Teil derselben Warnung war ebenfalls falsch begruendet: das
+# "usermod" konnte gar nicht gelingen, weil DIESES SKRIPT ALS LOXBERRY LAEUFT
+# (plugininstall.pl ruft es mit "sudo -n -u loxberry"). Die Meldung riet auf
+# "nicht als root?" - richtig, aber als Vermutung formuliert, wo es eine
+# Gewissheit ist. Eine Gruppenzuordnung gehoert nach postroot.sh oder in die
+# Anleitung; versucht wird sie hier nicht mehr.
+#
+# BEWUSST KEINE eigene Richtlinie unter /etc/dbus-1/system.d/: das waere eine
+# systemweite Rechteaenderung durch ein Plugin, sie stuende beim naechsten
+# BlueZ-Update neben der mitgelieferten - und sie ist nach dieser Messung
+# ohnehin unnoetig.
 BTCONF=""
 for k in /etc/dbus-1/system.d/bluetooth.conf /usr/share/dbus-1/system.d/bluetooth.conf; do
     [ -f "$k" ] && BTCONF="$k" && break
 done
 if [ -z "$BTCONF" ]; then
-    echo "<WARNING> Keine D-Bus-Richtlinie fuer BlueZ gefunden. Ist bluez vollstaendig installiert?"
+    echo "<INFO> Keine D-Bus-Richtlinie fuer BlueZ gefunden. Ist bluez vollstaendig"
+    echo "<INFO> installiert? Ohne sie kann der Dienst org.bluez nicht ansprechen."
+elif grep -q 'context="default"' "$BTCONF" && grep -q 'send_destination="org.bluez"' "$BTCONF"; then
+    echo "<OK> $BTCONF erlaubt den Zugriff auf org.bluez jedem Benutzer"
+    echo "<OK> (<policy context=\"default\">) - eine Gruppenmitgliedschaft ist unnoetig."
 elif grep -q 'group="bluetooth"' "$BTCONF"; then
-    echo "<OK> Die D-Bus-Richtlinie ($BTCONF) erlaubt der Gruppe bluetooth den Zugriff."
+    if id -nG loxberry 2>/dev/null | tr ' ' '\n' | grep -qx bluetooth; then
+        echo "<OK> $BTCONF erlaubt den Zugriff der Gruppe bluetooth, und loxberry ist darin."
+    else
+        echo "<INFO> $BTCONF erlaubt den Zugriff nur der Gruppe bluetooth, und loxberry"
+        echo "<INFO> ist nicht darin. Dieses Skript laeuft als loxberry und kann die"
+        echo "<INFO> Gruppe nicht setzen. Einmal von Hand, dann ist es erledigt:"
+        echo "<INFO>     sudo usermod -a -G bluetooth loxberry && sudo reboot"
+    fi
 else
-    echo "<WARNING> In $BTCONF steht keine Regel fuer die Gruppe bluetooth."
-    echo "<WARNING> Dann genuegt die Gruppenzuordnung allein nicht. Der Reiter Test"
-    echo "<WARNING> zeigt in diesem Fall 'Zugriff abgewiesen' mit dem genauen Grund."
+    echo "<INFO> In $BTCONF steht weder eine Regel fuer alle Benutzer noch fuer eine"
+    echo "<INFO> Gruppe. Der Reiter Test nennt den genauen Grund, wenn der Zugriff"
+    echo "<INFO> abgewiesen wird."
+fi
+
+# --- Ist ueberhaupt Bluetooth da? ------------------------------------------
+#
+# Die Frage vor allen anderen. Fehlt /sys/class/bluetooth, startet systemd
+# bluetooth.service gar nicht (ConditionPathIsDirectory), und jede Anfrage an
+# org.bluez laeuft in die Aktivierungs-Zeitgrenze. Das ist keine
+# Fehlfunktion des Plugins, sondern eine fehlende Voraussetzung - deshalb
+# <INFO> und nicht <WARNING>.
+if [ -d /sys/class/bluetooth ] && [ -n "$(ls -A /sys/class/bluetooth 2>/dev/null)" ]; then
+    echo "<OK> Bluetooth-Adapter vorhanden: $(ls -A /sys/class/bluetooth | tr '\n' ' ')"
+else
+    echo "<INFO> Es ist KEIN Bluetooth-Adapter vorhanden: /sys/class/bluetooth fehlt"
+    echo "<INFO> oder ist leer. Der Dienst startet und wartet, kann aber nichts"
+    echo "<INFO> finden. Ein Raspberry Pi mit abgeschaltetem eingebautem Bluetooth"
+    echo "<INFO> braucht einen USB-Adapter; der Reiter Test zeigt die Lage."
 fi
 
 # Pruefen, ob die Bausteine wirklich da sind. python3-gi traegt seit 1.3.0
@@ -148,5 +205,34 @@ netz_zurueck() {
     fi
 }
 netz_zurueck "ble_scanner_ng.cfg" "1310ac7910fdf451128de437f2b5b345e3a225924ba180c03f92c303503c1c68"
+
+# --- Den Dienst starten, wenn dies eine NEUINSTALLATION ist -----------------
+#
+# DAS FEHLTE BIS 1.3.11 VOLLSTAENDIG, und es waren zwei Luecken:
+#
+#  1. Der Installer startet den Daemon NIE. Gemessen am Quelltext
+#     (plugininstall.pl, Zeilen 1126-1143): er kopiert die Datei nach
+#     system/daemons/plugins/, setzt Rechte und Eigentuemer - und das ist
+#     alles. Gestartet wird sie erst beim naechsten Systemstart.
+#  2. postupgrade.sh startete nur beim UPGRADE, und dort mit "su loxberry -c",
+#     was als loxberry scheitert (siehe dort).
+#
+# Folge, am Geraet am 13.09.2026 gemessen: nach der Installation von 1.3.11
+# lief kein Prozess, es gab keine PID-Datei, kein Abbild, und das Protokoll
+# war 0 Byte gross. Das Plugin war tot bis zum naechsten Neustart.
+#
+# Gestartet wird nur auf einer Neuinstallation. Beim Upgrade setzt
+# preupgrade.sh den Merker "upgrade_laeuft", und dann gehoert der Start nach
+# postupgrade.sh - der laeuft NACH diesem Skript und spielt vorher die
+# Konfiguration zurueck. Ein Start hier wuerde den Dienst mit der
+# mitgelieferten Vorgabe hochfahren.
+if [ -f "$PDATA/upgrade_laeuft" ]; then
+    echo "<INFO> Upgrade - der Dienst wird von postupgrade.sh gestartet."
+elif P=$(dienst_pid); then
+    echo "<INFO> Es laeuft schon ein Dienst (PID $P) - es wird keiner gestartet."
+else
+    echo "<INFO> Neuinstallation - der Dienst wird gestartet."
+    dienst_starten
+fi
 
 exit 0

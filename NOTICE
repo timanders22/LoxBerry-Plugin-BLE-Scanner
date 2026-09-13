@@ -119,6 +119,27 @@ Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
          sudo-Regel, also eine systemweite Rechteaenderung durch ein Plugin.
        * Entschluesselung originaler Xiaomi-Mi-Beacon-Pakete.
 
+1.3.12 Retain je Thema nach dem Hausstandard vom 03.09.2026 (21 von 29
+       Themenstaemmen zurueckbehalten; das Lebenszeichen server/ts nie), und
+       fuenf am Geraet gemessene Behebungen: der Dienst wurde nach einer
+       Installation nie gestartet und nach einem Update mit einem "su", das
+       als loxberry scheitert; eine Falschaussage ueber die D-Bus-Richtlinie
+       von BlueZ (an bluez 5.82 gibt es keine Gruppenregel mehr, sondern
+       <policy context="default">); der Dienst schwieg vollstaendig, solange
+       er BlueZ nicht erreichte; die Fehlerdeutung kannte die
+       Aktivierungs-Zeitgrenze nicht; und bl_selbsttest.py verschmutzte seine
+       JSON-Antwort mit Protokollzeilen. Dazu eine neue Pruefzeile fuer die
+       Adapterlage, die Abweisung reservierter Tag-Aliase und der
+       Fassungsrueckfall ueber die plugin.cfg.
+       Die Bluetooth-Diagnose unterscheidet fehlende Hardware von
+       gesperrtem Treiber und nennt die Blacklist-Datei.
+       Neu: Knopf "Bluetooth einschalten" im Reiter Test, getragen von
+       postroot.sh (Helfer in /usr/local/sbin, root, 0755) und einer
+       sudo-Regel auf genau diesen Pfad ohne Argumente.
+       Behoben: bei 17 von 24 Formularen stand das Formulartoken hinter
+       </form> und wurde nie mitgesendet - der Wachposten wies diese
+       Knoepfe alle ab. Dazu eine Pruefzeile, die das zaehlt.
+
 Die urheberrechtliche Nennung des Originalautors steht weiterhin in dieser
 Datei, im README, in der Hilfeseite und im Kopf der Python-Dateien.
 

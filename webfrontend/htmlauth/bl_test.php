@@ -43,6 +43,36 @@ function bl_sh($cmd)
     return $text;
 }
 
+/**
+ * Das JSON aus der Ausgabe eines Python-Werkzeugs holen.
+ *
+ * Ein eingebundenes Modul kann Zeilen VOR die Antwort schreiben. Genau das
+ * ist am 13.09.2026 am Geraet passiert: bl_selbsttest.py bindet den Dienst
+ * ein, dessen Protokoll ging nach stdout, und json_decode scheiterte an zwei
+ * vorangestellten INFO-Zeilen - die Pruefzeile stand auf "nicht pruefbar"
+ * und zeigte Protokolltext als Anmerkung. Das Protokoll geht seit 1.3.12
+ * nach stderr; diese Funktion ist die zweite Sicherung, damit dieselbe
+ * Klasse nicht beim naechsten Werkzeug wiederkommt.
+ *
+ * Gesucht wird zeilenweise von hinten - die Werkzeuge geben ihr JSON in
+ * einer Zeile aus.
+ */
+function bl_json_aus($text)
+{
+    $zeilen = preg_split('/\R/', trim((string) $text));
+    foreach (array_reverse($zeilen) as $zeile) {
+        $zeile = trim($zeile);
+        if ($zeile === '' || $zeile[0] !== '{') {
+            continue;
+        }
+        $j = json_decode($zeile, true);
+        if (is_array($j)) {
+            return $j;
+        }
+    }
+    return null;
+}
+
 /** Python-Aufruf zusammenbauen. */
 function bl_python($skript, $argumente = '')
 {
@@ -106,7 +136,7 @@ function bl_leser_vergleich()
             $nicht_pruefbar = $ausgabe;
             break;
         }
-        $py = @json_decode($ausgabe, true);
+        $py = bl_json_aus($ausgabe);
         if (!is_array($py) || !isset($py['zeilen'])) {
             $nicht_pruefbar = $ausgabe;
             break;
@@ -133,7 +163,7 @@ function bl_vorgaben_vergleich()
     if (!$ok) {
         return array(null, $ausgabe);
     }
-    $py = @json_decode($ausgabe, true);
+    $py = bl_json_aus($ausgabe);
     if (!is_array($py) || !isset($py['vorgaben'])) {
         return array(null, $ausgabe);
     }
@@ -151,6 +181,77 @@ function bl_vorgaben_vergleich()
     if ($nur_py)  { $meldung[] = sprintf(bl_t('TEST.NUR_PYTHON'), implode(', ', $nur_py)); }
     if ($andere)  { $meldung[] = sprintf(bl_t('TEST.ANDERER_WERT'), implode(', ', $andere)); }
     return array(count($meldung) === 0, implode("\n", $meldung));
+}
+
+/**
+ * Retain je Thema: stimmen beide Tabellen, und ist jedes gesendete Thema
+ * eingeordnet?
+ *
+ * Drei Fragen in einer Zeile, weil sie zusammengehoeren:
+ *   1. Ist die PHP-Tabelle Eintrag fuer Eintrag die der Python-Seite?
+ *   2. Hat jeder Themenstamm, den der Sendecode wirklich benutzt, einen
+ *      Eintrag? Ein Thema ohne Eintrag geht fluechtig hinaus - das ist die
+ *      sichere Seite, aber es war dann niemandes Entscheidung.
+ *   3. Sind die reservierten Zweignamen auf beiden Seiten dieselben?
+ *
+ * Geeicht, indem ein Eintrag aus einer der Tabellen genommen wird: die Zeile
+ * muss rot werden und den Namen nennen.
+ */
+function bl_retain_vergleich()
+{
+    list($ok, $ausgabe) = bl_python('bl_lesen.py', '--vorgaben');
+    if (!$ok) {
+        return array(null, $ausgabe);
+    }
+    $py = bl_json_aus($ausgabe);
+    if (!is_array($py) || !isset($py['retain'])) {
+        return array(null, bl_kuerzen(trim($ausgabe), 200));
+    }
+    $php = bl_retain();
+    $meldung = array();
+
+    $nur_php = array_diff(array_keys($php), array_keys($py['retain']));
+    $nur_py  = array_diff(array_keys($py['retain']), array_keys($php));
+    if ($nur_php) { $meldung[] = sprintf(bl_t('TEST.NUR_PHP'), implode(', ', $nur_php)); }
+    if ($nur_py)  { $meldung[] = sprintf(bl_t('TEST.NUR_PYTHON'), implode(', ', $nur_py)); }
+    $andere = array();
+    foreach ($php as $k => $v) {
+        if (isset($py['retain'][$k]) && ((bool) $py['retain'][$k]) !== ((bool) $v)) {
+            $andere[] = $k;
+        }
+    }
+    if ($andere) {
+        $meldung[] = sprintf(bl_t('TEST.RETAIN_ANDERS'), implode(', ', $andere));
+    }
+
+    // Jeder gesendete Stamm braucht einen Eintrag.
+    $gesendet = bl_gesendete_themen();
+    if ($gesendet === null) {
+        $meldung[] = bl_t('TEST.SENDECODE_FEHLT');
+    } else {
+        $ohne = array();
+        foreach ($gesendet as $thema) {
+            $stamm = bl_thema_stamm($thema);
+            if ($stamm !== '' && !array_key_exists($stamm, $php)) {
+                $ohne[$stamm] = true;
+            }
+        }
+        if ($ohne) {
+            $meldung[] = sprintf(bl_t('TEST.RETAIN_OHNE_EINTRAG'),
+                                 implode(', ', array_keys($ohne)));
+        }
+    }
+
+    if (isset($py['reserviert'])
+        && array_values($py['reserviert']) !== array_values(bl_reservierte_zweige())) {
+        $meldung[] = bl_t('TEST.RESERVIERT_ANDERS');
+    }
+
+    $anzahl_r = count(array_filter($php));
+    return array(count($meldung) === 0,
+                 implode("\n", $meldung) . ($meldung ? "\n" : '')
+                 . sprintf(bl_t('TEST.RETAIN_BILANZ'), $anzahl_r,
+                           count($php) - $anzahl_r));
 }
 
 /**
@@ -264,6 +365,154 @@ function bl_sprachen_vergleich()
 }
 
 /**
+ * Traegt jedes Formular sein Token, und zwar INNERHALB von <form>?
+ *
+ * DER ANLASS, am gerenderten HTML gemessen (13.09.2026): von 24 Formularen
+ * trugen 18 kein Token. Der Aufruf "<?php echo bl_fmt(); ?>" stand jeweils auf
+ * der Zeile NACH "</form>" - gueltiges HTML, sichtbar im Quelltext, und
+ * vollkommen wirkungslos: ein verstecktes Feld ausserhalb eines Formulars wird
+ * nicht mitgesendet. Der Wachposten in index.php leert dann $_POST und meldet
+ * WACHE.FEHLT. In 1.3.11 stand es genauso, also hat dort KEIN einziger dieser
+ * Knoepfe gearbeitet - und man sah es nicht, weil die Oberflaeche danach
+ * aussieht wie vorher.
+ *
+ * Gemessen wird am QUELLTEXT von index.php, nicht an der eigenen Anzeige: die
+ * Pruefzeile laeuft innerhalb derselben Seite und koennte ihr eigenes HTML
+ * nicht vollstaendig sehen.
+ *
+ * Rueckgabe: array(anzahl_formulare, anzahl_ohne_token).
+ */
+function bl_token_lage()
+{
+    $datei = __DIR__ . '/index.php';
+    $quelle = (string) @file_get_contents($datei);
+    if ($quelle === '') {
+        return array(-1, -1);
+    }
+    // Jedes <form> bis zu seinem </form>. Der Quelltext traegt PHP-Schnipsel
+    // dazwischen - genau deshalb wird nach dem AUFRUF bl_fmt() gesucht und
+    // nicht nach dem fertigen Feld.
+    $formen = array();
+    preg_match_all('/<form\b.*?<\/form>/s', $quelle, $formen);
+    $ohne = 0;
+    foreach ($formen[0] as $f) {
+        if (strpos($f, 'bl_fmt()') === false && strpos($f, 'name="fmt"') === false) {
+            $ohne++;
+        }
+    }
+    return array(count($formen[0]), $ohne);
+}
+
+/**
+ * Der Helfer, der Bluetooth einschaltet - EIN Pfad, an einer Stelle.
+ *
+ * Er liegt bewusst NICHT im Plugin-Ordner: postroot.sh schreibt ihn nach
+ * /usr/local/sbin (root, 0755), und /etc/sudoers.d/ble_scanner_ng nennt genau
+ * diesen Pfad ohne Argumente. Eine sudo-Regel auf eine Datei unter bin/ waere
+ * ein Weg nach Root, weil dieses Verzeichnis loxberry gehoert.
+ */
+function bl_bt_helfer()
+{
+    return '/usr/local/sbin/ble_scanner_ng_bluetooth';
+}
+
+/**
+ * Kennt der Geraetebaum ein Bluetooth-Geraet? (gleiche Regel wie in Python)
+ */
+function bl_bt_hardware()
+{
+    foreach (array('/proc/device-tree/soc/serial@*/bluetooth',
+                   '/proc/device-tree/soc/*/bluetooth') as $muster) {
+        $treffer = glob($muster, GLOB_ONLYDIR);
+        if ($treffer) {
+            return true;
+        }
+    }
+    foreach ((array) glob('/sys/bus/serial/devices/*/modalias') as $pfad) {
+        $inhalt = strtolower((string) @file_get_contents($pfad));
+        if (strpos($inhalt, '-bt') !== false) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Sperrt eine modprobe-Blacklist die Bluetooth-Treiber?
+ * Rueckgabe: array(datei, module) - datei ist '' wenn nichts gesperrt ist.
+ */
+function bl_bt_gesperrt()
+{
+    $interessant = array('bluetooth', 'hci_uart', 'btbcm', 'btusb', 'bnep');
+    foreach ((array) glob('/etc/modprobe.d/*.conf') as $datei) {
+        $gefunden = array();
+        foreach (preg_split('/\R/', (string) @file_get_contents($datei)) as $zeile) {
+            $teile = preg_split('/\s+/', trim($zeile));
+            if (count($teile) >= 2 && $teile[0] === 'blacklist'
+                && in_array($teile[1], $interessant, true)) {
+                $gefunden[] = $teile[1];
+            }
+        }
+        if ($gefunden) {
+            return array($datei, $gefunden);
+        }
+    }
+    return array('', array());
+}
+
+/**
+ * Ist ueberhaupt ein Bluetooth-Adapter da, und laeuft bluetoothd?
+ *
+ * Diese Frage beantwortet KEIN Abbild des Dienstes - das entsteht ja erst,
+ * wenn der Dienst laufen kann. Bis 1.3.11 fehlte die Zeile, und am
+ * 13.09.2026 stand auf einem LoxBerry ohne Bluetooth in der Selbstpruefung
+ * ein Strich ("noch keine Sichtung seit dem Start"), wo ein Kreuz mit Grund
+ * hingehoert: systemd startet bluetooth.service bei fehlendem
+ * /sys/class/bluetooth gar nicht (ConditionPathIsDirectory), und jede
+ * Anfrage an org.bluez laeuft in die Aktivierungs-Zeitgrenze.
+ *
+ * Rueckgabe: array(zustand, anmerkung)
+ */
+function bl_adapterlage($cfg)
+{
+    $soll = bl_cfg($cfg, 'adapter', 'hci0');
+    if (!is_dir('/sys/class/bluetooth')) {
+        // "Kein Adapter" ist erst die halbe Antwort: fehlt die Hardware, oder
+        // ist nur der Treiber gesperrt? Das eine braucht einen USB-Stecker,
+        // das andere zwei Befehle. Am 13.09.2026 an dieser Anlage gemessen -
+        // die Hardware war da, sechs blacklist-Zeilen hielten sie zurueck.
+        if (bl_bt_hardware()) {
+            list($datei, $module) = bl_bt_gesperrt();
+            if ($datei !== '') {
+                return array(false, sprintf(bl_t('PRUEF.ADAPTER_GESPERRT'),
+                                            $datei, implode(', ', $module)));
+            }
+            return array(false, bl_t('PRUEF.ADAPTER_KEIN_TREIBER'));
+        }
+        return array(false, bl_t('PRUEF.ADAPTER_KEIN_GERAET'));
+    }
+    $vorhanden = array();
+    foreach ((array) @scandir('/sys/class/bluetooth') as $e) {
+        if ($e !== '.' && $e !== '..') { $vorhanden[] = $e; }
+    }
+    if (!$vorhanden) {
+        return array(false, bl_t('PRUEF.ADAPTER_LEER'));
+    }
+    // systemctl is-active braucht kein sudo - am Geraet gemessen 13.09.2026:
+    // das Wort "inactive" und Rueckgabewert 3 ohne erhoehte Rechte.
+    $aktiv = trim(bl_sh('systemctl is-active bluetooth 2>/dev/null'));
+    if (!in_array($soll, $vorhanden, true)) {
+        return array(false, sprintf(bl_t('PRUEF.ADAPTER_ANDERER'),
+                                    implode(', ', $vorhanden), $soll));
+    }
+    if ($aktiv !== '' && strpos($aktiv, 'active') !== 0) {
+        return array(false, sprintf(bl_t('PRUEF.ADAPTER_DIENST_AUS'), $aktiv));
+    }
+    return array(true, implode(', ', $vorhanden)
+                 . ($aktiv !== '' ? ' / bluetooth.service ' . $aktiv : ''));
+}
+
+/**
  * Die Selbstpruefung.
  *
  * Zustand: true = Haken, false = Kreuz, null = nicht pruefbar (Strich).
@@ -298,8 +547,12 @@ function bl_pruefzeilen($cfg, $tags)
                                      : sprintf(bl_t('PRUEF.EMPFANG_VOR'), $stille));
 
     if ($status && isset($status['adapter_ok'])) {
+        // Der Grund steht im Abbild (seit 1.3.12), damit hier nicht nur ein
+        // Kreuz ohne Erklaerung stehen muss.
+        $grund = isset($status['stoerung']) ? (string) $status['stoerung'] : '';
         $zeilen[] = bl_zeile(bl_t('PRUEF.ADAPTER_OK'), ((int) $status['adapter_ok']) === 1,
-                             (string) bl_cfg($cfg, 'adapter', 'hci0'));
+                             $grund !== '' ? bl_kuerzen($grund, 300)
+                                           : (string) bl_cfg($cfg, 'adapter', 'hci0'));
     } else {
         $zeilen[] = bl_zeile(bl_t('PRUEF.ADAPTER_OK'), null, bl_t('PRUEF.ABBILD_KEINS'));
     }
@@ -312,6 +565,19 @@ function bl_pruefzeilen($cfg, $tags)
                                      $status['betriebsart'],
                                      bl_cfg($cfg, 'betriebsart', 'signal')));
     }
+
+    // --- Die Frage, die alles andere erledigt, steht VOR den Modulen.
+    list($ok, $meldung) = bl_adapterlage($cfg);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.ADAPTER_DA'), $ok, $meldung);
+
+    // Ein Formular ohne Token ist ein Knopf ohne Wirkung - und zwar still.
+    list($bl_tf_zahl, $bl_tf_ohne) = bl_token_lage();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.TOKEN'),
+        $bl_tf_zahl > 0 && $bl_tf_ohne === 0,
+        $bl_tf_zahl < 0
+            ? bl_t('PRUEF.TOKEN_UNLESBAR')
+            : sprintf(bl_t('PRUEF.TOKEN_BILANZ'), $bl_tf_zahl,
+                      $bl_tf_zahl - $bl_tf_ohne, $bl_tf_ohne));
 
     // --- Werkzeuge und Module
     foreach (array('dbus', 'gi', 'paho.mqtt.client') as $m) {
@@ -379,6 +645,9 @@ function bl_pruefzeilen($cfg, $tags)
     list($ok, $meldung) = bl_themen_vergleich($cfg);
     $zeilen[] = bl_zeile(bl_t('PRUEF.THEMENLISTE'), $ok, $meldung);
 
+    list($ok, $meldung) = bl_retain_vergleich();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.RETAIN'), $ok, $meldung);
+
     list($ok, $meldung) = bl_vorlage_pruefen($cfg, $tags);
     $zeilen[] = bl_zeile(bl_t('PRUEF.VORLAGE'), $ok, $meldung);
 
@@ -402,7 +671,7 @@ function bl_pruefzeilen($cfg, $tags)
 
     // --- Python-Selbstpruefung
     list($ok, $ausgabe) = bl_python('bl_selbsttest.py', '--json');
-    $j = @json_decode($ausgabe, true);
+    $j = bl_json_aus($ausgabe);
     if (is_array($j) && isset($j['ok'])) {
         $zeilen[] = bl_zeile(bl_t('PRUEF.PYTHON_SELBSTTEST'),
                              ((int) $j['fehler']) === 0,
@@ -603,6 +872,38 @@ function bl_test_ausfuehren($was, $zusatz = '')
             $t .= "--- id loxberry ---\n" . bl_sh('id loxberry') . "\n";
             $t .= "\n" . bl_t('TEST.BT_HINWEIS');
             return array(bl_t('TEST.T_BLUETOOTH'), $t);
+
+        case 'btein':
+            // Eingebautes Bluetooth einschalten. Drei Dinge muessen stimmen,
+            // und jedes wird EINZELN gesagt - "hat nicht geklappt" schickt
+            // sonst auf die Suche an der falschen Stelle.
+            $helfer = bl_bt_helfer();
+            if (!is_file($helfer)) {
+                // Ohne postroot.sh gibt es den Helfer nicht. Das passiert bei
+                // einer Installation, die vor 1.3.12 gemacht wurde: die
+                // sudo-Regel und der Helfer kommen erst beim naechsten
+                // Einspielen dazu. Dann bleiben die Befehle als Text.
+                return array(bl_t('TEST.T_BTEIN'),
+                             sprintf(bl_t('TEST.BTEIN_OHNE_HELFER'), $helfer)
+                             . "\n\n" . bl_t('TEST.BTEIN_VON_HAND'));
+            }
+            $t = sprintf(bl_t('TEST.BTEIN_RUFE'), $helfer) . "\n\n";
+            $t .= bl_sh('sudo -n ' . escapeshellarg($helfer)) . "\n";
+            // WIRKUNGSPRUEFUNG, nicht Zuversicht: nach dem Aufruf wird die
+            // Lage neu gemessen. Der Helfer kann "geladen" melden und hci0
+            // trotzdem ausbleiben - etwa wenn die Firmware fehlt.
+            clearstatcache();
+            list($da, $grund) = bl_adapterlage($cfg);
+            $t .= "\n" . ($da ? bl_t('TEST.BTEIN_OK') : bl_t('TEST.BTEIN_NICHTS'))
+                . "\n" . $grund . "\n";
+            if ($da) {
+                // Der Dienst hat beim Start vermutlich noch keinen Adapter
+                // gesehen. Ohne diesen Hinweis wartet der Anwender auf Werte,
+                // die erst nach einem Neustart des Dienstes kommen.
+                $t .= "\n" . bl_t('TEST.BTEIN_DIENST') . "\n";
+            }
+            $t .= "\n" . bl_t('TEST.BTEIN_NUR_BIS_NEUSTART');
+            return array(bl_t('TEST.T_BTEIN'), $t);
 
         case 'konfig':
             $t = bl_t('TEST.F_DATEI') . ': ' . $p['config'] . "\n\n";
