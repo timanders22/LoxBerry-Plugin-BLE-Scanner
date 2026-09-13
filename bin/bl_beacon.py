@@ -492,6 +492,40 @@ SENSORTHEMEN = {
     "folge":       ("Folgenummer", "", 0, 65535),
 }
 
+# Welches Format kann WELCHE Groessen liefern? Fuer die Loxone-Vorlage.
+#
+# NEU IN 1.3.14, und zwar als Behebung eines Fehlers, der beim Nachmessen am
+# Geraet auffiel. Erst las die Oberflaeche die anzulegenden Eingaenge aus dem
+# ABBILD des Dienstes - also aus dem, was der Tag ZULETZT gesendet hat. Das
+# ist bei MiBeacon nicht stabil: das Geraet wechselt die Satzarten (0x1004
+# nur Temperatur, 0x1006 nur Feuchte, 0x100D beides, 0x100A Batterie), und
+# das Abbild traegt immer nur das letzte Paket. Am 13.09.2026 in vier
+# Messungen ueber 22 Sekunden gesehen:
+#
+#     16:26:58  Tag1: feuchte,folge,temperatur   Tag2: feuchte,folge,temperatur
+#     16:27:13  Tag1: feuchte,folge              Tag2: feuchte,folge,temperatur
+#     16:27:20  Tag1: feuchte,folge,temperatur   Tag2: folge,temperatur
+#
+# Die Vorlage war damit nicht reproduzierbar: zweimal heruntergeladen,
+# zweimal ein anderer Satz Eingaenge. Genau die Sorte Fehler, die niemandem
+# auffaellt, bis in Loxone ein Wert fehlt.
+#
+# Jetzt bestimmt das ERKANNTE FORMAT, was moeglich ist - das steht fest,
+# sobald der Tag einmal gesendet hat, und wechselt nicht von Paket zu Paket.
+# Das Abbild entscheidet weiterhin, OB ein Tag ueberhaupt Messwerte liefert
+# (ein Schluesselanhaenger bekommt keine), aber nicht mehr, WELCHE.
+#
+# Abgeleitet aus den _sammle()-Aufrufen der fuenf Dekoder; eine Pruefzeile im
+# Reiter "Test" haelt beides zusammen, damit die Tabelle nicht von den
+# Dekodern wegdriftet.
+FORMAT_GROESSEN = {
+    "ibeacon":   (),
+    "eddystone": ("temperatur", "batterie_mv"),
+    "atc":       ("temperatur", "feuchte", "batterie", "batterie_mv"),
+    "ruuvi":     ("temperatur", "feuchte", "druck", "batterie_mv"),
+    "mibeacon":  ("temperatur", "feuchte", "batterie", "folge"),
+}
+
 
 # ---------------------------------------------------------------------------
 # Eichung

@@ -1,11 +1,40 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.14
+Version 1.3.15
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.15 — die Loxone-Vorlage ist reproduzierbar
+
+**Ein Befund an der Neuerung aus 1.3.14, gefunden beim Nachmessen am Gerät —
+nachdem 1.3.14 schon veröffentlicht war.** Wer 1.3.14 einsetzt und die Vorlage
+im Reiter *Einbindung in Loxone* herunterlädt, bekommt je nach Augenblick einen
+anderen Satz virtueller Eingänge. Diese Fassung behebt das.
+
+**Welche Messwerte ein Tag bekommt, entscheidet sein Beaconformat — nicht sein
+letztes Paket.** Das ist am 13.09.2026 am Gerät aufgefallen, nachdem die erste
+Fassung dieser Änderung schon stand: MiBeacon wechselt die Satzarten (0x1004
+nur Temperatur, 0x1006 nur Feuchte, 0x100D beides, 0x100A Batterie), und das
+Abbild des Dienstes trägt immer nur das zuletzt Gesehene. In vier Messungen
+über 22 Sekunden:
+
+```
+16:26:58  Tag1: feuchte,folge,temperatur   Tag2: feuchte,folge,temperatur
+16:27:13  Tag1: feuchte,folge              Tag2: feuchte,folge,temperatur
+16:27:20  Tag1: feuchte,folge,temperatur   Tag2: folge,temperatur
+```
+
+Die Vorlage war damit **nicht reproduzierbar** — zweimal heruntergeladen,
+zweimal ein anderer Satz Eingänge, und in Loxone fehlte dann ein Wert. Jetzt
+sagt `FORMAT_GROESSEN` in `bin/bl_beacon.py`, was ein Format liefern kann; das
+Abbild entscheidet weiterhin, **ob** ein Tag überhaupt Messwerte liefert (ein
+Schlüsselanhänger bekommt keine), aber nicht mehr **welche**. Am Gerät
+nachgemessen: sechs Läufe in 31 Sekunden, jedes Mal dieselben acht Eingänge —
+vorher 6, 6, 6, 5, 4. Eine Prüfzeile hält die Tabelle gegen die
+`_sammle()`-Aufrufe der fünf Dekoder, damit sie nicht wegdriftet.
 
 ## Neu in 1.3.14 — Messwerte in Loxone
 
@@ -44,13 +73,15 @@ Vertrauen.**
 Was 1.3.14 daraus macht:
 
 * **Die Messwerte stehen in der Vorlage** — mit Grenzen und Einheit
-  (−45…90 °C, 0…100 %, 500…1200 hPa, 0…100 %, 500…4500 mV).
-* **Nur für Tags, die wirklich senden.** Gemessen aus dem Abbild des Dienstes,
-  nicht geraten: ein Schlüsselanhänger bekäme sonst fünf Eingänge, die
-  dauerhaft auf 0 stehen — genau die Karteileichen, gegen die der
+  (−45…90 °C, 0…100 %, 500…1200 hPa, 0…100 %, 500…4500 mV). Es sind **neun**
+  Größen, gelesen aus `SENSORTHEMEN` in `bin/bl_beacon.py`.
+* **Nur für Tags, die wirklich senden.** Ein Schlüsselanhänger bekäme sonst
+  Eingänge, die dauerhaft auf 0 stehen — genau die Karteileichen, gegen die der
   Themenvergleich gebaut ist. Die Vorlage wird also erst vollständig, wenn der
-  Sensor einmal gesendet hat; der Reiter sagt das.
-* **Ein eigener Abschnitt** im Reiter *Einbindung in Loxone* mit allen fünf
+  Sensor einmal gesendet hat; der Reiter sagt das. **Welche** Größen ein Tag
+  bekommt, entscheidet seit 1.3.15 sein Beaconformat — siehe den Abschnitt
+  darüber.
+* **Ein eigener Abschnitt** im Reiter *Einbindung in Loxone* mit allen neun
   Messwerten, Namensvorschlag, Wertebereich und Bedeutung. Bewusst **nicht** in
   der großen Bausteintabelle: deren Einträge verweisen mit ihrer Nummer
   aufeinander (13 Stellen über beide Sprachdateien), eine Zeile in der Mitte

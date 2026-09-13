@@ -411,6 +411,69 @@ function bl_grenzen_vergleich()
     return array(true, sprintf(bl_t('TEST.GRENZEN_OK'), count($quelle)));
 }
 
+/**
+ * Deckt sich FORMAT_GROESSEN mit dem, was die Dekoder wirklich sammeln?
+ *
+ * FORMAT_GROESSEN sagt der Loxone-Vorlage, welche Messwerte ein Tag mit
+ * diesem Beaconformat liefern KANN - und ist damit eine von Hand gepflegte
+ * Zusammenfassung dessen, was in den fuenf Dekodern steht. Genau so eine
+ * Liste laeuft weg: jemand ergaenzt einen _sammle()-Aufruf und denkt nicht
+ * an die Tabelle, und die Vorlage laesst einen Eingang aus.
+ *
+ * Gelesen werden hier die _sammle(out["werte"], "NAME", ...)-Aufrufe je
+ * Dekoderfunktion aus bin/bl_beacon.py und gegen die Tabelle gehalten.
+ * Neu in 1.3.14.
+ */
+function bl_formate_vergleich()
+{
+    $datei = bl_paths()['bindir'] . '/bl_beacon.py';
+    if (!is_file($datei)) {
+        return array(null, bl_t('TEST.SENDECODE_FEHLT'));
+    }
+    $quelle = (string) @file_get_contents($datei);
+    $tabelle = bl_format_groessen();
+    if (!$tabelle) {
+        return array(false, bl_t('TEST.FORMATE_UNLESBAR'));
+    }
+    // Funktionsgrenzen bestimmen, damit ein _sammle() der richtigen
+    // Dekoderfunktion zugeordnet wird.
+    if (!preg_match_all('/^def (\w+)\(/m', $quelle, $m, PREG_OFFSET_CAPTURE)) {
+        return array(false, bl_t('TEST.FORMATE_UNLESBAR'));
+    }
+    $grenzen = array();
+    foreach ($m[1] as $i => $treffer) {
+        $start = $treffer[1];
+        $ende = isset($m[1][$i + 1]) ? $m[1][$i + 1][1] : strlen($quelle);
+        $grenzen[$treffer[0]] = array($start, $ende);
+    }
+    $abweichung = array();
+    foreach ($tabelle as $format => $soll) {
+        if (!isset($grenzen[$format])) {
+            $abweichung[] = $format . ' (keine Dekoderfunktion)';
+            continue;
+        }
+        list($a, $e) = $grenzen[$format];
+        $block = substr($quelle, $a, $e - $a);
+        $ist = array();
+        if (preg_match_all('/_sammle\(out\["werte"\],\s*"(\w+)"/', $block, $t)) {
+            $ist = array_values(array_unique($t[1]));
+        }
+        sort($ist);
+        $soll = array_values($soll);
+        sort($soll);
+        if ($ist !== $soll) {
+            $abweichung[] = sprintf('%s (Tabelle: %s / Dekoder: %s)', $format,
+                                    implode('+', $soll) ?: '-',
+                                    implode('+', $ist) ?: '-');
+        }
+    }
+    if ($abweichung) {
+        return array(false, sprintf(bl_t('TEST.FORMATE_ANDERS'),
+                                    implode('; ', $abweichung)));
+    }
+    return array(true, sprintf(bl_t('TEST.FORMATE_OK'), count($tabelle)));
+}
+
 /** Die erzeugte Loxone-Vorlage auf Wohlgeformtheit pruefen. */
 function bl_vorlage_pruefen($cfg, $tags)
 {
@@ -748,6 +811,9 @@ function bl_pruefzeilen($cfg, $tags)
 
     list($ok, $meldung) = bl_grenzen_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.GRENZEN'), $ok, $meldung);
+
+    list($ok, $meldung) = bl_formate_vergleich();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.FORMATE'), $ok, $meldung);
 
     list($ok, $meldung) = bl_retain_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.RETAIN'), $ok, $meldung);

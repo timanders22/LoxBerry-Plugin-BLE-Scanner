@@ -1093,13 +1093,77 @@ function bl_sensor_themen($kennung)
     if (!isset($abbild[$kennung]) || empty($abbild[$kennung]['sensor'])) {
         return $out;
     }
-    foreach ($abbild[$kennung]['sensor'] as $name => $_wert) {
+    $z = $abbild[$kennung];
+
+    // WELCHE Groessen - das bestimmt das erkannte FORMAT, nicht das letzte
+    // Paket. Begruendung und Messung stehen bei FORMAT_GROESSEN in
+    // bin/bl_beacon.py: MiBeacon wechselt die Satzarten, das Abbild traegt
+    // immer nur das zuletzt Gesehene, und die Vorlage waere damit nicht
+    // reproduzierbar. Am 13.09.2026 am Geraet aufgefallen - die erste
+    // Fassung dieser Funktion gab demselben Tag einmal Temperatur und
+    // Feuchte, sieben Sekunden spaeter nur Feuchte.
+    $arten = bl_format_groessen();
+    // ACHTUNG: "beaconart" im Abbild ist die BESCHRIFTUNG, nicht der blosse
+    // Formatname - bl_beacon.beschriftung() haengt Geraet und Hinweis an
+    // ("mibeacon LYWSDCGQ/01ZM", "mibeacon (verschluesselt)"). Der Formatname
+    // ist das erste Wort. Beim Bauen dieser Fassung stand hier zuerst ein
+    // Vergleich gegen den ganzen Text; er traf nie, und die Funktion fiel
+    // still auf den Abbild-Zweig zurueck - also genau in den Fehler, den sie
+    // beheben sollte. Am Geraet aufgefallen, weil die Vorlage weiter
+    // schwankte (6, 6, 6, 5, 4 Eintraege in 30 Sekunden).
+    $art = isset($z['beaconart']) ? trim((string) $z['beaconart']) : '';
+    if ($art !== '') {
+        $art = strtok($art, " \t(");
+    }
+    if ($art !== '' && isset($arten[$art]) && $arten[$art]) {
+        $namen = $arten[$art];
+    } else {
+        // Format unbekannt oder nicht in der Tabelle: dann bleibt nur das,
+        // was tatsaechlich gesehen wurde. Lieber unvollstaendig als geraten.
+        $namen = array_keys((array) $z['sensor']);
+    }
+    // Was der Tag tatsaechlich schon geliefert hat, kommt IMMER dazu - falls
+    // ein Format mehr kann, als die Tabelle kennt.
+    $namen = array_unique(array_merge($namen, array_keys((array) $z['sensor'])));
+    sort($namen);
+    foreach ($namen as $name) {
         $name = (string) $name;
         if (isset($katalog[$name])) {
             $out['sensor/' . $name] = $katalog[$name];
         }
     }
     return $out;
+}
+
+/**
+ * FORMAT_GROESSEN aus bin/bl_beacon.py lesen - dieselbe Quelle wie
+ * SENSORTHEMEN, aus demselben Grund: eine zweite Liste liefe weg.
+ */
+function bl_format_groessen()
+{
+    static $f = null;
+    if ($f !== null) {
+        return $f;
+    }
+    $f = array();
+    $datei = bl_paths()['bindir'] . '/bl_beacon.py';
+    if (!is_file($datei)) {
+        return $f;
+    }
+    $quelle = (string) @file_get_contents($datei);
+    if (!preg_match('/^FORMAT_GROESSEN\s*=\s*\{(.*?)^\}/ms', $quelle, $m)) {
+        return $f;
+    }
+    if (preg_match_all('/"(\w+)"\s*:\s*\(([^)]*)\)/', $m[1], $t, PREG_SET_ORDER)) {
+        foreach ($t as $e) {
+            $namen = array();
+            if (preg_match_all('/"(\w+)"/', $e[2], $n)) {
+                $namen = $n[1];
+            }
+            $f[$e[1]] = $namen;
+        }
+    }
+    return $f;
 }
 
 /**
