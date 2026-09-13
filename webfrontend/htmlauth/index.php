@@ -1016,6 +1016,12 @@ $bl_bausteine = array(
     array('BAUSTEIN.VI', $bl_praefix . '_summary_present', 'BAUSTEIN.ANALOG_ANZAHL', 'BAUSTEIN.VOM_GATEWAY'),
     array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_present',    'BAUSTEIN.DIGITAL_JE_TAG', '&mdash;'),
     array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_last_seen_ts', 'BAUSTEIN.ANALOG_ZEIT', '&mdash;'),
+    // ACHTUNG, wer hier einfuegt: die Bausteine verweisen mit ihrer NUMMER
+    // aufeinander ("Eingang = #5", "I1 = #9, I2 = #11 invertiert" - 13
+    // Stellen ueber beide Sprachdateien). Eine Zeile in der Mitte verschiebt
+    // alle folgenden Nummern, und zwar STILL: nichts wird rot, die Anleitung
+    // wird nur falsch. Neue Eintraege gehoeren ans Ende - oder, wie die
+    // Messwerte in 1.3.14, in einen eigenen Abschnitt unter dieser Tabelle.
     array('BAUSTEIN.AUS', 'BAUSTEIN.N_ENTPRELLT',  'BAUSTEIN.P_ENTPRELLT',  'BAUSTEIN.E_ENTPRELLT'),
     array('BAUSTEIN.ODER', 'BAUSTEIN.N_JEMAND',    'BAUSTEIN.P_JEMAND',     'BAUSTEIN.E_JEMAND'),
     array('BAUSTEIN.FLANKE_F', 'BAUSTEIN.N_LETZTER', '&mdash;',             'BAUSTEIN.E_LETZTER'),
@@ -1040,6 +1046,30 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 <b><?= bl_e(bl_t('BAUSTEIN.ZU14')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU14_TEXT')) ?><br>
 <b><?= bl_e(bl_t('BAUSTEIN.ZU12')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU12_TEXT')) ?>
 </div>
+
+<!-- ===== Messwerte: eigener Abschnitt, absichtlich NICHT in der Tabelle =====
+     Sie brauchen keinen einzigen Logikbaustein - ein virtueller Eingang
+     genuegt, der Wert geht direkt an Anzeige, Statistik oder Regelung. Und
+     sie stehen hier unten, weil die Nummern der Tabelle oben aufeinander
+     verweisen. Neu in 1.3.14. -->
+<h2><?= bl_e(bl_t('TEXT.LOX_MESSWERTE')) ?></h2>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOX_MESSWERTE_TEXT')) ?></p>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th style="width:260px;"><?= bl_e(bl_t('TEXT.SP_NAMENSVORSCHLAG')) ?></th>
+<th style="width:170px;"><?= bl_e(bl_t('TEXT.SP_BAUSTEIN')) ?></th>
+<th style="width:150px;"><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th>
+<th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
+<?php foreach (bl_sensor_katalog() as $bl_sk => $bl_si) { ?>
+<tr><td class="sm-mono"><?= bl_e($bl_praefix . '_&lt;T&gt;_sensor_' . $bl_sk) ?></td>
+<td><?= bl_e(bl_t('BAUSTEIN.VI')) ?></td>
+<td class="sm-mono"><?= bl_e($bl_si['min'] . ' … ' . $bl_si['max']
+                             . ($bl_si['einheit'] !== '' ? ' ' . $bl_si['einheit'] : '')) ?></td>
+<td><?= bl_e(bl_sensor_text($bl_si)) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.LOX_MESSWERTE_HINWEIS')) ?></div>
 
 <h2><?= bl_e(bl_t('TEXT.GEGENPROBE')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.GEGENPROBE_TEXT')) ?></p>

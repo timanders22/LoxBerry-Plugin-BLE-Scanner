@@ -1,11 +1,158 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.13
+Version 1.3.14
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.14 — Messwerte in Loxone
+
+**Das Plugin las Temperatur und Luftfeuchte, aber sie kamen nie am Miniserver
+an.** Seit 1.3.13 liest es ein Xiaomi-Thermometer `MJ_HT_V1` (LYWSDCGQ/01ZM)
+ab Werk — der Dienst veröffentlicht die Werte auch:
+
+```
+blescanner/<Tag>/sensor/temperatur      21.4      flüchtig
+blescanner/<Tag>/sensor/feuchte         48.0      flüchtig
+blescanner/<Tag>/sensor/batterie        97        flüchtig
+```
+
+Nur auf der Loxone-Seite gab es sie nicht. Die Funktion, aus der die Vorlage
+`VI_BLE-Scanner-NG.xml` entsteht, kannte `distance`, `battery`, `raum` — und
+keinen einzigen Messwert. Wer die Vorlage importierte, bekam **keine Zeile**
+für Temperatur oder Luftfeuchte, und die Bausteinliste im Reiter *Einbindung
+in Loxone* führte sie ebenso wenig. Nirgends stand, wie die Themen heißen.
+
+**Am schwersten wiegt, dass die Prüfung dazu schwieg.** Das Plugin hält im
+Reiter *Test* seine Themenliste gegen die tatsächlichen `_senden()`-Aufrufe im
+Quelltext — genau gegen diesen Fall gebaut, und ihr eigener Kommentar
+beschreibt ihn wörtlich:
+
+> „Eine Liste, die niemand nachmisst, läuft auseinander — und dann legt die
+> Loxone-Vorlage virtuelle Eingänge an, die dauerhaft auf 0 stehen, ohne jede
+> Fehlermeldung."
+
+Sie fand `sensor/` auch. Aber `sensor/` stand auf ihrer Ausnahmeliste, unter
+Themen, „die in der Anleitung bewusst nur bei eingeschalteter Einstellung
+stehen". Für `distance`, `battery` und `raum` stimmt das. Für `sensor/` nicht:
+dafür gab es keine Einstellung und keinen Eintrag. **Eine Ausnahme, die einen
+echten Fehler stumm schaltet, ist schlimmer als keine Prüfung — sie erzeugt
+Vertrauen.**
+
+Was 1.3.14 daraus macht:
+
+* **Die Messwerte stehen in der Vorlage** — mit Grenzen und Einheit
+  (−45…90 °C, 0…100 %, 500…1200 hPa, 0…100 %, 500…4500 mV).
+* **Nur für Tags, die wirklich senden.** Gemessen aus dem Abbild des Dienstes,
+  nicht geraten: ein Schlüsselanhänger bekäme sonst fünf Eingänge, die
+  dauerhaft auf 0 stehen — genau die Karteileichen, gegen die der
+  Themenvergleich gebaut ist. Die Vorlage wird also erst vollständig, wenn der
+  Sensor einmal gesendet hat; der Reiter sagt das.
+* **Ein eigener Abschnitt** im Reiter *Einbindung in Loxone* mit allen fünf
+  Messwerten, Namensvorschlag, Wertebereich und Bedeutung. Bewusst **nicht** in
+  der großen Bausteintabelle: deren Einträge verweisen mit ihrer Nummer
+  aufeinander (13 Stellen über beide Sprachdateien), eine Zeile in der Mitte
+  verschiebt alle folgenden — still, ohne dass etwas rot wird. Messwerte
+  brauchen ohnehin keinen Logikbaustein.
+* **Die Ausnahme heißt nicht mehr „ignorieren".** Der Themenvergleich fragt
+  jetzt zweierlei: darf es heute fehlen (Einstellung aus, Tag hat noch nicht
+  gesendet)? *Und*: gibt es überhaupt irgendwo einen Eintrag dafür? Fehlt der,
+  meldet er es als vergessenes Thema. Mit dieser Prüfung hätte sich der Mangel
+  oben von selbst gemeldet.
+* **Eine neue Prüfzeile hält die Grenzen zusammen.** Dieselben Zahlen stehen in
+  `bin/bl_beacon.py` (zum Verwerfen unplausibler Werte) und in der Vorlage (als
+  Min/Max). Zwei Listen laufen auseinander — in dieser Linie ist das schon
+  dreimal passiert. Die Prüfung liest die Python-Datei und vergleicht.
+
+Ein Hinweis für die Praxis: Messwerte gehen **flüchtig** hinaus, nicht
+zurückbehalten. Nach einem Neustart des Miniservers steht der Eingang auf 0,
+bis der Sensor das nächste Mal sendet — das ist Absicht, sonst zeigte Loxone
+nach einem Ausfall einen alten Wert als aktuell.
+
+## Neu in 1.3.14 — drei Befunde aus einem echten Upgrade-Protokoll
+
+1.3.13 ist am 13.09.2026 auf der Entwicklungsanlage über 1.3.11 installiert
+worden. Das Installationsprotokoll endete mit `ALLES ERLEDIGT!` — und enthielt
+trotzdem drei Befunde. Zwei davon hätte man ohne Protokoll nie bemerkt.
+
+### Der Merker für den Upgrade-Fall hat nie getragen
+
+`preupgrade.sh` legte zwei Merker an: `upgrade_laeuft` (dies ist ein Upgrade,
+`postinstall.sh` soll den Dienst also **nicht** starten) und `lief_vor_update`
+(der Dienst lief, `postupgrade.sh` soll ihn also wieder starten). Beide lagen
+**in** `data/plugins/ble_scanner_ng/` — und genau diesen Ordner räumt der
+Installer zwischen `preupgrade.sh` und `postinstall.sh` restlos ab
+(`plugininstall.pl`: `&purge_installation` im Upgrade-Zweig, `:886` → `:1629 ff.`).
+
+Im Protokoll steht es Zeile für Zeile:
+
+```
+13:00:06  Plugin is already installed -> proceeding with upgrade
+13:00:13  removed '.../data/plugins/ble_scanner_ng/upgrade_laeuft'
+13:01:16  <INFO> Neuinstallation - der Dienst wird gestartet.
+13:01:22  <INFO> Der Dienst lief vor dem Update nicht und wurde nicht gestartet.
+```
+
+Derselbe Lauf nennt sich oben ein Upgrade und unten eine Neuinstallation. Zwei
+Folgen, beide unerwünscht:
+
+* `postinstall.sh` hielt **jedes** Upgrade für eine Neuinstallation und startete
+  den Dienst — auch einen, den jemand bewusst angehalten hatte.
+* Der Neustart nach einem Update lief nie an, weil `lief_vor_update` bei
+  `postupgrade.sh` ebenso wenig ankam. Damit war der Befund aus 1.3.13 (das
+  `su loxberry -c`, das als `loxberry` nicht funktioniert) nur **halb** behoben:
+  die Ursache war weg, der auslösende Merker aber auch.
+
+Beide Merker liegen jetzt **neben** dem Ordner (`<ordner>.upgrade_laeuft`,
+`<ordner>.lief_vor_update`) — dieselbe Stelle und derselbe Grund wie beim
+Sicherungsordner: `rm -rf .../<ordner>/` trifft den Nachbarn mit dem Punkt
+nicht. Im Merker steht der Zeitpunkt, nicht nichts; wer ihn liest, prüft sein
+Alter (eine Stunde), damit der Rest eines abgebrochenen Upgrades nicht später
+eine echte Neuinstallation als Upgrade ausweist. Beidseitig geeicht: der Merker
+überlebt das Abräumen, und die Altersprüfung fällt bei leerem, unlesbarem, zu
+altem und in der Zukunft liegendem Merker.
+
+### Eine Warnung bei jedem Upgrade, die nicht gelingen konnte
+
+`postupgrade.sh` versuchte `usermod -a -G bluetooth loxberry` und meldete bei
+Misserfolg `<WARNING> Gruppenzuordnung bluetooth konnte nicht gesetzt werden.`
+Das stand bei jedem Upgrade im Protokoll und war doppelt falsch:
+
+* Es konnte gar nicht gelingen. LoxBerry ruft `postupgrade.sh` mit
+  `sudo -n -u loxberry` auf (`plugininstall.pl`, Zeile 1336) — `usermod`
+  verlangt root. Dieselbe Klasse wie das `su loxberry -c`, das in 1.3.13 aus
+  genau diesem Skript verschwunden ist.
+* Die Gruppe wird überhaupt nicht gebraucht. bluez 5.82 liefert
+  `/usr/share/dbus-1/system.d/bluetooth.conf` mit `<policy context="default">`,
+  und das gilt für jeden Benutzer. `postinstall.sh` misst das seit 1.3.12
+  richtig und sagt es im selben Protokoll 20 Zeilen vorher — nur hier war die
+  alte, falsche Annahme stehen geblieben.
+
+`postupgrade.sh` prüft jetzt dasselbe wie `postinstall.sh`: die Regel, nicht die
+Gruppe. Eine Gruppenmitgliedschaft wird weder gesetzt noch verlangt.
+
+### Die Selbstprüfung behauptete, statt zu messen
+
+Sie führte die Zeile „BlueZ über D-Bus (Suche, RSSI, RemoveDevice)" als nicht
+prüfbar und gab als Grund an, es sei „kein Bluetooth-Adapter und kein laufendes
+bluetoothd erreichbar". Das war ein **unbedingtes** `p.offen(...)` ohne jede
+Messung — und am Gerät nachgemessen falsch: `/org/bluez/hci0` antwortete, neun
+Geräte waren sichtbar. Die drei Zeilen daneben begründen sich ehrlich mit
+„braucht ein Gerät"; diese eine log.
+
+Neu ist `bluez_ueber_dbus()`: sie fragt den **Dienst**, während `adapterlage()`
+den **Kernel** fragt (`/sys/class/bluetooth`). Beides kann auseinanderliegen —
+ein angemeldeter Adapter ohne laufendes `bluetoothd` ist genau der Fall, den die
+alte Zeile behauptete. Gemessen am Gerät: `org.bluez fuehrt hci0, 9 Geraet(e)
+sichtbar.` Beidseitig geeicht, alle drei Zweige erreicht (richtiger Adapter →
+Haken, erfundener Adapter → Kreuz, Dienst tot → Strich mit gedeutetem Grund).
+Offen bleibt in „Nicht prüfbar ohne Gerät" nur noch, was ohne ein zweites Gerät
+wirklich nicht geht.
+
+Die Selbstprüfung zählt damit **119 Fälle, 0 Fehlschläge** (111 bestanden,
+8 nicht prüfbar), am Gerät gemessen.
 
 ## Neu in 1.3.13
 
@@ -354,11 +501,32 @@ sudo systemctl start bluetooth
 
 Eine `blacklist`-Zeile verhindert nur das **selbsttätige** Laden, nicht ein
 ausdrückliches `modprobe` — `modprobe --show-depends hci_uart` löst die ganze
-Kette trotz der Sperre auf. Bis zum nächsten Neustart hält das; **dauerhaft**
-geht es über `dietpi-config` → Advanced Options → Bluetooth oder dadurch, dass
-die Zeilen aus der genannten Datei verschwinden. Beides gehört dem System, nicht
-dem Plugin: `dietpi-config` würde eine Pluginänderung an dieser Datei beim
-nächsten Lauf ohnehin überschreiben.
+Kette trotz der Sperre auf. Bis zum nächsten Neustart hält das.
+
+**Dauerhaft** geht es auf einem DietPi mit einem Befehl. Er muss als **root**
+laufen — der Benutzer `loxberry` darf ihn nicht, also zuerst `su -`:
+
+```
+su -
+sudo /boot/dietpi/func/dietpi-set_hardware bluetooth enable
+```
+
+Am Gerät gemessen (13.09.2026): entfernt `dtoverlay=disable-bt` aus
+`/boot/firmware/config.txt`, stellt `pi-bluetooth` sicher, **löscht
+`/etc/modprobe.d/dietpi-disable_bluetooth.conf`**, lädt die Module, hebt eine
+`rfkill`-Sperre auf und schaltet `bluetooth.service` sowie — auf einem Pi bis
+einschließlich 4 — `hciuart` dauerhaft ein. Danach kommt `hci0` nach jedem
+Neustart von selbst.
+
+Wer lieber klickt: `dietpi-config` → *Advanced Options* → *Bluetooth* macht
+dasselbe.
+
+Beides gehört dem System, nicht dem Plugin: `dietpi-config` würde eine
+Pluginänderung an dieser Datei beim nächsten Lauf ohnehin überschreiben. Die
+Datei ist für DietPi nicht nur Wirkung, sondern **Schalterstellung** — im
+Quelltext steht an der Stelle, die sie schreibt, `keep as flag for
+dietpi-config`. Deshalb ist ein Umbenennen von Hand der schlechtere Weg: es
+wirkt, aber DietPi hält Bluetooth danach weiter für abgeschaltet.
 
 ## Neu in 1.3.11
 
@@ -596,10 +764,14 @@ mit leerer Nutzlast gelöscht.
 * **Adresstyp je Gerät**: *fest*, *statisch zufällig* oder *wechselt*. Der
   häufigste Anwenderfehler — das Telefon als Tag — wird dort abgefangen, wo er
   entsteht: in der Fundliste.
-* **Werbedaten dekodieren**: iBeacon, Eddystone (UID/URL/TLM), ATC/pvvx und
-  RuuviTag. Ein Xiaomi-Thermometer mit freier Firmware liefert damit Temperatur
-  und Luftfeuchte je Raum, ohne WLAN und ohne Cloud. Jede Dekodierung prüft
-  Länge und Plausibilität; passt etwas nicht, wird **nichts** veröffentlicht.
+* **Werbedaten dekodieren**: iBeacon, Eddystone (UID/URL/TLM), ATC/pvvx,
+  RuuviTag und — seit 1.3.13 — MiBeacon (Xiaomi/Mijia, `0xFE95`). Ein
+  Xiaomi-Thermometer `MJ_HT_V1` liefert damit Temperatur und Luftfeuchte je
+  Raum, ohne WLAN und ohne Cloud, und **ab Werk**: die freie Firmware ist nur
+  noch für die neueren, verschlüsselt sendenden Geräte nötig. Jede Dekodierung
+  prüft Länge und Plausibilität; passt etwas nicht, wird **nichts**
+  veröffentlicht. Wohin die Werte in Loxone gehen, steht im Reiter
+  *Einbindung in Loxone* und weiter unten unter „Messwerte in Loxone".
 * **Entfernungsschätzung** in Metern, mit einem Kalibrierknopf im Reiter *Test*.
 * **Batteriestand** aus Eddystone-TLM und RuuviTag ohne Verbindung, sonst je
   Tag einschaltbar über GATT (ab Werk aus — der Scan steht dabei still, und

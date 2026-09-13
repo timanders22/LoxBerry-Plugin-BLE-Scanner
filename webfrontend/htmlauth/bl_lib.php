@@ -941,6 +941,191 @@ function bl_status_themen()
     );
 }
 
+/**
+ * Messwerte aus den Werbedaten - Katalog mit Grenzen und Einheit.
+ *
+ * NEU IN 1.3.14, und zwar als Behebung einer Luecke, die seit 1.2.x offen
+ * war: der Dienst sendet diese Werte unter "<Tag>/sensor/<Name>"
+ * (ble_scanner_ng.py, "{0}/sensor/{1}"), aber bl_zusatzthemen() kannte sie
+ * nicht - und die Loxone-Vorlage entsteht aus genau dieser Liste. Wer sie
+ * importierte, bekam KEINE Zeile fuer Temperatur oder Luftfeuchte, ohne dass
+ * irgendwo etwas fehlte oder meldete. Mit 1.3.13 (MiBeacon) wurde das zum
+ * eigentlichen Mangel: seither liest das Plugin ein Xiaomi-Thermometer ab
+ * Werk, und der Wert kam trotzdem nicht am Miniserver an.
+ *
+ * DIE GRENZEN SIND DIESELBEN wie in bin/bl_beacon.py (GRENZEN). Dort werden
+ * sie zum Verwerfen unplausibler Werte gebraucht, hier als Min/Max des
+ * virtuellen Eingangs. Zwei Listen laufen auseinander - deshalb misst der
+ * Reiter "Test" sie gegeneinander nach (bl_grenzen_vergleich()).
+ */
+function bl_sensor_katalog()
+{
+    static $k = null;
+    if ($k !== null) {
+        return $k;
+    }
+    $k = bl_sensorthemen_lesen();
+    if (!$k) {
+        $k = bl_sensor_rueckfall();
+    }
+    return $k;
+}
+
+/**
+ * Der eingebaute Katalog - er greift nur, wenn bin/bl_beacon.py fehlt oder
+ * unlesbar ist, etwa waehrend eines Updates.
+ *
+ * WARUM ALS EIGENE FUNKTION: damit der Reiter "Test" ihn gegen die Quelle
+ * halten kann. Steckte er als Zweig in bl_sensor_katalog(), bekaeme man ihn
+ * nur zu fassen, indem man die Quelle entfernt - und eine Pruefung, die
+ * dafuer erst die Datei wegnehmen muesste, gibt es nicht. Beim ersten
+ * Versuch in dieser Fassung verglich die Pruefzeile deshalb den Katalog mit
+ * der Quelle, also die Quelle mit sich selbst: sie konnte gar nicht
+ * ansprechen. Gemessen und berichtigt, bevor sie eingebaut blieb.
+ *
+ * Ein Rueckfall, den niemand prueft, ist nur eine zweite Wahrheit.
+ */
+function bl_sensor_rueckfall()
+{
+    $k = array(
+        'temperatur'  => array('min' => -45, 'max' => 90,         'einheit' => '°C'),
+        'feuchte'     => array('min' => 0,   'max' => 100,        'einheit' => '%'),
+        'druck'       => array('min' => 500, 'max' => 1200,       'einheit' => 'hPa'),
+        'batterie'    => array('min' => 0,   'max' => 100,        'einheit' => '%'),
+        'batterie_mv' => array('min' => 500, 'max' => 4500,       'einheit' => 'mV'),
+        'pakete'      => array('min' => 0,   'max' => 4294967295, 'einheit' => ''),
+        'laufzeit_s'  => array('min' => 0,   'max' => 4294967295, 'einheit' => 's'),
+        'bewegung'    => array('min' => 0,   'max' => 255,        'einheit' => ''),
+        'folge'       => array('min' => 0,   'max' => 65535,      'einheit' => ''),
+    );
+    foreach ($k as $n => $_i) {
+        $k[$n]['art'] = 'analog';
+        $k[$n]['s']   = 'THEMA.S_' . strtoupper($n);
+    }
+    return $k;
+}
+
+/**
+ * SENSORTHEMEN aus bin/bl_beacon.py lesen.
+ *
+ * NEU IN 1.3.14 - und damit wird eine Behauptung wahr, die dort seit
+ * laengerem steht. Ueber der Liste in bl_beacon.py steht woertlich:
+ *
+ *     "Themennamen der Sensorwerte. Die Oberflaeche und die Loxone-Vorlage
+ *      lesen diese Liste - so kann sie nicht von dem abweichen, was hier
+ *      entsteht."
+ *
+ * Gemessen am 13.09.2026: KEINE einzige PHP-Datei las sie (0 Treffer fuer
+ * "SENSORTHEMEN" im ganzen webfrontend/). Die Loxone-Seite kannte ueberhaupt
+ * keinen Messwert, und der Satz war seit seiner Niederschrift falsch. Wer
+ * eine Quelle zur "einen Quelle" erklaert, muss sie auch lesen - sonst ist
+ * der Kommentar nur ein Vorsatz.
+ *
+ * Rueckgabe: array(Thema => array('s', 'art', 'min', 'max', 'einheit')),
+ * oder array() wenn die Datei fehlt oder die Liste nicht lesbar ist.
+ */
+function bl_sensorthemen_lesen()
+{
+    $datei = bl_paths()['bindir'] . '/bl_beacon.py';
+    if (!is_file($datei)) {
+        return array();
+    }
+    $quelle = (string) @file_get_contents($datei);
+    if (!preg_match('/^SENSORTHEMEN\s*=\s*\{(.*?)^\}/ms', $quelle, $m)) {
+        return array();
+    }
+    $out = array();
+    // "temperatur":  ("Temperatur", "°C", -45, 90),
+    $muster = '/"([a-z_0-9]+)"\s*:\s*\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,'
+            . '\s*(-?[0-9]+)\s*,\s*(-?[0-9]+)\s*\)/u';
+    if (preg_match_all($muster, $m[1], $treffer, PREG_SET_ORDER)) {
+        foreach ($treffer as $t) {
+            $out[$t[1]] = array(
+                // Der Sprachschluessel zuerst; fehlt er, traegt die
+                // Beschreibung aus der Python-Datei. So bleibt eine neu
+                // dazugekommene Groesse lesbar, auch bevor jemand sie
+                // uebersetzt hat.
+                's'       => 'THEMA.S_' . strtoupper($t[1]),
+                'ersatz'  => $t[2],
+                'art'     => 'analog',
+                'einheit' => $t[3],
+                'min'     => (int) $t[4],
+                'max'     => (int) $t[5],
+            );
+        }
+    }
+    return $out;
+}
+
+/**
+ * Beschriftung eines Messwerts: Sprachdatei zuerst, sonst der Text aus
+ * bl_beacon.py. bl_t() gibt bei unbekanntem Schluessel den Schluessel
+ * zurueck - daran ist die Luecke zu erkennen. So bleibt eine Groesse, die in
+ * SENSORTHEMEN neu dazukommt, sofort lesbar, auch bevor sie uebersetzt ist.
+ */
+function bl_sensor_text($info)
+{
+    $t = bl_t($info['s']);
+    if ($t === $info['s'] && !empty($info['ersatz'])) {
+        return $info['ersatz'];
+    }
+    return $t;
+}
+
+/**
+ * Welche Messwerte hat DIESER Tag wirklich geliefert?
+ *
+ * Gemessen aus dem Abbild des Dienstes, nicht geraten. Der Grund steht in
+ * bl_test.php: eine Vorlage, die jedem Tag alle fuenf Messwerte anlegt, gibt
+ * einem Schluesselanhaenger fuenf virtuelle Eingaenge, die dauerhaft auf 0
+ * stehen - genau die Sorte Karteileiche, gegen die der Themenvergleich
+ * gebaut ist. Ein Xiaomi-Thermometer bekommt Temperatur und Feuchte, ein
+ * Anhaenger bekommt nichts.
+ *
+ * Folge fuer den Anwender: die Vorlage wird erst vollstaendig, wenn der Tag
+ * einmal gesendet hat. Der Reiter "Einbindung in Loxone" sagt das.
+ */
+function bl_sensor_themen($kennung)
+{
+    $katalog = bl_sensor_katalog();
+    $out = array();
+    $abbild = bl_zustaende();
+    if (!isset($abbild[$kennung]) || empty($abbild[$kennung]['sensor'])) {
+        return $out;
+    }
+    foreach ($abbild[$kennung]['sensor'] as $name => $_wert) {
+        $name = (string) $name;
+        if (isset($katalog[$name])) {
+            $out['sensor/' . $name] = $katalog[$name];
+        }
+    }
+    return $out;
+}
+
+/**
+ * Alle ueberhaupt moeglichen Zusatzthemen - unabhaengig von Einstellungen
+ * und davon, ob ein Tag schon gesendet hat.
+ *
+ * Gebraucht wird das NUR vom Themenvergleich im Reiter "Test": der fragt
+ * nicht "steht es heute in der Vorlage?", sondern "gibt es ueberhaupt einen
+ * Eintrag dafuer?". Ohne diese Trennung war "bedingt" gleichbedeutend mit
+ * "ignorieren" - siehe bl_test.php.
+ */
+function bl_zusatzthemen_alle()
+{
+    $out = array(
+        'distance'   => array('s' => 'THEMA.DISTANCE',   'art' => 'analog', 'min' => -1, 'max' => 1000, 'einheit' => 'm'),
+        'battery'    => array('s' => 'THEMA.BATTERY',    'art' => 'analog', 'min' => 0,  'max' => 100,  'einheit' => '%'),
+        'battery_ts' => array('s' => 'THEMA.BATTERY_TS', 'art' => 'analog', 'min' => 0,  'max' => 2147483647, 'einheit' => ''),
+        'raum'       => array('s' => 'THEMA.RAUM',       'art' => 'text',   'min' => 0,  'max' => 0,    'einheit' => ''),
+        'raum_seit'  => array('s' => 'THEMA.RAUM_SEIT',  'art' => 'analog', 'min' => 0,  'max' => 2147483647, 'einheit' => ''),
+    );
+    foreach (bl_sensor_katalog() as $name => $info) {
+        $out['sensor/' . $name] = $info;
+    }
+    return $out;
+}
+
 /** Zusaetzliche Themen, die nur bei eingeschalteter Einstellung kommen. */
 function bl_zusatzthemen($cfg)
 {
@@ -1004,21 +1189,37 @@ function bl_gesendete_themen()
         return null;
     }
     $out = array();
+    // Formatplatzhalter heraus, dann fuehrende Schraegstriche:
+    //   "{0}/present"      -> "present"
+    //   "{0}/sensor/{1}"   -> "sensor/"        (Stamm, mit Schraegstrich)
+    //   "server/ts"        -> "server/ts"
+    //
+    // BERICHTIGT IN 1.3.14. Die beiden Schleifen unten trugen ZWEI
+    // VERSCHIEDENE Normalisierungen: die erste entfernte "{0}/" und "{1}",
+    // die zweite nur ein fuehrendes "{0}/". Weil beide Regeln denselben
+    // Aufruf treffen, landete "{0}/sensor/{1}" doppelt in der Liste - einmal
+    // als "sensor/" und einmal als "sensor/{1}". Das zweite ist keine
+    // Themenbezeichnung, sondern ein Ueberrest der Zerlegung.
+    //
+    // Aufgefallen ist das erst, als der Themenvergleich in dieser Fassung
+    // strenger wurde: vorher passte "sensor/{1}" auf den bedingten Stamm
+    // "sensor/" und wurde stillschweigend verworfen. Zwei Wege, die dasselbe
+    // tun sollen, tun es verschieden - deshalb jetzt EINE Normalisierung.
+    $saeubern = function ($roh) {
+        return ltrim(preg_replace('/\{[0-9]+\}/', '', $roh), '/');
+    };
     // self._senden("...")  und  self.senden("...")  und  self.mqtt.senden("...")
     if (preg_match_all('/\b_?senden\(\s*"([^"]+)"/', $quelle, $m)) {
         foreach ($m[1] as $roh) {
-            // "{0}/present" -> "present" ; "server/ts" -> "server/ts"
-            $roh = str_replace(array('{0}/', '{1}'), array('', ''), $roh);
-            $roh = preg_replace('/^\{[0-9]\}\//', '', $roh);
-            $out[$roh] = true;
+            $out[$saeubern($roh)] = true;
         }
     }
     if (preg_match_all('/\b_?senden\(\s*"([^"]*)"\.format/', $quelle, $m2)) {
         foreach ($m2[1] as $roh) {
-            $roh = preg_replace('/^\{0\}\//', '', $roh);
-            $out[$roh] = true;
+            $out[$saeubern($roh)] = true;
         }
     }
+    unset($out['']);
     return array_keys($out);
 }
 
@@ -1241,13 +1442,17 @@ function bl_vorlage($cfg, $tags)
         );
     }
 
-    $alle = array_merge(bl_status_themen(), bl_zusatzthemen($cfg));
+    $grund = array_merge(bl_status_themen(), bl_zusatzthemen($cfg));
     foreach ($tags as $tag) {
         if ($tag['aktiv'] !== '1') {
             continue;
         }
         $t = bl_thema($tag);
         $bez = $tag['name'] !== '' ? $tag['name'] : $tag['kennung'];
+        // Die Messwerte kommen je Tag dazu - und nur die, die dieser Tag
+        // wirklich gesendet hat. Neu in 1.3.14; vorher fehlten sie ganz,
+        // siehe bl_sensor_themen().
+        $alle = array_merge($grund, bl_sensor_themen($tag['kennung']));
         foreach ($alle as $schluessel => $info) {
             if ($info['art'] === 'text') {
                 // Textthemen gehoeren NICHT in die Vorlage: das nachgebaute
@@ -1257,8 +1462,14 @@ function bl_vorlage($cfg, $tags)
                 continue;
             }
             $cmds[] = array(
-                'title'   => $praefix . '_' . $t . '_' . $schluessel,
-                'comment' => $bez . ' - ' . bl_t($info['s']),
+                // Der Schraegstrich MUSS hier heraus: seit 1.3.14 gibt es
+                // Schluessel mit Unterthema ("sensor/temperatur"), und ein
+                // "/" im Namen eines virtuellen Eingangs ist in Loxone
+                // Config nicht zulaessig. Die allgemeinen Themen oben machen
+                // dieselbe Ersetzung seit jeher.
+                'title'   => $praefix . '_' . $t . '_'
+                             . str_replace('/', '_', $schluessel),
+                'comment' => $bez . ' - ' . bl_sensor_text($info),
                 'check'   => ' ',
                 'min'     => $info['min'], 'max' => $info['max'],
                 'einheit' => $info['einheit'],

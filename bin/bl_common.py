@@ -118,7 +118,14 @@ STEUER_FILE = _SHM + "/ble_scanner_ng_steuer.json"
 # (und nur dort - der Installer kopiert sie nirgendwohin), und sie wird von
 # fassung_setzen.py gepflegt. Damit ist die Konstante nur noch fuer den Fall
 # da, dass beides fehlt.
-VERSION_RUECKFALL = "1.3.12"
+#
+# UND GENAU DAS IST IN 1.3.13 WIEDER PASSIERT: die Konstante blieb auf
+# "1.3.12" stehen, waehrend die Linie auf 1.3.13 ging - nachgemessen am
+# 13.09.2026 beim Bauen von 1.3.14, da hinkte sie schon zwei Nummern. Der
+# Kommentar darueber hat den Rueckfall vorhergesagt und ihn nicht verhindert,
+# weil er nur eine Bitte ist. Solange fassung_setzen.py diese Stelle nicht
+# kennt, bleibt sie Handarbeit: WER DIE NUMMER ANHEBT, HEBT DIESE ZEILE MIT.
+VERSION_RUECKFALL = "1.3.14"
 
 
 def fassung():
@@ -993,6 +1000,49 @@ def adapterlage(adapter="hci0"):
         return False, ("Vorhanden ist " + ", ".join(eintraege)
                        + " - eingestellt ist aber " + str(adapter) + ".")
     return True, ", ".join(eintraege)
+
+
+def bluez_ueber_dbus(adapter="hci0"):
+    """Antwortet org.bluez wirklich? Rueckgabe: (zustand, text).
+
+    zustand: True  der ObjectManager antwortet und fuehrt den Adapter
+             False er antwortet, fuehrt den Adapter aber nicht
+             None  nicht messbar (kein python3-dbus, kein Bus, keine Antwort)
+
+    NEU IN 1.3.14, und zwar als Ersatz fuer eine Behauptung. Die
+    Selbstpruefung fuehrte die Zeile "BlueZ ueber D-Bus (Suche, RSSI,
+    RemoveDevice)" als nicht pruefbar und gab als Grund an, es sei "kein
+    Bluetooth-Adapter und kein laufendes bluetoothd erreichbar" - ohne das je
+    zu messen. Am 13.09.2026 am Geraet nachgemessen war es falsch:
+    /org/bluez/hci0 antwortete, fuenf Geraete waren sichtbar.
+
+    Der Unterschied zu adapterlage(): die misst den Kernel
+    (/sys/class/bluetooth), diese hier den Dienst. Beides kann auseinander
+    liegen - ein angemeldeter Adapter ohne laufendes bluetoothd ist genau der
+    Fall, den die alte Zeile behauptete.
+    """
+    try:
+        import dbus
+    except Exception as f:                                  # pragma: no cover
+        return None, "python3-dbus ist nicht verfuegbar (%s)." % f
+    try:
+        bus = dbus.SystemBus()
+        om = dbus.Interface(bus.get_object("org.bluez", "/"),
+                            "org.freedesktop.DBus.ObjectManager")
+        objekte = om.GetManagedObjects()
+    except Exception as f:
+        return None, dbus_fehler_deuten(f, adapter)
+    adapter_pfade = [str(p) for p, s in objekte.items() if ADAPTER_IF in s]
+    geraete = sum(1 for s in objekte.values() if "org.bluez.Device1" in s)
+    if not adapter_pfade:
+        return False, ("org.bluez antwortet, fuehrt aber keinen Adapter - "
+                       "bluetoothd laeuft ohne angemeldete Hardware.")
+    kurz = [p.rsplit("/", 1)[-1] for p in adapter_pfade]
+    if adapter not in kurz:
+        return False, ("org.bluez fuehrt " + ", ".join(kurz)
+                       + " - eingestellt ist aber " + str(adapter) + ".")
+    return True, ("org.bluez fuehrt " + ", ".join(kurz) + ", %d Geraet(e) "
+                  "sichtbar." % geraete)
 
 
 class BlueZFehlt(Exception):

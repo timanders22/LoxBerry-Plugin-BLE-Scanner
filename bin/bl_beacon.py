@@ -11,18 +11,32 @@ eingelesen und weggeworfen hat:
 
 Beide stecken bereits im Ergebnis von GetManagedObjects(), kosten also
 keinen zusaetzlichen Funkverkehr und keine Verbindung. Damit lassen sich
-vier verbreitete Formate lesen:
+fuenf verbreitete Formate lesen:
 
     iBeacon      stabile Kennung (UUID/Major/Minor) und "measured power"
     Eddystone    UID, URL und TLM - TLM traegt Batteriespannung und Temperatur
     ATC / pvvx   Xiaomi-Thermometer mit freier Firmware: Temperatur, Feuchte,
                  Batterie
     RuuviTag     Temperatur, Feuchte, Luftdruck, Batteriespannung
+    MiBeacon     Xiaomi / Mijia AB WERK (ServiceData 0000fe95): Temperatur,
+                 Feuchte, Batterie - siehe unten ab _mibeacon()
 
-BEWUSST NICHT dekodiert wird das originale Xiaomi-Format (ServiceData unter
-0000fe95): es ist bei neueren Geraeten verschluesselt und braucht je Geraet
-einen Schluessel aus der Hersteller-App. Der Ausweg ist die freie Firmware,
-also der ATC-Fall.
+BERICHTIGT IN 1.3.14. Hier stand bis 1.3.13 das Gegenteil:
+
+    "BEWUSST NICHT dekodiert wird das originale Xiaomi-Format (ServiceData
+     unter 0000fe95) ... Der Ausweg ist die freie Firmware, also der
+     ATC-Fall."
+
+Das war seit 1.3.13 falsch - dieselbe Datei dekodiert es seither, am Geraet
+gemessen an einem LYWSDCGQ/01ZM (MJ_HT_V1). Der Kopfkommentar hat den
+Umbau nicht mitbekommen und widersprach dem Code darunter.
+
+Richtig bleibt der KERN der alten Aussage, nur schmaler: NEUERE Xiaomi-
+Geraete verschluesseln ihre Nutzlast und brauchen je Geraet einen Schluessel
+aus der Hersteller-App. Diese Pakete werden erkannt und als verschluesselt
+gemeldet, nicht geraten (siehe beschriftung()); der Ausweg ist dort weiterhin
+die freie Firmware, also der ATC-Fall. Die UNVERSCHLUESSELTE Fassung - und
+die sendet das verbreitete MJ_HT_V1 ab Werk - wird gelesen.
 
 BEWUSST KEINE Bibliothek: TheengsDecoder deckt hunderte Geraete ab, ist aber
 kein Debian-Paket. Ein systemweites pip3 install scheitert auf Bookworm und
@@ -448,6 +462,24 @@ def beschriftung(gedeutet):
 # Themennamen der Sensorwerte. Die Oberflaeche und die Loxone-Vorlage lesen
 # diese Liste - so kann sie nicht von dem abweichen, was hier entsteht.
 # Reihenfolge: Thema -> (Beschreibung, Einheit, MinVal, MaxVal)
+#
+# DIESER SATZ WAR BIS 1.3.13 FALSCH. Gemessen am 13.09.2026: keine einzige
+# PHP-Datei las diese Liste (null Treffer fuer "SENSORTHEMEN" im ganzen
+# webfrontend/). Die Loxone-Vorlage kannte ueberhaupt keinen Messwert, und
+# am Miniserver kam von Temperatur und Feuchte nichts an - waehrend hier
+# stand, beides koenne gar nicht auseinanderlaufen.
+#
+# Seit 1.3.14 stimmt er: bl_lib.php liest die Liste mit
+# bl_sensorthemen_lesen(). Wer sie umbenennt, anders formatiert oder
+# verschiebt, bricht das - und der Reiter "Test" wird dann ROT, statt still
+# auf den eingebauten Rueckfall zu wechseln (Pruefzeile PRUEF.GRENZEN,
+# beidseitig geeicht).
+#
+# Wer hier eine Groesse ergaenzt: Sprachschluessel THEMA.S_<NAME> in
+# language_de.ini und language_en.ini anlegen und den Rueckfall in
+# bl_sensor_rueckfall() mitziehen. Fehlt der Sprachschluessel, traegt die
+# Beschreibung aus dieser Zeile; fehlt der Rueckfalleintrag, meldet es die
+# Pruefzeile.
 SENSORTHEMEN = {
     "temperatur":  ("Temperatur", "°C", -45, 90),
     "feuchte":     ("Relative Luftfeuchte", "%", 0, 100),

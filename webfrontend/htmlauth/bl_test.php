@@ -274,10 +274,27 @@ function bl_themen_vergleich($cfg)
     foreach (bl_allgemeine_themen() as $k => $_i) {
         $erwartet[] = $k;
     }
-    // Themen, die der Sendecode nur unter Bedingungen kennt und die in der
-    // Anleitung bewusst nur bei eingeschalteter Einstellung stehen.
+    // Themen, die der Sendecode nur unter Bedingungen kennt: bei
+    // eingeschalteter Einstellung, je Person, je Scanner, oder - bei den
+    // Messwerten - erst, wenn ein Tag sie einmal gesendet hat. Sie duerfen
+    // deshalb HEUTE in der Vorlage fehlen.
+    //
+    // BERICHTIGT IN 1.3.14. Bis 1.3.13 hiess "bedingt" schlicht
+    // "ignorieren" - und genau das hat den groessten Mangel dieser Linie
+    // verdeckt: 'sensor/' stand auf dieser Liste, hatte aber NIRGENDS einen
+    // Eintrag. bl_zusatzthemen() kannte keinen einzigen Messwert, die
+    // Loxone-Vorlage fuehrte also weder Temperatur noch Luftfeuchte, und
+    // diese Pruefung schwieg dazu - obwohl ihr eigener Kommentar oben genau
+    // diesen Fall beschreibt. Eine Ausnahme, die einen echten Fehler stumm
+    // schaltet, ist schlimmer als keine Pruefung: sie erzeugt Vertrauen.
+    //
+    // Jetzt wird zweierlei gefragt. Erstens weiterhin: darf es heute
+    // fehlen? Zweitens neu: gibt es ueberhaupt einen Eintrag dafuer - in
+    // bl_zusatzthemen_alle(), also unabhaengig von jeder Einstellung? Wenn
+    // nicht, ist es kein bedingtes Thema, sondern ein vergessenes.
     $bedingt = array('distance', 'battery', 'battery_ts', 'raum', 'raum_seit',
                      'sensor/', 'person/', 'scanner/');
+    $ueberhaupt = array_keys(bl_zusatzthemen_alle());
     $fehlt = array();
     foreach ($erwartet as $k) {
         if (!in_array($k, $gesendet, true)) {
@@ -285,6 +302,7 @@ function bl_themen_vergleich($cfg)
         }
     }
     $unbekannt = array();
+    $ohne_eintrag = array();
     foreach ($gesendet as $k) {
         if (in_array($k, $erwartet, true)) {
             continue;
@@ -298,6 +316,24 @@ function bl_themen_vergleich($cfg)
         }
         if (!$treffer) {
             $unbekannt[] = $k;
+            continue;
+        }
+        // Es ist bedingt - aber steht es irgendwo? 'person/' und 'scanner/'
+        // sind eigene Zweige und werden nicht je Tag angelegt; fuer sie
+        // gilt die Frage nicht.
+        if (strpos($k, 'person/') === 0 || strpos($k, 'scanner/') === 0) {
+            continue;
+        }
+        $gedeckt = false;
+        foreach ($ueberhaupt as $e) {
+            if ($e === $k || strpos($e, rtrim($k, '/') . '/') === 0
+                || strpos(rtrim($k, '/'), rtrim($e, '/')) === 0) {
+                $gedeckt = true;
+                break;
+            }
+        }
+        if (!$gedeckt) {
+            $ohne_eintrag[] = $k;
         }
     }
     $meldung = array();
@@ -307,7 +343,72 @@ function bl_themen_vergleich($cfg)
     if ($unbekannt) {
         $meldung[] = sprintf(bl_t('TEST.THEMA_UNDOKUMENTIERT'), implode(', ', $unbekannt));
     }
+    if ($ohne_eintrag) {
+        $meldung[] = sprintf(bl_t('TEST.THEMA_OHNE_EINTRAG'),
+                             implode(', ', $ohne_eintrag));
+    }
     return array(count($meldung) === 0, implode("\n", $meldung));
+}
+
+/**
+ * Wird SENSORTHEMEN aus bin/bl_beacon.py wirklich gelesen - und deckt sich
+ * der eingebaute Rueckfall damit?
+ *
+ * Zwei Fragen in einer Zeile, weil sie zusammengehoeren:
+ *
+ *  1. Kommt die Liste ueberhaupt an? Ueber SENSORTHEMEN steht in
+ *     bl_beacon.py der Satz "Die Oberflaeche und die Loxone-Vorlage lesen
+ *     diese Liste". Bis 1.3.13 war das schlicht falsch - null PHP-Treffer.
+ *     Seit 1.3.14 liest bl_sensorthemen_lesen() sie; wenn das je wieder
+ *     aufhoert (umbenannt, anders geschrieben, Datei weg), wird diese Zeile
+ *     rot statt still auf den Rueckfall zu wechseln.
+ *  2. Stimmt der Rueckfall? Er greift nur, wenn die Datei fehlt - also
+ *     genau dann, wenn ihn niemand pruefen kann. Deshalb wird er hier
+ *     gegen die Quelle gehalten, solange beide da sind.
+ *
+ * Neu in 1.3.14.
+ */
+function bl_grenzen_vergleich()
+{
+    $datei = bl_paths()['bindir'] . '/bl_beacon.py';
+    if (!is_file($datei)) {
+        return array(null, bl_t('TEST.SENDECODE_FEHLT'));
+    }
+    $quelle = bl_sensorthemen_lesen();
+    if (!$quelle) {
+        return array(false, bl_t('TEST.GRENZEN_UNLESBAR'));
+    }
+    // Verglichen wird der EINGEBAUTE RUECKFALL gegen die Quelle - nicht der
+    // Katalog: der liest die Quelle ja und waere mit ihr immer einig. Genau
+    // so stand es hier im ersten Versuch, und die Zeile konnte nicht
+    // ansprechen; beim Eichen fiel es auf (Grenze in der Quelle verstellt,
+    // Zeile blieb gruen).
+    $rueckfall = bl_sensor_rueckfall();
+    $abweichung = array();
+    foreach ($quelle as $name => $info) {
+        if (!isset($rueckfall[$name])) {
+            $abweichung[] = $name . ' (fehlt im Rückfall)';
+            continue;
+        }
+        $r = $rueckfall[$name];
+        if ((int) $r['min'] !== (int) $info['min']
+            || (int) $r['max'] !== (int) $info['max']
+            || (string) $r['einheit'] !== (string) $info['einheit']) {
+            $abweichung[] = sprintf('%s (Rückfall %s..%s %s, bl_beacon.py %s..%s %s)',
+                                    $name, $r['min'], $r['max'], $r['einheit'],
+                                    $info['min'], $info['max'], $info['einheit']);
+        }
+    }
+    foreach (array_keys($rueckfall) as $name) {
+        if (!isset($quelle[$name])) {
+            $abweichung[] = $name . ' (nur im Rückfall)';
+        }
+    }
+    if ($abweichung) {
+        return array(false, sprintf(bl_t('TEST.GRENZEN_ANDERS'),
+                                    implode(', ', $abweichung)));
+    }
+    return array(true, sprintf(bl_t('TEST.GRENZEN_OK'), count($quelle)));
 }
 
 /** Die erzeugte Loxone-Vorlage auf Wohlgeformtheit pruefen. */
@@ -644,6 +745,9 @@ function bl_pruefzeilen($cfg, $tags)
 
     list($ok, $meldung) = bl_themen_vergleich($cfg);
     $zeilen[] = bl_zeile(bl_t('PRUEF.THEMENLISTE'), $ok, $meldung);
+
+    list($ok, $meldung) = bl_grenzen_vergleich();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.GRENZEN'), $ok, $meldung);
 
     list($ok, $meldung) = bl_retain_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.RETAIN'), $ok, $meldung);

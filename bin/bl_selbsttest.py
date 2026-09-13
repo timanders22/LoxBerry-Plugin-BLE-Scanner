@@ -609,6 +609,20 @@ def alles_pruefen():
                                          or "Bluetooth-Adapter" in gedeutet),
             gem.thema_saeubern("")  or gedeutet[:90])
 
+    # Der Kernel ist die eine Haelfte, der Dienst die andere. Bis 1.3.13 wurde
+    # nur /sys/class/bluetooth gemessen und ueber org.bluez eine Behauptung
+    # aufgestellt (siehe Gruppe "Nicht pruefbar ohne Geraet" weiter unten).
+    # Jetzt wird auch der Dienst gefragt. Ist er nicht erreichbar, ist das ein
+    # Strich mit dem GEMESSENEN Grund - kein Kreuz: ein LoxBerry ohne
+    # Bluetooth ist ein zulaessiger Zustand, ueber den diese Selbstpruefung
+    # nicht urteilt.
+    _bz_zustand, _bz_text = gem.bluez_ueber_dbus("hci0")
+    if _bz_zustand is None:
+        p.offen(G, "org.bluez antwortet über D-Bus", _bz_text[:120])
+    else:
+        p.merke(G, "org.bluez antwortet über D-Bus und führt den Adapter",
+                _bz_zustand, _bz_text[:120])
+
     # =====================================================================
     G = "Schalter Bluetooth"
     # DER PFAD STEHT VIERMAL. Hier wird er gegeneinander gehalten - eine
@@ -691,8 +705,28 @@ def alles_pruefen():
 
     # =====================================================================
     G = "Nicht prüfbar ohne Gerät"
-    p.offen(G, "BlueZ über D-Bus (Suche, RSSI, RemoveDevice)",
-            "kein Bluetooth-Adapter und kein laufendes bluetoothd erreichbar")
+    # BERICHTIGT IN 1.3.14. Hier stand:
+    #
+    #     p.offen(G, "BlueZ über D-Bus (Suche, RSSI, RemoveDevice)",
+    #             "kein Bluetooth-Adapter und kein laufendes bluetoothd
+    #              erreichbar")
+    #
+    # Das war eine Tatsachenbehauptung ohne jede Messung - ein unbedingtes
+    # p.offen(), das den Grund nannte, als haette es ihn festgestellt. Am
+    # 13.09.2026 am Geraet nachgemessen war er falsch: org.bluez antwortete,
+    # /org/bluez/hci0 war da, fuenf Geraete waren sichtbar. Die drei Zeilen
+    # darunter begruenden sich ehrlich mit "braucht ein Geraet"; diese eine
+    # log. Ein Pruefstand, der einen Zustand behauptet, statt ihn zu messen,
+    # ist schlechter als eine fehlende Zeile - er beantwortet die Frage
+    # falsch, und niemand sieht nach.
+    #
+    # Ob org.bluez antwortet, misst jetzt die Gruppe "Bluetooth-Lage". Offen
+    # bleibt hier nur, was ohne ein zweites Geraet wirklich nicht geht: eine
+    # Suche mit RSSI-Verlauf und ein RemoveDevice, die den Ablauf des Dienstes
+    # von Anfang bis Ende durchspielen.
+    p.offen(G, "Suchlauf mit RSSI-Verlauf und RemoveDevice",
+            "braucht ein sendendes Gerät in Reichweite und einen Adapter, den "
+            "der laufende Dienst nicht gerade belegt")
     p.offen(G, "Batteriestand über GATT (org.bluez.Battery1)",
             "braucht ein verbindungsfähiges Gerät")
     p.offen(G, "Wie dicht PropertiesChanged feuert",

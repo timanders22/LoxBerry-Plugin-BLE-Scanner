@@ -18,6 +18,33 @@ PVERSION=$4   # Forth argument is Plugin version
 PDATA=$LBPDATA/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
 
+# --- Die beiden Merker liegen NEBEN dem Datenordner -------------------------
+#
+# BERICHTIGT IN 1.3.14. Bis 1.3.13 lagen sie DARIN ("$PDATA/upgrade_laeuft"),
+# und damit hat keiner von beiden je getragen: zwischen preupgrade.sh und
+# postinstall.sh raeumt der Installer data/plugins/<ordner>/ restlos ab
+# (plugininstall.pl: &purge_installation im Upgrade-Zweig, :886 -> :1629 ff.).
+# Am Geraet am 13.09.2026 im Installationsprotokoll Zeile fuer Zeile belegt:
+#
+#     13:00:06  Plugin is already installed -> proceeding with upgrade
+#     13:00:13  removed '.../data/plugins/ble_scanner_ng/upgrade_laeuft'
+#     13:01:16  <INFO> Neuinstallation - der Dienst wird gestartet.
+#     13:01:22  <INFO> Der Dienst lief vor dem Update nicht und wurde nicht
+#               gestartet.
+#
+# Zwei Folgen, beide unerwuenscht: postinstall.sh hielt JEDES Upgrade fuer
+# eine Neuinstallation und startete auch einen bewusst angehaltenen Dienst;
+# und der Neustart nach einem Update lief nie an, weil "lief_vor_update" bei
+# postupgrade.sh ebenfalls nie ankam. Damit war der Befund aus 1.3.13 (das
+# "su loxberry -c", das als loxberry nicht geht) nur halb behoben - die
+# Ursache war weg, der ausloesende Merker aber auch.
+#
+# Der Punkt im Namen ist der ganze Unterschied, genau wie beim
+# Sicherungsordner weiter unten: "rm -rf .../<ordner>/" trifft den Nachbarn
+# "<ordner>.upgrade_laeuft" nicht.
+MERK_UPGRADE="$PDATA.upgrade_laeuft"
+MERK_LIEF="$PDATA.lief_vor_update"
+
 # --- Den laufenden Dienst zuerst anhalten -----------------------------------
 #
 # Was passiert, wenn man es nicht tut: LoxBerry ersetzt bin/*.py unter einem
@@ -45,8 +72,14 @@ PCONFIG=$LBPCONFIG/$PDIR
 # postinstall.sh laeuft dagegen IMMER und darf den Dienst deshalb nur auf
 # einer Neuinstallation starten; den Upgrade-Fall erledigt postupgrade.sh,
 # nachdem es die Konfiguration zurueckgespielt hat.
-mkdir -p "$PDATA" 2>/dev/null
-: > "$PDATA/upgrade_laeuft"
+#
+# In den Merker kommt der Zeitpunkt, nicht nichts. Bricht ein Upgrade zwischen
+# preupgrade.sh und postupgrade.sh ab, bleibt die Datei neben dem Ordner
+# liegen - und wuerde eine spaetere echte Neuinstallation faelschlich als
+# Upgrade ausweisen. Wer ihn liest, prueft deshalb sein Alter.
+date +%s > "$MERK_UPGRADE" 2>/dev/null
+chown loxberry:loxberry "$MERK_UPGRADE" 2>/dev/null
+chmod 0644 "$MERK_UPGRADE" 2>/dev/null
 
 PIDDATEI="$PDATA/dienst.pid"
 P=""
@@ -84,12 +117,12 @@ if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
     # Merker fuer postupgrade.sh: der Dienst LIEF und gehoert danach wieder
     # gestartet. Ohne diesen Merker wuerde ein bewusst angehaltener Dienst
     # nach jedem Update ungefragt wieder anlaufen.
-    mkdir -p "$PDATA" 2>/dev/null
-    : > "$PDATA/lief_vor_update"
-    chown loxberry:loxberry "$PDATA/lief_vor_update" 2>/dev/null
+    date +%s > "$MERK_LIEF" 2>/dev/null
+    chown loxberry:loxberry "$MERK_LIEF" 2>/dev/null
+    chmod 0644 "$MERK_LIEF" 2>/dev/null
 else
     echo "<INFO> Es lief kein BLE-Scanner NG."
-    rm -f "$PDATA/lief_vor_update" 2>/dev/null
+    rm -f "$MERK_LIEF" 2>/dev/null
 fi
 
 # --- Sicherung der Konfiguration --------------------------------------------

@@ -23,6 +23,26 @@ PBIN=$LBPBIN/$PDIR
 
 SICHER="$PDATA.upgrade_sicherung"
 
+# Die beiden Merker liegen NEBEN dem Datenordner - sonst raeumt der Installer
+# sie zwischen preupgrade.sh und hier ab, und dieses Skript startet einen
+# Dienst, der lief, nie wieder. Begruendung und Messung: preupgrade.sh.
+# Berichtigt in 1.3.14.
+MERK_UPGRADE="$PDATA.upgrade_laeuft"
+MERK_LIEF="$PDATA.lief_vor_update"
+
+# Gilt eine Stunde, damit ein Rest eines abgebrochenen Upgrades nicht spaeter
+# einen Dienst hochfaehrt, den niemand angehalten hat. Gleiche Pruefung wie in
+# postinstall.sh.
+merker_frisch() {
+    [ -f "$1" ] || return 1
+    _dann=$(cat "$1" 2>/dev/null)
+    case "$_dann" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    _jetzt=$(date +%s 2>/dev/null) || return 1
+    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
+}
+
 # --- Konfiguration zurueckspielen -------------------------------------------
 #
 # Der Installer kopiert config/* aus dem Archiv ueber config/plugins/<ordner>
@@ -123,33 +143,65 @@ fi
 # Gestartet wird nur, wenn er VORHER lief (Merker aus preupgrade.sh) - sonst
 # liefe ein bewusst angehaltener Dienst nach jedem Update wieder an.
 # Den Merker aus preupgrade.sh wegraeumen - postinstall.sh hat ihn gelesen.
-rm -f "$PDATA/upgrade_laeuft" 2>/dev/null
+rm -f "$MERK_UPGRADE" 2>/dev/null
 
-if [ -f "$PDATA/lief_vor_update" ]; then
-    rm -f "$PDATA/lief_vor_update"
+if merker_frisch "$MERK_LIEF"; then
+    rm -f "$MERK_LIEF"
     if P=$(dienst_pid); then
         echo "<OK> Der Dienst laeuft bereits (PID $P)."
     else
         dienst_starten
     fi
 else
+    # Auch einen abgelaufenen Rest wegraeumen, sonst liegt er fuer immer.
+    rm -f "$MERK_LIEF" 2>/dev/null
     echo "<INFO> Der Dienst lief vor dem Update nicht und wurde nicht gestartet."
 fi
 
-# --- Gruppe und Module pruefen ----------------------------------------------
-if getent group bluetooth >/dev/null 2>&1; then
+# --- Zugriff auf org.bluez und die Module pruefen ---------------------------
+#
+# BERICHTIGT IN 1.3.14. Hier stand bis 1.3.13 ein Versuch,
+#
+#     usermod -a -G bluetooth loxberry
+#
+# auszufuehren, und bei Misserfolg "<WARNING> Gruppenzuordnung bluetooth
+# konnte nicht gesetzt werden." Diese Warnung stand bei JEDEM Upgrade im
+# Protokoll - am Geraet am 13.09.2026 gemessen - und war doppelt falsch:
+#
+# 1. Sie konnte gar nicht gelingen. LoxBerry ruft postupgrade.sh mit
+#    "sudo -n -u loxberry" auf (plugininstall.pl, Zeile 1336); dieses Skript
+#    laeuft also als loxberry, und usermod verlangt root. Nur preroot.sh und
+#    postroot.sh laufen als root - dieselbe Klasse wie das "su loxberry -c",
+#    das in 1.3.13 aus genau diesem Skript verschwunden ist.
+# 2. Die Gruppe wird ueberhaupt nicht gebraucht. bluez 5.82 liefert
+#    /usr/share/dbus-1/system.d/bluetooth.conf mit
+#    <policy context="default">, und das gilt fuer JEDEN Benutzer.
+#    postinstall.sh misst das seit 1.3.12 richtig und sagt es auch - nur hier
+#    war die alte, falsche Annahme stehen geblieben.
+#
+# Geprueft wird deshalb dasselbe wie in postinstall.sh: die Regel, nicht die
+# Gruppe. Eine Gruppenmitgliedschaft wird weder gesetzt noch verlangt.
+BTCONF=""
+for k in /etc/dbus-1/system.d/bluetooth.conf /usr/share/dbus-1/system.d/bluetooth.conf; do
+    [ -f "$k" ] && BTCONF="$k" && break
+done
+if [ -z "$BTCONF" ]; then
+    echo "<INFO> Keine bluetooth.conf fuer D-Bus gefunden - bluez scheint zu fehlen."
+elif grep -q '<policy context="default">' "$BTCONF" 2>/dev/null; then
+    echo "<OK> $BTCONF erlaubt den Zugriff auf org.bluez jedem Benutzer"
+    echo "<OK> (<policy context=\"default\">) - eine Gruppenmitgliedschaft ist unnoetig."
+elif grep -q 'group="bluetooth"' "$BTCONF" 2>/dev/null; then
     if id -nG loxberry 2>/dev/null | tr ' ' '\n' | grep -qx bluetooth; then
-        echo "<OK> Benutzer loxberry ist in der Gruppe bluetooth."
-    elif usermod -a -G bluetooth loxberry 2>/dev/null; then
-        echo "<OK> Benutzer loxberry zur Gruppe bluetooth hinzugefuegt."
-        echo "<INFO> ACHTUNG: eine neue Gruppe wirkt erst in einer NEUEN Sitzung."
-        echo "<INFO> Beim Systemstart ist das erledigt. Wer den Dienst jetzt aus der"
-        echo "<INFO> Oberflaeche startet, erbt womoeglich noch die alten Gruppen des"
-        echo "<INFO> Webservers - dann meldet der Reiter Test 'Zugriff abgewiesen'."
-        echo "<INFO> Abhilfe: LoxBerry einmal neu starten."
+        echo "<OK> $BTCONF erlaubt den Zugriff der Gruppe bluetooth, und loxberry ist darin."
     else
-        echo "<WARNING> Gruppenzuordnung bluetooth konnte nicht gesetzt werden."
+        echo "<INFO> $BTCONF erlaubt den Zugriff nur der Gruppe bluetooth, und loxberry"
+        echo "<INFO> ist nicht darin. Dieses Skript laeuft als loxberry und kann das nicht"
+        echo "<INFO> aendern. Einmalig als root:"
+        echo "<INFO>     sudo usermod -a -G bluetooth loxberry && sudo reboot"
     fi
+else
+    echo "<INFO> $BTCONF nennt weder eine Vorgaberegel noch die Gruppe bluetooth -"
+    echo "<INFO> der Zugriff auf org.bluez ist von hier aus nicht beurteilbar."
 fi
 
 for modul in dbus gi paho.mqtt.client; do

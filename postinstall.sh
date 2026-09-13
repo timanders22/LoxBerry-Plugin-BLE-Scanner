@@ -226,7 +226,28 @@ netz_zurueck "ble_scanner_ng.cfg" "1310ac7910fdf451128de437f2b5b345e3a225924ba18
 # postupgrade.sh - der laeuft NACH diesem Skript und spielt vorher die
 # Konfiguration zurueck. Ein Start hier wuerde den Dienst mit der
 # mitgelieferten Vorgabe hochfahren.
-if [ -f "$PDATA/upgrade_laeuft" ]; then
+#
+# BERICHTIGT IN 1.3.14: der Merker liegt NEBEN dem Datenordner, nicht darin.
+# Darin wurde er zwischen preupgrade.sh und diesem Skript vom Installer
+# mitabgeraeumt, und dieser Zweig hat deshalb NIE gegriffen - jedes Upgrade
+# lief hier als "Neuinstallation" durch. Begruendung und Messung stehen in
+# preupgrade.sh.
+MERK_UPGRADE="$PDATA.upgrade_laeuft"
+
+# Ein liegengebliebener Merker eines abgebrochenen Upgrades darf eine echte
+# Neuinstallation nicht als Upgrade ausweisen - sonst startet den Dienst
+# niemand. Er gilt eine Stunde; ein Upgrade dauert Sekunden bis Minuten.
+merker_frisch() {
+    [ -f "$1" ] || return 1
+    _dann=$(cat "$1" 2>/dev/null)
+    case "$_dann" in
+        ''|*[!0-9]*) return 1 ;;   # leer oder keine Zahl: nicht vertrauen
+    esac
+    _jetzt=$(date +%s 2>/dev/null) || return 1
+    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
+}
+
+if merker_frisch "$MERK_UPGRADE"; then
     echo "<INFO> Upgrade - der Dienst wird von postupgrade.sh gestartet."
 elif P=$(dienst_pid); then
     echo "<INFO> Es laeuft schon ein Dienst (PID $P) - es wird keiner gestartet."
