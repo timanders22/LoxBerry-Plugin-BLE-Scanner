@@ -125,7 +125,7 @@ STEUER_FILE = _SHM + "/ble_scanner_ng_steuer.json"
 # Kommentar darueber hat den Rueckfall vorhergesagt und ihn nicht verhindert,
 # weil er nur eine Bitte ist. Solange fassung_setzen.py diese Stelle nicht
 # kennt, bleibt sie Handarbeit: WER DIE NUMMER ANHEBT, HEBT DIESE ZEILE MIT.
-VERSION_RUECKFALL = "1.3.15"
+VERSION_RUECKFALL = "1.3.16"
 
 
 def fassung():

@@ -38,6 +38,30 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bl_common as gem      # noqa: E402
+
+
+# Grund einer abgewiesenen MQTT-Anmeldung in Worten. paho 1.x liefert die
+# CONNACK-Codes aus MQTT 3.1.1 (1-5), paho 2.x fuer dieselben Faelle die
+# Ursachencodes aus MQTT 5 (132-136) - je nach installierter Fassung kommt
+# also die eine ODER die andere Zahl an (Regeln/07). Nachgetragen 17.09.2026.
+MQTT_ANMELDUNG_TEXT = {
+    1: "der Broker lehnt die Protokollfassung ab",
+    2: "der Broker lehnt die Kennung des Clients ab",
+    3: "der Broker ist nicht verfuegbar",
+    4: "Benutzer oder Kennwort des Brokers sind falsch (System -> MQTT Gateway)",
+    5: "nicht berechtigt - Benutzer und Kennwort des Brokers pruefen (System -> MQTT Gateway)",
+}
+for _alt, _neu in ((1, 132), (2, 133), (3, 136), (4, 134), (5, 135)):
+    MQTT_ANMELDUNG_TEXT[_neu] = MQTT_ANMELDUNG_TEXT[_alt]
+
+
+def mqtt_anmeldegrund(rc):
+    """'Code 135: nicht berechtigt - ...' aus einer Zahl oder einem ReasonCode."""
+    try:
+        code = int(getattr(rc, "value", rc))
+    except (TypeError, ValueError):
+        return "Code %s" % rc
+    return "Code %d: %s" % (code, MQTT_ANMELDUNG_TEXT.get(code, "unbekannter Grund"))
 import bl_beacon             # noqa: E402
 
 import logging               # noqa: E402
@@ -213,11 +237,10 @@ class Mqtt:
                     except Exception as fehler:       # noqa: BLE001
                         log.warning("MQTT-Abo fehlgeschlagen: %s", fehler)
             else:
-                # rc 4 und 5 sind falsche Zugangsdaten - die behebt kein
-                # Warten, deshalb wird der Grund benannt.
+                # Falsche Zugangsdaten behebt kein Warten, deshalb wird der
+                # Grund benannt - fuer paho 1.x (4, 5) wie 2.x (134, 135).
                 self.verbunden = False
-                log.error("MQTT-Anmeldung abgelehnt (Code %s). Bei 4 oder 5 stimmen "
-                          "Benutzer oder Kennwort des Brokers nicht.", rc)
+                log.error("MQTT-Anmeldung abgelehnt (%s).", mqtt_anmeldegrund(rc))
 
         def bei_trennung(_c, _u, *rest):
             # paho ruft hier VERSCHIEDEN, am Geraet an 2.1.0 gemessen:
