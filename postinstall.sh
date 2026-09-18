@@ -34,15 +34,48 @@ chmod 755 "$LBPBIN/$PDIR"/*.py 2>/dev/null
 # 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
 # einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
 # umleitete, stand darueber auch nichts im Protokoll.
-dienst_pid() {
-    for d in /proc/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -qx ".*/ble_scanner_ng\.py"; then
-            basename "$d"
-            return 0
+# BERICHTIGT IN 1.3.17: die Suche verlangte nur IRGENDEIN Argument, das auf
+# "/ble_scanner_ng.py" endet - Interpreter, Zahl der Argumente und Benutzer
+# blieben ungeprueft, und der Dienst einer ZWEITEN Installation zaehlte mit.
+# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
+# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
+# Benutzer mit der Nummer $2 gehoeren. Dieselbe Funktion steht in
+# preupgrade.sh, postupgrade.sh, uninstall und daemon.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
         fi
     done
-    return 1
+}
+
+# Dieses Skript laeuft als loxberry (sudo -n -u loxberry), der Dienst auch -
+# deshalb ist die eigene Nummer der richtige Rueckfall, wenn es den Benutzer
+# loxberry nicht gibt.
+dienst_pid() {
+    bl_uid=$(id -u loxberry 2>/dev/null)
+    [ -n "$bl_uid" ] || bl_uid=$(id -u 2>/dev/null)
+    bl_erste=$(bl_dienste_finden "$PBIN/ble_scanner_ng.py" "$bl_uid" | head -1)
+    [ -n "$bl_erste" ] || return 1
+    echo "$bl_erste"
+    return 0
 }
 
 dienst_starten() {
@@ -243,7 +276,18 @@ merker_frisch() {
     case "$_dann" in
         ''|*[!0-9]*) return 1 ;;   # leer oder keine Zahl: nicht vertrauen
     esac
-    _jetzt=$(date +%s 2>/dev/null) || return 1
+    # BERICHTIGT IN 1.3.17: ohne lesbare Uhr faellt dieser Schutz GESCHLOSSEN
+    # aus - die Marke gilt, und hier wird nichts gestartet (CLAUDE.md 4).
+    # Bis 1.3.16 stand hier "$(date +%s) || return 1": eine date-Attrappe, die
+    # nichts ausgibt und mit 0 endet (unter Last kann ein fork scheitern),
+    # lieferte eine leere Zeichenkette, die Schale rechnete damit als 0, das
+    # Alter wurde negativ, die Bedingung fiel durch - und postinstall.sh hielt
+    # ein laufendes Upgrade fuer eine Neuinstallation und startete den Dienst
+    # mitten darin. In WSL gemessen (18.09.2026, Fall h1): 1 Prozess statt 0.
+    _jetzt=$(date +%s 2>/dev/null)
+    case "$_jetzt" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
     [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
 }
 

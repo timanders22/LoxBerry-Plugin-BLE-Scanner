@@ -717,47 +717,134 @@ function bl_pid_datei()
 }
 
 /**
- * Laeuft der Dienst? Rueckgabe: PID oder 0.
+ * Die Benutzernummern, deren Prozesse als eigener Dienst gelten.
  *
- * Zuerst die PID-Datei, und die eingetragene Nummer wird gegen
- * /proc/<pid>/cmdline gehalten. Erst wenn es keine Datei gibt, wird gesucht.
- *
- * Warum nicht pgrep: 'pgrep -f ble_scanner_ng.py' trifft jede Befehlszeile,
- * in der diese Zeichenkette vorkommt - ein Editor, ein 'less' auf dem
- * Quelltext. '-o' nimmt davon den AELTESTEN Treffer. Verglichen wird deshalb
- * argumentweise gegen den VOLLEN Pfad.
+ * Der Dienst laeuft als loxberry - daemon/daemon steigt dazu ab. Die Nummer
+ * kommt aus /etc/passwd und nicht aus posix_getpwnam(): die posix-Erweiterung
+ * ist auf einem LoxBerry nicht zugesichert, und eine Oberflaeche darf sich auf
+ * keine Erweiterung verlassen, die nicht garantiert geladen ist (Regeln/02).
+ * Dazu die eigene Nummer: was diese Seite selbst gestartet hat, gehoert ihr.
  */
-function bl_dienst_pid()
+function bl_dienst_uids()
 {
-    $datei = bl_pid_datei();
-    if (is_file($datei)) {
-        $pid = (int) trim((string) @file_get_contents($datei));
-        if ($pid > 0 && is_dir('/proc/' . $pid)) {
-            $cmd = (string) @file_get_contents('/proc/' . $pid . '/cmdline');
-            if (strpos($cmd, 'ble_scanner_ng.py') !== false) {
-                return $pid;
+    static $u = null;
+    if ($u !== null) {
+        return $u;
+    }
+    $u = array();
+    $eigen = @getmyuid();
+    if ($eigen !== false) {
+        $u[] = (int) $eigen;
+    }
+    // is_readable() VOR dem Lesen, nicht nur ein @ davor: der Pruefstand
+    // rendert die Oberflaeche unter Windows, dort gibt es weder /etc/passwd
+    // noch /proc, und ein eigener Fehlerbehandler sieht die Meldung auch
+    // hinter dem @.
+    $zeilen = is_readable('/etc/passwd')
+        ? @file('/etc/passwd', FILE_IGNORE_NEW_LINES) : false;
+    if (is_array($zeilen)) {
+        foreach ($zeilen as $z) {
+            $f = explode(':', $z);
+            if (isset($f[2]) && $f[0] === 'loxberry') {
+                $u[] = (int) $f[2];
+                break;
             }
         }
-        // Die Datei zeigt ins Leere - sie ist von einem Absturz uebrig.
-        @unlink($datei);
     }
+    $u = array_values(array_unique($u));
+    return $u;
+}
+
+/**
+ * ALLE Prozesse dieses Dienstes - argumentweise erkannt.
+ *
+ * Ein Treffer hat GENAU zwei Argumente: einen python-Interpreter und den
+ * vollen Dienstpfad DIESER Installation. Dazu gehoert er loxberry oder dem
+ * Benutzer, unter dem diese Seite laeuft. Dieselbe Regel wie in
+ * preupgrade.sh, postinstall.sh, postupgrade.sh, uninstall und daemon.
+ *
+ * BERICHTIGT IN 1.3.17. Bis 1.3.16 entschied im PID-Datei-Zweig eine
+ * TEILZEICHENKETTE ueber die ganze Befehlszeile, und behandelt wurde immer nur
+ * EIN Prozess. In WSL gemessen (18.09.2026):
+ *
+ *   p1  in dienst.pid stand die Nummer eines "tail -f <dienst>"
+ *       -> bl_dienst_pid() lieferte 11604, bl_dienst('stop') hat ihn beendet
+ *   p4  von ZWEI eigenen Diensten blieb nach 'stop' einer stehen
+ *
+ * Warum nicht pgrep: ein Suchlauf nach einer Zeichenkette trifft SYSTEMWEIT
+ * jede Befehlszeile, in der sie vorkommt - einen Editor, ein 'tail', den
+ * Dienst eines zweiten Plugin-Ordners; der Schalter fuer den aeltesten Treffer
+ * nimmt davon ausgerechnet den falschen. Der Aufruf ist hier absichtlich nicht
+ * abgeschrieben: ein Kommentar darf nicht die Zeichenfolge enthalten, nach der
+ * ein Werkzeug den Bestand absucht (Regeln/02).
+ *
+ * Rueckgabe: aufsteigend sortierte Liste von Prozessnummern.
+ */
+function bl_dienst_pids()
+{
     $skript = bl_paths()['bindir'] . '/ble_scanner_ng.py';
-    foreach ((array) @scandir('/proc') as $eintrag) {
-        if (!ctype_digit((string) $eintrag)) {
+    $uids = bl_dienst_uids();
+    $aus = array();
+    // Ohne /proc gibt es hier nichts zu sehen - und die Frage danach wird
+    // gestellt, bevor opendir() sie mit einer Warnung beantwortet.
+    if (!is_dir('/proc')) {
+        return $aus;
+    }
+    $d = @opendir('/proc');
+    if ($d === false) {
+        return $aus;
+    }
+    while (($e = readdir($d)) !== false) {
+        if (!preg_match('/^[0-9]+$/', $e)) {
             continue;
         }
-        $roh = @file_get_contents('/proc/' . $eintrag . '/cmdline');
+        $roh = @file_get_contents('/proc/' . $e . '/cmdline');
         if ($roh === false || $roh === '') {
             continue;
         }
-        $args = explode("\0", $roh);
-        $erstes = isset($args[0]) ? $args[0] : '';
-        if ($erstes === $skript
-            || (strpos(basename($erstes), 'python') === 0 && in_array($skript, $args, true))) {
-            return (int) $eintrag;
+        $args = explode("\0", rtrim($roh, "\0"));
+        if (count($args) !== 2 || $args[1] !== $skript) {
+            continue;
+        }
+        $i = basename($args[0]);
+        if ($i !== 'python' && $i !== 'python3' && strpos($i, 'python3.') !== 0) {
+            continue;
+        }
+        $besitzer = @fileowner('/proc/' . $e);
+        if ($besitzer === false || !in_array((int) $besitzer, $uids, true)) {
+            continue;
+        }
+        $aus[] = (int) $e;
+    }
+    closedir($d);
+    sort($aus);
+    return $aus;
+}
+
+/**
+ * Laeuft der Dienst? Rueckgabe: PID oder 0.
+ *
+ * Die PID-Datei bleibt die erste Frage - steht ihre Nummer unter den Treffern,
+ * ist sie die Antwort. Sonst gilt der erste Treffer; eine PID-Datei, die ins
+ * Leere zeigt, wird abgeraeumt.
+ */
+function bl_dienst_pid()
+{
+    $pids = bl_dienst_pids();
+    $datei = bl_pid_datei();
+    if (!$pids) {
+        if (is_file($datei)) {
+            @unlink($datei);   // zeigt ins Leere - von einem Absturz uebrig
+        }
+        return 0;
+    }
+    if (is_file($datei)) {
+        $eingetragen = (int) trim((string) @file_get_contents($datei));
+        if (in_array($eingetragen, $pids, true)) {
+            return $eingetragen;
         }
     }
-    return 0;
+    return $pids[0];
 }
 
 /** Dienst starten, stoppen, neu starten. */
@@ -769,22 +856,36 @@ function bl_dienst($aktion)
     $meldungen = array();
 
     if (in_array($aktion, array('stop', 'restart'), true)) {
-        $pid = bl_dienst_pid();
-        if ($pid > 0) {
-            @exec('kill ' . (int) $pid . ' 2>&1', $meldungen);
+        // ALLE eigenen Prozesse, nicht einer. Bis 1.3.16 wurde genau die eine
+        // Nummer aus bl_dienst_pid() beendet; lief nach einem Update ein
+        // zweiter Dienst, blieb er stehen und suchte weiter (in WSL gemessen
+        // 18.09.2026, Fall p4: nach 'stop' lief noch einer).
+        $pids = bl_dienst_pids();
+        if ($pids) {
+            foreach ($pids as $pid) {
+                @exec('kill ' . (int) $pid . ' 2>&1', $meldungen);
+            }
             // Dem Dienst Zeit lassen: er nimmt die Suche zurueck und meldet
             // server/online=0 an den Broker. Wird er hart abgeschossen,
             // bleibt im Broker ein retained '1' stehen.
             for ($i = 0; $i < 20; $i++) {
                 usleep(500000);
-                if (bl_dienst_pid() === 0) {
+                if (!bl_dienst_pids()) {
                     break;
                 }
             }
-            if (bl_dienst_pid() === $pid) {
-                @exec('kill -9 ' . (int) $pid . ' 2>&1', $meldungen);
+            // Vor dem -9 wird NEU gesucht, nicht angenommen: die Nummer eines
+            // beendeten Prozesses vergibt der Kern weiter.
+            $rest = bl_dienst_pids();
+            if ($rest) {
+                foreach ($rest as $pid) {
+                    @exec('kill -9 ' . (int) $pid . ' 2>&1', $meldungen);
+                }
                 usleep(500000);
                 $meldungen[] = 'Der Dienst reagierte nicht auf SIGTERM und wurde abgeschossen.';
+            }
+            if (count($pids) > 1) {
+                $meldungen[] = 'Es liefen ' . count($pids) . ' Prozesse dieses Dienstes - alle wurden beendet.';
             }
         } else {
             $meldungen[] = 'Es lief kein Dienst.';

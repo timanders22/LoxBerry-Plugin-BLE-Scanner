@@ -61,53 +61,102 @@ PDATA="$BASE/data/plugins/$PDIR"
 PIDDATEI="$PDATA/dienst.pid"
 
 # --- Dienst beenden ---------------------------------------------------------
-PID=""
-if [ -f "$PIDDATEI" ]; then
-    PID=$(cat "$PIDDATEI" 2>/dev/null)
-fi
-# Gegenprobe: gehoert die Nummer wirklich unserem Dienst? Eine Nummer wird
-# nach dem Ende eines Prozesses wiederverwendet.
-if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-    if ! tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
-        PID=""
-    fi
-fi
-if [ -z "$PID" ]; then
-    for d in /proc/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
-            PID=$(basename "$d")
-            break
+#
+# BERICHTIGT IN 1.3.17. Bis 1.3.16 entschied hier eine TEILZEICHENKETTE ueber
+# die ganze Befehlszeile: "grep -q ble_scanner_ng\.py" traf jeden Prozess, in
+# dessen Befehlszeile der Name irgendwo vorkam. In WSL gemessen (18.09.2026):
+#
+#   f1  die Nummer in dienst.pid gehoerte einem "tail -f <dienst>"  -> getoetet
+#   f2  ohne PID-Datei fand die Suche denselben tail                -> getoetet
+#   f2b der Dienst einer ZWEITEN Installation (anderer Ordner)      -> getoetet
+#   f2c ein "python3 -c" mit dem Namen im Text                      -> getoetet
+#   f4  von ZWEI eigenen Diensten blieb einer stehen ("break")
+#
+# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
+# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
+# Benutzer mit der Nummer $2 gehoeren. Behandelt werden ALLE Treffer, und vor
+# dem -9 wird NEU gesucht statt angenommen.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
         fi
     done
-fi
+}
 
-beendet=0
-if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-    echo "<INFO> Halte den BLE-Scanner NG an (PID $PID)."
-    kill "$PID" 2>/dev/null
-    i=0
-    while [ $i -lt 15 ] && kill -0 "$PID" 2>/dev/null; do
-        sleep 1
-        i=$((i + 1))
+# Beendet alle Treffer mit Geduld: TERM, bis zu zehn Sekunden warten, dann KILL
+# fuer den Rest - und danach wird NEU gesucht, nicht angenommen. Ergebnis:
+# BL_GEFUNDEN (Zahl der Treffer) und BL_UEBRIG (leer, wenn hinterher keiner
+# mehr laeuft, sonst die Nummern).
+bl_dienste_beenden() {
+    BL_GEFUNDEN=0
+    BL_UEBRIG=""
+    bl_pids=$(bl_dienste_finden "$1" "$2")
+    for bl_p in $bl_pids; do
+        BL_GEFUNDEN=$((BL_GEFUNDEN + 1))
     done
-    # kill -9 NUR, wenn der Prozess noch laeuft UND immer noch unserer ist.
+    [ -n "$bl_pids" ] || return 0
+    echo "<INFO> Halte den BLE-Scanner NG an (PID$(for bl_p in $bl_pids; do printf ' %s' "$bl_p"; done))."
+    kill $bl_pids 2>/dev/null
+    bl_i=0
+    while [ $bl_i -lt 20 ]; do
+        bl_lebt=0
+        for bl_p in $bl_pids; do
+            kill -0 "$bl_p" 2>/dev/null && bl_lebt=1
+        done
+        [ "$bl_lebt" = 0 ] && break
+        sleep 0.5
+        bl_i=$((bl_i + 1))
+    done
+    # kill -9 NUR fuer das, was JETZT noch laeuft und immer noch unserer ist.
     # Bis 1.2.10 folgte das -9 bedingungslos - auch wenn der Prozess laengst
     # beendet war und die Nummer inzwischen ein fremder Prozess trug.
-    if kill -0 "$PID" 2>/dev/null \
-       && tr '\0' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
+    bl_rest=$(bl_dienste_finden "$1" "$2")
+    if [ -n "$bl_rest" ]; then
         echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
-        kill -9 "$PID" 2>/dev/null
+        kill -9 $bl_rest 2>/dev/null
+        sleep 1
+        bl_rest=$(bl_dienste_finden "$1" "$2")
     fi
-    beendet=1
-    rm -f "$PIDDATEI"
-fi
+    for bl_p in $bl_rest; do
+        BL_UEBRIG="$BL_UEBRIG $bl_p"
+    done
+}
 
-if [ "$beendet" = "1" ]; then
-    echo "<OK> Dienst beendet."
+# Die Deinstallation laeuft als root, der Dienst als loxberry: nur Prozesse von
+# loxberry. Gibt es den Benutzer nicht, wird NICHT geraten - dann bleibt der
+# Dienst stehen, und es wird gesagt.
+BL_UID=$(id -u loxberry 2>/dev/null)
+if [ -z "$BL_UID" ]; then
+    echo "<WARNING> Benutzer loxberry nicht gefunden - der Dienst wurde nicht gesucht."
 else
-    echo "<INFO> Kein laufender Dienst gefunden."
+    bl_dienste_beenden "$BASE/bin/plugins/$PDIR/ble_scanner_ng.py" "$BL_UID"
+    if [ -n "$BL_UEBRIG" ]; then
+        echo "<WARNING> Der Dienst laesst sich nicht beenden (PID$BL_UEBRIG)."
+    elif [ "$BL_GEFUNDEN" != 0 ]; then
+        echo "<OK> Dienst beendet ($BL_GEFUNDEN Prozess(e))."
+    else
+        echo "<INFO> Kein laufender Dienst gefunden."
+    fi
 fi
+rm -f "$PIDDATEI"
 
 # --- Nur die EIGENEN Dateien wegraeumen -------------------------------------
 #
@@ -182,5 +231,13 @@ echo "<INFO> durch eine Nachricht mit leerer Nutzlast."
 # einer Datei.
 if [ -n "$BASE" ] && [ -d "$BASE/data/plugins" ]; then
     rm -rf "$BASE/data/plugins/$PDIR.upgrade_sicherung" 2>/dev/null
+    # ERGAENZT IN 1.3.17. Die beiden Merker aus preupgrade.sh liegen aus
+    # demselben Grund NEBEN dem Datenordner und ueberstehen deshalb auch das
+    # Loeschen durch LoxBerry. Bis 1.3.16 blieben sie liegen: eine spaetere
+    # Neuinstallation fand eine fremde ".upgrade_laeuft" vor, und seit 1.3.17
+    # sieht daemon/daemon sie an. Vierter Punkt der Bauweise Einspeisebremse
+    # 0.9.20 (Regeln/06) - "uninstall raeumt sie weg".
+    rm -f "$BASE/data/plugins/$PDIR.upgrade_laeuft" 2>/dev/null
+    rm -f "$BASE/data/plugins/$PDIR.lief_vor_update" 2>/dev/null
 fi
 exit 0

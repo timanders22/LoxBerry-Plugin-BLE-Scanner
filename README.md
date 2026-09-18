@@ -1,11 +1,79 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.16
+Version 1.3.17
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.17 — der eigene Dienst wird argumentweise erkannt, und `daemon` startet nicht mehr blind
+
+Zwei Fehlerklassen, beide am 18.09.2026 in WSL/Ubuntu an einem Wegwerfbaum
+gemessen, nicht am Gerät. Der Prüfstand steht mit README unter
+`Pruefung-BLE-Scanner-1.3.17/`; der Dienst ist darin ein Platzhalter, und
+**Bluetooth wird dabei nicht angefasst**.
+
+### Wer „unser Dienst" ist, entschied bisher eine Zeichenkette
+
+An sechs Stellen — `uninstall/uninstall`, `preupgrade.sh`, `postinstall.sh`,
+`postupgrade.sh` und in der Oberfläche `bl_lib.php` — galt jeder Prozess als
+eigener Dienst, in dessen Befehlszeile irgendwo `ble_scanner_ng.py` vorkam.
+Das trifft auch einen Editor, ein `tail` auf der Datei, ein `python3 -c` mit
+dem Namen im Text und den Dienst einer **zweiten** Installation. Gemessen
+wurde nicht der Verdacht, sondern der Schaden:
+
+| Lage | bis 1.3.16 | seit 1.3.17 |
+|---|---|---|
+| In `dienst.pid` steht die Nummer eines fremden Prozesses | `<INFO> Halte den BLE-Scanner NG an (PID …)` — der fremde Prozess war tot | `<INFO> Kein laufender Dienst gefunden.` — er lebt |
+| Ohne PID-Datei, ein `tail` auf der Dienstdatei | derselbe Schaden | er lebt |
+| Der Dienst einer zweiten Installation | wurde von der Deinstallation mit beendet | er lebt |
+| `bl_dienst_pid()` in der Oberfläche | lieferte die Nummer des fremden Prozesses, und „Dienst anhalten" beendete ihn | liefert 0 |
+| **Zwei** eigene Dienste (nach einem Update möglich) | einer blieb stehen | beide werden beendet |
+| `postinstall.sh`/`postupgrade.sh`, während nur ein fremder Prozess läuft | „Es läuft schon ein Dienst" — der eigene startete **nicht** | er startet |
+
+Ein Treffer hat jetzt **genau zwei Argumente**: einen Python-Interpreter und
+den vollen Dienstpfad **dieser** Installation; dazu muss der Prozess dem
+Benutzer `loxberry` gehören. Behandelt werden **alle** Treffer, und vor dem
+`kill -9` wird neu gesucht statt angenommen. Gibt es den Benutzer `loxberry`
+nicht, wird nicht geraten: die Deinstallation sagt es und lässt den Dienst in
+Ruhe.
+
+### `daemon/daemon` startete bedingungslos
+
+Diese Datei läuft beim Systemstart als `root`. Sie fragt jetzt zweierlei,
+bevor sie startet:
+
+* **Läuft schon einer?** Argumentweise gesucht, nicht über die PID-Datei —
+  die löscht der Installer beim Upgrade zusammen mit dem Datenordner, und ein
+  Dienst, der das Update überlebt hat, war danach unsichtbar. Gemessen: zwei
+  Prozesse statt einem. Die gefundene Nummer wird in die PID-Datei
+  nachgetragen, damit die Oberfläche den Dienst wieder sieht.
+* **Läuft gerade eine Aktualisierung?** `preupgrade.sh` legt dazu seit 1.3.14
+  die Marke `data/plugins/<ordner>.upgrade_laeuft` mit der Unixzeit an. Ist
+  sie höchstens eine Stunde alt, startet `daemon` nicht — sonst liefe der
+  Dienst mitten im Update mit der mitgelieferten Vorgabe-Konfiguration an.
+  Eine ältere, eine in der Zukunft liegende und eine Marke ohne Zeitpunkt
+  gelten nicht; eine abgebrochene Installation darf das Plugin nicht für immer
+  stilllegen. **Ist die Uhr nicht lesbar, gilt die Marke** — ein Schutz fällt
+  geschlossen aus. Dieselbe Berichtigung in `postinstall.sh`, das bis 1.3.16
+  bei stummer Uhr jedes Upgrade für eine Neuinstallation hielt.
+
+`uninstall` räumt die beiden Merker neben dem Datenordner
+(`.upgrade_laeuft`, `.lief_vor_update`) jetzt mit weg; bis 1.3.16 blieben sie
+auf dem Gerät liegen.
+
+**Was hier bewusst nicht gebaut wurde:** dieses Plugin führt keinen Schalter
+„eingeschaltet". Der Knopf *Dienst anhalten* im Reiter *Test* beendet nur den
+Prozess — nach dem nächsten Neustart läuft er wieder. Einen solchen Schalter
+einzuführen wäre eine neue Funktion und nicht das Nachziehen eines Befundes;
+das entscheidet der Betreiber, nicht diese Fassung. Der Zustand steht als
+Kommentar in `daemon/daemon`, damit ihn niemand für behoben hält.
+
+Prüfstand: 54 Prüfzeilen in 31 Lagen. Vor den Korrekturen 31 grün und **23
+rot**, danach 54 grün und 0 rot. Jede der zwölf Korrekturen wurde einzeln in
+einer Kopie zurückgebaut; jedes Mal wurde genau die zugehörige Zeile rot
+(12 von 12).
 
 ## Neu in 1.3.15 — die Loxone-Vorlage ist reproduzierbar
 

@@ -31,8 +31,15 @@ MERK_UPGRADE="$PDATA.upgrade_laeuft"
 MERK_LIEF="$PDATA.lief_vor_update"
 
 # Gilt eine Stunde, damit ein Rest eines abgebrochenen Upgrades nicht spaeter
-# einen Dienst hochfaehrt, den niemand angehalten hat. Gleiche Pruefung wie in
-# postinstall.sh.
+# einen Dienst hochfaehrt, den niemand angehalten hat.
+#
+# ABSICHTLICH ANDERSHERUM ALS IN postinstall.sh: dort entscheidet dieselbe
+# Frage ueber die Marke "upgrade_laeuft" und faellt ohne lesbare Uhr
+# GESCHLOSSEN aus (die Marke gilt, es wird nicht gestartet). Hier geht es um
+# "lief_vor_update", und "geschlossen" heisst genau umgekehrt: ohne lesbare Uhr
+# wird NICHT gestartet. Beides ist dieselbe Richtung - im Zweifel laeuft kein
+# Dienst an, den niemand angefordert hat. Deshalb bleibt es hier beim
+# Rueckgabewert 1.
 merker_frisch() {
     [ -f "$1" ] || return 1
     _dann=$(cat "$1" 2>/dev/null)
@@ -90,15 +97,48 @@ chmod 755 "$PBIN"/*.py 2>/dev/null
 # 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
 # einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
 # umleitete, stand darueber auch nichts im Protokoll.
-dienst_pid() {
-    for d in /proc/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null | grep -qx ".*/ble_scanner_ng\.py"; then
-            basename "$d"
-            return 0
+# BERICHTIGT IN 1.3.17: die Suche verlangte nur IRGENDEIN Argument, das auf
+# "/ble_scanner_ng.py" endet - Interpreter, Zahl der Argumente und Benutzer
+# blieben ungeprueft, und der Dienst einer ZWEITEN Installation zaehlte mit.
+# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
+# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
+# Benutzer mit der Nummer $2 gehoeren. Dieselbe Funktion steht in
+# preupgrade.sh, postinstall.sh, uninstall und daemon.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
         fi
     done
-    return 1
+}
+
+# Dieses Skript laeuft als loxberry (sudo -n -u loxberry), der Dienst auch -
+# deshalb ist die eigene Nummer der richtige Rueckfall, wenn es den Benutzer
+# loxberry nicht gibt.
+dienst_pid() {
+    bl_uid=$(id -u loxberry 2>/dev/null)
+    [ -n "$bl_uid" ] || bl_uid=$(id -u 2>/dev/null)
+    bl_erste=$(bl_dienste_finden "$PBIN/ble_scanner_ng.py" "$bl_uid" | head -1)
+    [ -n "$bl_erste" ] || return 1
+    echo "$bl_erste"
+    return 0
 }
 
 dienst_starten() {

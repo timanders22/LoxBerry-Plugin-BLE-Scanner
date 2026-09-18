@@ -12,6 +12,9 @@ LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
 # sudo -n -u loxberry setzt die Umgebung zurueck - ohne diesen
 # Rueckfall zeigte $LBPDATA ins Nichts und der Pfad auf /<ordner>.
 LBPDATA="${LBPDATA:-$5/data/plugins}"
+# Seit 1.3.17: der volle Dienstpfad wird gebraucht, weil der Dienst
+# argumentweise gesucht wird (argv[1] ist GENAU dieser Pfad).
+LBPBIN="${LBPBIN:-$5/bin/plugins}"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
@@ -82,37 +85,89 @@ chown loxberry:loxberry "$MERK_UPGRADE" 2>/dev/null
 chmod 0644 "$MERK_UPGRADE" 2>/dev/null
 
 PIDDATEI="$PDATA/dienst.pid"
-P=""
-if [ -f "$PIDDATEI" ]; then
-    P=$(cat "$PIDDATEI" 2>/dev/null)
-fi
-if [ -z "$P" ] || ! kill -0 "$P" 2>/dev/null; then
-    P=""
-    for d in /proc/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        # Nullbytes durch Zeilenumbrueche ersetzen und argumentweise vergleichen.
-        if tr '\0' '\n' < "$d/cmdline" 2>/dev/null \
-             | grep -qx ".*/ble_scanner_ng\.py"; then
-            P=$(basename "$d")
-            break
+DIENST="$LBPBIN/$PDIR/ble_scanner_ng.py"
+
+# BERICHTIGT IN 1.3.17. Die Suche fand zwar schon argumentweise statt, aber sie
+# verlangte nur IRGENDEIN Argument, das auf "/ble_scanner_ng.py" endet - der
+# Interpreter, die Zahl der Argumente und der Benutzer blieben ungeprueft, und
+# vor dem "kill -9" stand wieder die blosse Teilzeichenkette. In WSL gemessen
+# (18.09.2026, Fall v1): die Nummer eines "tail -f <dienst>" in der PID-Datei
+# hat der alte Zweig ohne Rueckfrage beendet. Ein Treffer hat jetzt GENAU zwei
+# Argumente: einen python-Interpreter und den vollen Dienstpfad DIESER
+# Installation; dazu muss er dem Benutzer mit der Nummer $2 gehoeren. Dieselbe
+# Funktion steht in uninstall, postinstall.sh, postupgrade.sh und daemon.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
         fi
     done
+}
+
+# Beendet ALLE Treffer mit Geduld und sucht vor dem -9 neu, statt anzunehmen.
+bl_dienste_beenden() {
+    BL_GEFUNDEN=0
+    BL_UEBRIG=""
+    bl_pids=$(bl_dienste_finden "$1" "$2")
+    for bl_p in $bl_pids; do
+        BL_GEFUNDEN=$((BL_GEFUNDEN + 1))
+    done
+    [ -n "$bl_pids" ] || return 0
+    echo "<INFO> Halte den laufenden BLE-Scanner NG an (PID$(for bl_p in $bl_pids; do printf ' %s' "$bl_p"; done))."
+    kill $bl_pids 2>/dev/null
+    bl_i=0
+    while [ $bl_i -lt 20 ]; do
+        bl_lebt=0
+        for bl_p in $bl_pids; do
+            kill -0 "$bl_p" 2>/dev/null && bl_lebt=1
+        done
+        [ "$bl_lebt" = 0 ] && break
+        sleep 0.5
+        bl_i=$((bl_i + 1))
+    done
+    bl_rest=$(bl_dienste_finden "$1" "$2")
+    if [ -n "$bl_rest" ]; then
+        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
+        kill -9 $bl_rest 2>/dev/null
+        sleep 1
+        bl_rest=$(bl_dienste_finden "$1" "$2")
+    fi
+    for bl_p in $bl_rest; do
+        BL_UEBRIG="$BL_UEBRIG $bl_p"
+    done
+}
+
+BL_UID=$(id -u loxberry 2>/dev/null)
+if [ -z "$BL_UID" ]; then
+    echo "<WARNING> Benutzer loxberry nicht gefunden - der Dienst wurde nicht gesucht."
+    BL_GEFUNDEN=0
+    BL_UEBRIG=""
+else
+    bl_dienste_beenden "$DIENST" "$BL_UID"
 fi
 
-if [ -n "$P" ] && kill -0 "$P" 2>/dev/null; then
-    echo "<INFO> Halte den laufenden BLE-Scanner NG an (PID $P)."
-    kill "$P" 2>/dev/null
-    i=0
-    while [ $i -lt 15 ] && kill -0 "$P" 2>/dev/null; do
-        sleep 1
-        i=$((i + 1))
-    done
-    # Nummernrecycling ausschliessen, bevor mit -9 nachgesetzt wird.
-    if kill -0 "$P" 2>/dev/null \
-       && tr '\0' '\n' < "/proc/$P/cmdline" 2>/dev/null | grep -q "ble_scanner_ng\.py"; then
-        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
-        kill -9 "$P" 2>/dev/null
-    fi
+if [ -n "$BL_UEBRIG" ]; then
+    echo "<WARNING> Der Dienst laesst sich nicht beenden (PID$BL_UEBRIG)."
+fi
+
+if [ "$BL_GEFUNDEN" != 0 ]; then
     rm -f "$PIDDATEI"
     # Merker fuer postupgrade.sh: der Dienst LIEF und gehoert danach wieder
     # gestartet. Ohne diesen Merker wuerde ein bewusst angehaltener Dienst

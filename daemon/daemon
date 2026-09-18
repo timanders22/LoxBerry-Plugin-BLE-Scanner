@@ -15,12 +15,128 @@ logdir=REPLACELBPLOGDIR
 datadir=REPLACELBPDATADIR
 log=$logdir/ble_scanner_ng.log
 piddatei=$datadir/dienst.pid
+dienst=$pluginbindir/ble_scanner_ng.py
+# Die Marke liegt NEBEN dem Datenordner - darin wuerde sie der Installer
+# zwischen preupgrade.sh und postinstall.sh mit abraeumen (Begruendung und
+# Messung in preupgrade.sh).
+marke=$datadir.upgrade_laeuft
 
+# Bis 1.3.17 ging jede Meldung nur an den Systemlogger. Wer nachsehen will,
+# warum nach einem Neustart nichts laeuft, sucht sie dort zwischen allen
+# anderen Diensten; im Reiter Logdateien des Plugins stand nichts. Sie geht
+# jetzt zusaetzlich in die Protokolldatei des Plugins - dieselbe Bauart wie
+# cc_melden() in Chromecast4lox 1.3.11.
 melde() {
     [ -x /usr/bin/logger ] && /usr/bin/logger "loxberry-plugin-$pluginname - $1"
+    if [ -d "$logdir" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') INFO    daemon: $1" >> "$log" 2>/dev/null
+    fi
+    return 0
 }
 
 melde "Starte BLE-Scanner NG"
+
+# ---------- Prozesse des Dienstes finden ----------
+#
+# NEU IN 1.3.17. Ein Treffer hat GENAU zwei Argumente: einen python-Interpreter
+# und den vollen Dienstpfad DIESES Plugins ($1). Dazu muss der Prozess dem
+# Benutzer mit der Nummer $2 gehoeren. Ein Editor auf der Datei, ein "tail",
+# ein "python3 -c" mit dem Namen im Text und der Dienst einer zweiten
+# Installation treffen damit nicht. Die alte Bauart - die blosse Zeichenkette
+# irgendwo in der Befehlszeile - hat in WSL am 18.09.2026 jeden dieser vier
+# Koeder fuer den eigenen Dienst gehalten.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
+        fi
+    done
+}
+
+# ---------- Zwei Fragen vor dem Start ----------
+#
+# NEU IN 1.3.17. Bis dahin startete diese Datei bedingungslos. In WSL gemessen
+# (18.09.2026, Faelle g1 und g2): ein zweiter Aufruf legte einen ZWEITEN Dienst
+# an (2 Prozesse statt 1), und waehrend einer Aktualisierung startete sie den
+# Dienst mit der mitgelieferten Vorgabe-Konfiguration (1 Prozess statt 0).
+#
+# EINE DRITTE FRAGE GIBT ES HIER NICHT: diese Linie fuehrt keinen Schalter
+# "eingeschaltet". Der Knopf "Dienst anhalten" im Reiter Test beendet nur den
+# Prozess, er merkt sich nichts - nach dem naechsten Neustart laeuft der Dienst
+# wieder. Einen solchen Schalter einzufuehren waere eine neue Funktion und
+# nicht das Nachziehen eines Befundes (CLAUDE.md 4); die Entscheidung liegt
+# beim Hausherrn. Bis dahin ist das hier ein bekannter, benannter Zustand und
+# keine Luecke, die jemand fuer behoben halten soll.
+
+# 1. Laeuft gerade eine Aktualisierung? preupgrade.sh legt die Marke neben den
+#    Datenordner, postupgrade.sh entfernt sie. Nur eine Marke, die hoechstens
+#    eine Stunde alt ist, zaehlt - eine abgebrochene Installation darf den
+#    Dienst nicht fuer immer stilllegen. Aus der Zukunft oder ohne Zahl darin:
+#    sie gilt nicht.
+#    BL_START_TROTZ_MARKE=1 setzt nur ein Hakenskript, das die Marke selbst
+#    gelegt hat und dessen Start der letzte Schritt der Installation ist.
+if [ "${BL_START_TROTZ_MARKE:-0}" != "1" ] && [ -f "$marke" ]; then
+    seit=$(cat "$marke" 2>/dev/null)
+    case "$seit" in
+        ''|*[!0-9]*) seit="" ;;
+    esac
+    # Die Uhr wird gemessen, nicht angenommen: liefert "date" nichts - unter
+    # Last kann ein fork scheitern -, rechnet die Schale mit einer leeren
+    # Zeichenkette, das Alter wird negativ, die Bedingung faellt durch, und der
+    # Dienst startete mitten in der Aktualisierung. Ein Schutz faellt
+    # geschlossen aus (CLAUDE.md 4): ohne lesbare Uhr gilt die Marke. An
+    # Chromecast4lox 1.3.11 gemessen (Fall G3o), hier in den Faellen g5 und g8.
+    jetzt=$(date +%s 2>/dev/null)
+    case "$jetzt" in
+        ''|*[!0-9]*) jetzt="" ;;
+    esac
+    if [ -z "$jetzt" ]; then
+        melde "Start uebersprungen: eine Aktualisierung laeuft (Uhrzeit nicht lesbar)."
+        exit 0
+    fi
+    # Erst wenn die Uhr steht, wird das Alter ueberhaupt berechnet. Eine Marke
+    # ohne Zahl darin gilt dann nicht - sie belegt keinen Zeitpunkt.
+    if [ -n "$seit" ]; then
+        alter=$(( jetzt - seit ))
+        if [ "$alter" -ge 0 ] && [ "$alter" -lt 3600 ]; then
+            melde "Start uebersprungen: eine Aktualisierung dieses Plugins laeuft."
+            exit 0
+        fi
+    fi
+fi
+
+# 2. Laeuft schon einer? Argumentweise, nicht ueber die PID-Datei allein - die
+#    loescht purge_installation beim Upgrade zusammen mit dem Datenordner. Ein
+#    Dienst, der das Update ueberlebt hat, ist danach ohne diese Suche
+#    unsichtbar, und der Start legte einen zweiten daneben.
+bl_uid=$(id -u loxberry 2>/dev/null)
+[ -n "$bl_uid" ] || bl_uid=$(id -u 2>/dev/null)
+bl_laeuft=$(bl_dienste_finden "$dienst" "$bl_uid")
+if [ -n "$bl_laeuft" ]; then
+    bl_erste=$(echo "$bl_laeuft" | head -1)
+    mkdir -p "$datadir" 2>/dev/null
+    echo "$bl_erste" > "$piddatei"
+    chown loxberry:loxberry "$piddatei" 2>/dev/null
+    melde "Start uebersprungen: der Dienst laeuft bereits (PID $bl_erste)."
+    exit 0
+fi
 
 # Verzeichnisse anlegen UND dem Benutzer geben, der gleich hineinschreibt.
 #
@@ -39,7 +155,7 @@ chown loxberry:loxberry "$logdir" "$datadir" 2>/dev/null
 #
 # echo $! muss INNERHALB der su-Zeichenkette stehen. Stuende es draussen,
 # waere es die Nummer des su-Prozesses, nicht die des Dienstes.
-su loxberry -c "nohup '$pluginbindir/ble_scanner_ng.py' >> '$log' 2>&1 & echo \$! > '$piddatei'"
+su loxberry -c "nohup '$dienst' >> '$log' 2>&1 & echo \$! > '$piddatei'"
 start_rc=$?
 
 chown loxberry:loxberry "$piddatei" 2>/dev/null
