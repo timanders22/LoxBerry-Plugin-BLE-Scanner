@@ -216,22 +216,58 @@ echo "<INFO> Abo eintragen - ohne das kommt am Miniserver nichts an."
 NETZ_BASE="${5:-$LBHOMEDIR}"
 NETZ_PDIR="${3:-ble_scanner_ng}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
+
+# NEU IN 1.3.18. Die GROESSE beantwortet die Frage "ist die Datei brauchbar?"
+# nicht: eine abgeschnittene Datei ist nicht leer. Gefragt wird deshalb nach
+# dem, was das Plugin selbst liest - Abschnittskopf [CONFIG], mindestens eine
+# vollstaendige Zeile "schluessel=wert", und ein Zeilenumbruch als letztes
+# Byte. Wortgleich in preupgrade.sh; wer eine anfasst, fasst beide an.
+# Die Pruefung gehoert zu ble_scanner_ng.cfg - netz_zurueck() wird nur damit
+# aufgerufen (die Zeile steht unter dieser Funktion).
+bl_cfg_traegt_inhalt() {
+    [ -s "$1" ] || return 1
+    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
+    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
+    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+    return 0
+}
+
 netz_zurueck() {
     datei=$1; soll=$2
     ziel="$NETZ_CFG/$datei"
     zweit="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.$datei"
     [ -f "$zweit" ] || return 0
+    # BERICHTIGT IN 1.3.18: die Zweitschrift wird nicht mehr blind kopiert.
+    # Eine abgeschnittene Zweitschrift ueber eine Konfiguration zu legen macht
+    # aus einem halben Verlust einen ganzen.
+    if ! bl_cfg_traegt_inhalt "$zweit"; then
+        echo "<WARNING> Die Zweitschrift $zweit traegt keinen lesbaren Inhalt -"
+        echo "<WARNING> es wurde nichts zurueckgespielt."
+        return 0
+    fi
     verloren=0
-    if [ ! -f "$ziel" ] || [ ! -s "$ziel" ]; then
+    # BERICHTIGT IN 1.3.18: hier stand "[ ! -f ] || [ ! -s ]" - die blosse
+    # Groesse. Eine abgeschnittene Konfiguration ist weder fehlend noch leer
+    # noch zeichengleich die Vorgabe; sie galt als heil, und die heile
+    # Zweitschrift wurde NICHT geholt. In WSL gemessen (18.09.2026,
+    # Pruefung-BLE-Scanner-1.3.18, Fall c3): 34 Byte blieben stehen, 958 lagen
+    # unbenutzt daneben.
+    if ! bl_cfg_traegt_inhalt "$ziel"; then
         verloren=1
     else
         ist=$(sha256sum "$ziel" 2>/dev/null | cut -d" " -f1)
         [ -n "$ist" ] && [ "$ist" = "$soll" ] && verloren=1
     fi
     if [ "$verloren" = "1" ]; then
-        if cp -p "$zweit" "$ziel" 2>/dev/null; then
+        # Daneben schreiben, byteweise gegenpruefen, dann umbenennen: ein
+        # abgebrochenes cp hinterliesse sonst eine halbe Konfiguration -
+        # dieselbe Bauart wie bl_datei_schreiben() in bl_lib.php:560.
+        if cp -p "$zweit" "$ziel.neu" 2>/dev/null \
+           && cmp -s "$zweit" "$ziel.neu" \
+           && mv "$ziel.neu" "$ziel" 2>/dev/null; then
             echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
         else
+            rm -f "$ziel.neu" 2>/dev/null
             echo "<WARNING> $datei liess sich nicht zurueckspielen. Die Sicherung"
             echo "<WARNING> liegt unter $zweit und kann von Hand kopiert werden."
         fi

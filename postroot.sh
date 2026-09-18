@@ -39,7 +39,16 @@ fi
 # Der Helfer wird HIER geschrieben, nicht aus dem Archiv kopiert. Damit steht
 # sein Inhalt unter der Aufsicht dieses Skripts, und eine spaetere Aenderung im
 # Plugin-Ordner kann ihn nicht veraendern.
-cat > "$HELFER" <<'ENDE'
+# BERICHTIGT IN 1.3.18: bis 1.3.17 ging dieses "cat >" unmittelbar auf
+# $HELFER. Die Umlenkung kappt die vorhandene Datei, BEVOR der neue Text
+# darin steht; bricht der Lauf in dieser Luecke ab, bleibt ein halber Helfer
+# liegen - root, ausfuehrbar und ueber die sudo-Regel von der Oberflaeche aus
+# aufrufbar. In WSL gemessen (18.09.2026, Pruefung-BLE-Scanner-1.3.18,
+# Fall e1, Abbruch mit "ulimit -f 0"): 71 Byte -> 0 Byte, und die
+# Wirkungspruefung darunter meldete trotzdem "<OK> ... abgelegt", weil sie nur
+# -x und den Eigentuemer ansieht, nicht den Inhalt. Geschrieben wird jetzt
+# daneben und erst nach der Gegenprobe umbenannt.
+cat > "$HELFER.neu" <<'ENDE'
 #!/bin/sh
 #
 # BLE-Scanner NG - eingebautes Bluetooth einschalten.
@@ -105,16 +114,34 @@ fi
 exit 0
 ENDE
 
-chown root:root "$HELFER"
-chmod 0755 "$HELFER"
+# Vollstaendig? Der Text oben endet mit "exit 0" - eine abgebrochene
+# Umlenkung endet mittendrin. Dazu die Syntaxpruefung: ein halbes Skript
+# waere zwar da, aber nicht lauffaehig.
+HELFER_NEU_OK=0
+if [ -s "$HELFER.neu" ] \
+   && [ "$(tail -n 1 "$HELFER.neu" 2>/dev/null)" = "exit 0" ] \
+   && sh -n "$HELFER.neu" 2>/dev/null; then
+    chown root:root "$HELFER.neu" 2>/dev/null
+    chmod 0755 "$HELFER.neu" 2>/dev/null
+    mv "$HELFER.neu" "$HELFER" 2>/dev/null && HELFER_NEU_OK=1
+fi
+if [ "$HELFER_NEU_OK" = 0 ]; then
+    rm -f "$HELFER.neu" 2>/dev/null
+    echo "<FAIL> Der Helfer liess sich nicht vollstaendig schreiben ($HELFER)."
+    if [ -f "$HELFER" ]; then
+        echo "<INFO> Der bisherige Helfer bleibt unveraendert und wird weiter benutzt."
+    fi
+fi
 
 # WIRKUNGSPRUEFUNG statt Zuversicht: die Datei muss da, root und ausfuehrbar
 # sein. Ohne diese drei Eigenschaften ist die sudo-Regel wirkungslos, und der
 # Knopf im Reiter Test wuerde nur eine Fehlermeldung zeigen.
-if [ -x "$HELFER" ] && [ "$(stat -c %U "$HELFER" 2>/dev/null)" = "root" ]; then
-    echo "<OK> Helfer fuer das Einschalten von Bluetooth abgelegt ($HELFER)."
-else
-    echo "<FAIL> $HELFER ist nicht ausfuehrbar oder gehoert nicht root."
+if [ "$HELFER_NEU_OK" = 1 ]; then
+    if [ -x "$HELFER" ] && [ "$(stat -c %U "$HELFER" 2>/dev/null)" = "root" ]; then
+        echo "<OK> Helfer fuer das Einschalten von Bluetooth abgelegt ($HELFER)."
+    else
+        echo "<FAIL> $HELFER ist nicht ausfuehrbar oder gehoert nicht root."
+    fi
 fi
 
 # Die sudo-Regel selbst legt LoxBerry aus sudoers/sudoers ab (nach

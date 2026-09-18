@@ -180,6 +180,30 @@ else
     rm -f "$MERK_LIEF" 2>/dev/null
 fi
 
+# --- Traegt eine Datei INHALT? ----------------------------------------------
+#
+# NEU IN 1.3.18. Die GROESSE beantwortet die Frage nicht: eine abgeschnittene
+# Datei ist nicht leer, besteht jede Groessenpruefung und verdraengt damit den
+# brauchbaren Stand (Bestandsmessung Klasse C, 18.09.2026). Gefragt wird
+# deshalb nach dem, was das Plugin selbst liest:
+#   * der Abschnittskopf [CONFIG], den bl_config_write() (bl_lib.php:594)
+#     immer als erste nicht auskommentierte Zeile schreibt,
+#   * mindestens eine vollstaendige Zeile "schluessel=wert",
+#   * ein Zeilenumbruch als letztes Byte - abgeschnitten wird mitten in einer
+#     Zeile, und bl_config_write() schliesst jede Datei mit "\n".
+#
+# Im Zweifel faellt die Pruefung GESCHLOSSEN aus (CLAUDE.md 4): es wird nichts
+# ueberschrieben, und es wird gesagt. Wortgleich in postinstall.sh - ein
+# /bin/sh-Hakenskript kann keine gemeinsame Datei einbinden, der Installer
+# ruft es aus dem Auspackordner heraus. Wer eine anfasst, fasst beide an.
+bl_cfg_traegt_inhalt() {
+    [ -s "$1" ] || return 1
+    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
+    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
+    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+    return 0
+}
+
 # --- Sicherung der Konfiguration --------------------------------------------
 #
 # Der Sicherungsordner liegt unter data/, NICHT unter /tmp: /tmp ist auf dem
@@ -196,19 +220,90 @@ fi
 # ueberdauern soll. Der Punkt im Namen ist der ganze Unterschied:
 # "rm -rf .../<x>/" trifft den Nachbarn "<x>.upgrade_sicherung" nicht.
 SICHER="$PDATA.upgrade_sicherung"
+NEU="$SICHER.neu"
 
+# BERICHTIGT IN 1.3.18. Bis 1.3.17 stand hier
+#
+#     rm -rf "$SICHER"; mkdir -p "$SICHER"; cp -a "$PCONFIG/." "$SICHER/"
+#
+# also: die vorhandene Sicherung faellt, BEVOR die neue steht. Bricht der Lauf
+# in dieser Luecke ab - abgebrochener Installer, volle Karte, Stromausfall -
+# und stoesst der Anwender das Upgrade danach erneut an, gibt es weder die
+# alte noch eine neue Sicherung. Genau das macht purge_installation moeglich:
+# der Datenordner ist dann weg, es gibt nichts Neues zu sichern, und der
+# zweite Lauf loescht die einzige Abschrift des Standes.
+#
+# In WSL gemessen (18.09.2026, Pruefung-BLE-Scanner-1.3.18, Faelle d1 und d2):
+# 2 von 3 Dateien mit Merkwort verloren - die ganze Konfiguration und
+# verlauf.csv; uebrig blieb nur die Zweitschrift neben dem Konfigordner.
+#
+# Die Reihenfolge jetzt ist die von GardenaSmartSystem 1.2.10
+# (preupgrade.sh:93 ff.; in derselben Lage gemessen: 0 von 3 verloren):
+# in "$SICHER.neu" bauen -> Rueckgabewert UND Inhalt pruefen -> die alte nach
+# "$SICHER.alt" schieben -> die neue an ihren Platz -> die alte wegraeumen.
+# Scheitert irgendetwas davon, bleibt die alte Sicherung unangetastet.
 echo "<INFO> Creating backup folder for upgrading $SICHER"
-rm -rf "$SICHER" 2>/dev/null
-mkdir -p "$SICHER"
-chmod 0700 "$SICHER" 2>/dev/null
+rm -rf "$NEU" 2>/dev/null
+mkdir -p "$NEU"
+chmod 0700 "$NEU" 2>/dev/null
 
-echo "<INFO> Backing up existing config files $PCONFIG/ -> $SICHER/"
-cp -a "$PCONFIG/." "$SICHER/" 2>/dev/null \
-    && echo "<OK> Konfiguration gesichert (Rechte 0700)."
+SICHER_OK=0
+ZU_SICHERN=0
+[ -d "$PCONFIG" ] && ZU_SICHERN=1
 # verlauf.csv waechst ueber Wochen und ergibt sich nicht neu - es liegt
 # unter data/, und data/plugins/<x>/ raeumt der Installer bei jedem
 # Update ab (plugininstall.pl :886 -> :1631).
-[ -f "$PDATA/verlauf.csv" ] && cp -p "$PDATA/verlauf.csv" "$SICHER/verlauf.csv" 2>/dev/null
+[ -f "$PDATA/verlauf.csv" ] && ZU_SICHERN=1
+
+if [ "$ZU_SICHERN" = 1 ]; then
+    CP_RC=0
+    if [ -d "$PCONFIG" ]; then
+        echo "<INFO> Backing up existing config files $PCONFIG/ -> $SICHER/"
+        cp -a "$PCONFIG/." "$NEU/" 2>/dev/null || CP_RC=$?
+    fi
+    if [ -f "$PDATA/verlauf.csv" ]; then
+        cp -p "$PDATA/verlauf.csv" "$NEU/verlauf.csv" 2>/dev/null || CP_RC=$?
+    fi
+    # Die WIRKUNG pruefen, nicht den Rueckgabewert allein (CLAUDE.md 2):
+    # jede Datei byteweise in der neuen Sicherung.
+    ABWEICHEND=""
+    if [ -d "$PCONFIG" ]; then
+        ABWEICHEND=$( { cd "$PCONFIG" && find . -type f | while IFS= read -r f; do
+                          cmp -s "$f" "$NEU/$f" || printf '%s ' "${f#./}"
+                      done; } 2>/dev/null || echo "(Konfiguration nicht lesbar)" )
+    fi
+    if [ -f "$PDATA/verlauf.csv" ] && ! cmp -s "$PDATA/verlauf.csv" "$NEU/verlauf.csv"; then
+        ABWEICHEND="$ABWEICHEND verlauf.csv"
+    fi
+    if [ "$CP_RC" -eq 0 ] && [ -z "$ABWEICHEND" ]; then
+        SICHER_OK=1
+    else
+        echo "<WARNING> Die Konfiguration liess sich NICHT vollstaendig sichern"
+        echo "<WARNING> (cp Rueckgabewert $CP_RC; nicht in der Sicherung: ${ABWEICHEND:-keine})."
+    fi
+else
+    echo "<INFO> Weder Konfiguration noch Verlauf vorhanden - es gibt nichts zu sichern."
+fi
+
+if [ "$SICHER_OK" = 1 ]; then
+    rm -rf "$SICHER.alt" 2>/dev/null
+    if [ -d "$SICHER" ]; then mv "$SICHER" "$SICHER.alt" 2>/dev/null; fi
+    if mv "$NEU" "$SICHER" 2>/dev/null; then
+        rm -rf "$SICHER.alt" 2>/dev/null
+        chmod 0700 "$SICHER" 2>/dev/null
+        echo "<OK> Konfiguration gesichert (Rechte 0700)."
+    else
+        if [ -d "$SICHER.alt" ]; then mv "$SICHER.alt" "$SICHER" 2>/dev/null; fi
+        rm -rf "$NEU" 2>/dev/null
+        echo "<WARNING> Die neue Sicherung liess sich nicht an ihren Platz bringen."
+        echo "<WARNING> Platz und Rechte in $LBPDATA pruefen."
+    fi
+else
+    rm -rf "$NEU" 2>/dev/null
+    if [ -d "$SICHER" ]; then
+        echo "<WARNING> Die bisherige Sicherung unter $SICHER bleibt unangetastet."
+    fi
+fi
 
 # ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
 # Zweitschrift NEBEN den Konfigurationsordner, zusaetzlich zur bisherigen
@@ -217,10 +312,43 @@ cp -a "$PCONFIG/." "$SICHER/" 2>/dev/null \
 NETZ_BASE="${5:-$LBHOMEDIR}"
 NETZ_PDIR="${3:-ble_scanner_ng}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
-if [ -s "$NETZ_CFG/ble_scanner_ng.cfg" ]; then
-    cp -p "$NETZ_CFG/ble_scanner_ng.cfg" "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.ble_scanner_ng.cfg" 2>/dev/null \
-        && chmod 0600 "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.ble_scanner_ng.cfg" 2>/dev/null
+NETZ_QUELLE="$NETZ_CFG/ble_scanner_ng.cfg"
+NETZ_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.ble_scanner_ng.cfg"
+
+# BERICHTIGT IN 1.3.18 - drei Fehler in vier Zeilen.
+#
+# 1. "[ -s ]" fragte nur nach der GROESSE. Eine abgeschnittene Konfiguration
+#    ist nicht leer, bestand die Pruefung und wurde ueber die heile
+#    Zweitschrift kopiert - der einzige Rueckweg war fort, ohne eine Zeile im
+#    Protokoll. In WSL gemessen (18.09.2026, Fall c1): 34 Byte verdraengten
+#    958. Gefragt wird jetzt nach dem Inhalt.
+# 2. "cp -p" oeffnet das Ziel mit O_TRUNC: die vorhandene Zweitschrift ist
+#    SOFORT leer und wird erst danach gefuellt. Bricht es dazwischen ab, ist
+#    weder die alte noch die neue da. Gemessen (Fall d5, "ulimit -f 0"):
+#    958 Byte -> 0 Byte. Geschrieben wird jetzt daneben und erst nach der
+#    byteweisen Gegenprobe umbenannt - dieselbe Bauart wie
+#    bl_datei_schreiben() in bl_lib.php:560.
+# 3. "<INFO> Zweitschrift der Einstellungen angelegt." stand auch dann im
+#    Protokoll, wenn gar nichts kopiert worden war (im zweiten Lauf der
+#    Messung d1 belegt) - eine Erfolgsmeldung ohne Wirkung.
+if bl_cfg_traegt_inhalt "$NETZ_QUELLE"; then
+    if cp -p "$NETZ_QUELLE" "$NETZ_ZIEL.neu" 2>/dev/null \
+       && chmod 0600 "$NETZ_ZIEL.neu" 2>/dev/null \
+       && cmp -s "$NETZ_QUELLE" "$NETZ_ZIEL.neu" \
+       && mv "$NETZ_ZIEL.neu" "$NETZ_ZIEL" 2>/dev/null; then
+        echo "<INFO> Zweitschrift der Einstellungen angelegt ($NETZ_ZIEL)."
+    else
+        rm -f "$NETZ_ZIEL.neu" 2>/dev/null
+        echo "<WARNING> Die Zweitschrift liess sich nicht anlegen ($NETZ_ZIEL)."
+        if [ -f "$NETZ_ZIEL" ]; then
+            echo "<WARNING> Die bisherige Zweitschrift bleibt unangetastet."
+        fi
+    fi
+elif [ -f "$NETZ_ZIEL" ]; then
+    echo "<WARNING> $NETZ_QUELLE traegt keinen lesbaren Inhalt - die vorhandene"
+    echo "<WARNING> Zweitschrift bleibt unveraendert ($NETZ_ZIEL)."
+else
+    echo "<INFO> Keine lesbaren Einstellungen vorhanden - keine Zweitschrift angelegt."
 fi
-echo "<INFO> Zweitschrift der Einstellungen angelegt."
 
 exit 0

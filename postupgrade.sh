@@ -50,27 +50,94 @@ merker_frisch() {
     [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
 }
 
+# --- Traegt der Verlauf INHALT? ---------------------------------------------
+#
+# NEU IN 1.3.18. Die GROESSE beantwortet die Frage nicht: ein abgeschnittener
+# Verlauf ist nicht leer und galt deshalb als vorhanden. Gefragt wird nach
+# dem, was bl_verlauf_lesen() (bl_lib.php:1467 ff.) liest: die Kopfzeile,
+# mindestens eine Datenzeile mit einer Unixzeit als erstem Feld, und ein
+# Zeilenumbruch als letztes Byte - der Dienst haengt jede Zeile mit "\n" an
+# (ble_scanner_ng.py:1043). Im Zweifel faellt die Pruefung GESCHLOSSEN aus:
+# die Rettung wird geholt und nicht weggeraeumt.
+bl_verlauf_traegt_inhalt() {
+    [ -s "$1" ] || return 1
+    grep -q '^zeit;zweig;name;ereignis;rssi' "$1" 2>/dev/null || return 1
+    grep -q '^[0-9][0-9]*;' "$1" 2>/dev/null || return 1
+    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+    return 0
+}
+
 # --- Konfiguration zurueckspielen -------------------------------------------
 #
 # Der Installer kopiert config/* aus dem Archiv ueber config/plugins/<ordner>
 # und ueberschreibt dabei die Datei des Nutzers. Hier wird sie zurueckgeholt.
+#
+# BERICHTIGT IN 1.3.18 - drei Fehler in diesem Block, alle derselben Bauart:
+# es wird weggeraeumt, bevor feststeht, dass das Neue steht.
+#
+# 1. "[ ! -s "$PDATA/verlauf.csv" ]" fragte nur nach der Groesse. Ein
+#    abgeschnittener Verlauf galt als vorhanden, die heile Rettung wurde NICHT
+#    geholt - und die Zeile darunter loeschte sie. In WSL gemessen
+#    (18.09.2026, Pruefung-BLE-Scanner-1.3.18, Fall c2): das Merkwort des
+#    Verlaufs war danach nirgends mehr im Baum.
+# 2. "rm -f "$SICHER/verlauf.csv"" fiel UNBEDINGT - auch wenn das cp drei
+#    Zeilen darueber scheiterte (Rueckgabewert nach 2>/dev/null nie gelesen).
+#    Gemessen (Fall d4, Datenordner nicht beschreibbar): Wochen an Verlauf
+#    weg, ohne eine Zeile im Protokoll.
+# 3. "rm -rf "$SICHER"" fiel ebenfalls unbedingt, auch wenn das Zurueckspielen
+#    scheiterte. Gemessen (Fall d3, "ulimit -f 0"): Sicherung geloescht,
+#    Konfiguration nicht wiederhergestellt - Totalverlust.
+#
+# Weggeraeumt wird jetzt erst, wenn die Wirkung nachgewiesen ist.
 if [ -d "$SICHER" ]; then
+    ALLES_ZURUECK=1
     # ZUERST der Verlauf: er gehoert unter data/, nicht nach config/. Die
     # pauschale Kopie unten schiebt sonst alles in den Konfigordner.
     # verlauf.csv waechst ueber Wochen und ergibt sich nicht neu; data/ raeumt
     # der Installer bei jedem Update ab (plugininstall.pl :886 -> :1631).
     if [ -f "$SICHER/verlauf.csv" ]; then
         mkdir -p "$PDATA" 2>/dev/null
-        if [ ! -s "$PDATA/verlauf.csv" ]; then
-            cp -p "$SICHER/verlauf.csv" "$PDATA/verlauf.csv" 2>/dev/null \
-                && echo "<OK> verlauf.csv ueber das Update gerettet."
+        if bl_verlauf_traegt_inhalt "$PDATA/verlauf.csv"; then
+            # Der eigene Verlauf steht und traegt Inhalt - die Rettung wird
+            # nicht gebraucht.
+            rm -f "$SICHER/verlauf.csv" 2>/dev/null
+        elif cp -p "$SICHER/verlauf.csv" "$PDATA/verlauf.csv" 2>/dev/null \
+             && cmp -s "$SICHER/verlauf.csv" "$PDATA/verlauf.csv"; then
+            echo "<OK> verlauf.csv ueber das Update gerettet."
+            rm -f "$SICHER/verlauf.csv" 2>/dev/null
+        else
+            ALLES_ZURUECK=0
+            echo "<WARNING> verlauf.csv liess sich nicht zurueckspielen. Die Rettung"
+            echo "<WARNING> bleibt unter $SICHER/verlauf.csv liegen."
         fi
-        rm -f "$SICHER/verlauf.csv" 2>/dev/null
     fi
     echo "<INFO> Restoring config files $SICHER/ -> $PCONFIG/"
     mkdir -p "$PCONFIG"
-    cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null && echo "<OK> Konfiguration zurueckgespielt."
-    rm -rf "$SICHER" 2>/dev/null
+    if cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null; then
+        # Die WIRKUNG pruefen, nicht den Rueckgabewert (CLAUDE.md 2).
+        # verlauf.csv bleibt aussen vor: es gehoert unter data/.
+        FEHLT=$( { cd "$SICHER" && find . -type f ! -name verlauf.csv | while IFS= read -r f; do
+                     cmp -s "$f" "$PCONFIG/$f" || printf '%s ' "${f#./}"
+                 done; } 2>/dev/null || echo "(Sicherung nicht lesbar)" )
+    else
+        FEHLT="(cp scheiterte)"
+    fi
+    # Ist die Rettung liegengeblieben, hat die pauschale Kopie sie nach
+    # config/ mitgenommen - dort gehoert sie nicht hin.
+    rm -f "$PCONFIG/verlauf.csv" 2>/dev/null
+    if [ -z "$FEHLT" ]; then
+        echo "<OK> Konfiguration zurueckgespielt."
+    else
+        ALLES_ZURUECK=0
+        echo "<WARNING> Die Konfiguration liess sich nicht vollstaendig zurueckspielen"
+        echo "<WARNING> (nicht angekommen: $FEHLT)."
+    fi
+    if [ "$ALLES_ZURUECK" = 1 ]; then
+        rm -rf "$SICHER" 2>/dev/null
+    else
+        echo "<WARNING> Die Sicherung bleibt unter $SICHER liegen und wird beim"
+        echo "<WARNING> naechsten Update erst ersetzt, wenn eine neue steht."
+    fi
 fi
 
 # Eigentuemer richtigstellen. Das Update laeuft als root; alles, was dabei

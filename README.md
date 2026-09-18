@@ -1,11 +1,56 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.17
+Version 1.3.18
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.18 — nichts wird mehr weggeräumt, bevor der Ersatz nachweislich steht
+
+Zwei Fehlerklassen aus der Bestandsmessung vom 18.09.2026, beide in
+WSL/Ubuntu an einem Wegwerfbaum gemessen, **nicht am Gerät**. Der Prüfstand
+steht mit Erwartung und Messprotokollen unter `Pruefung-BLE-Scanner-1.3.18/`;
+es wird kein Dienst gestartet, und **Bluetooth wird dabei nicht angefasst**.
+
+**Klasse D — die alte Sicherung fiel, bevor die neue stand.** `preupgrade.sh`
+begann mit `rm -rf` auf den Sicherungsordner und füllte ihn erst danach.
+Bricht das Upgrade in dieser Lücke ab — abgebrochener Installer, volle Karte,
+Stromausfall — und stößt der Anwender es danach erneut an, dann ist der
+Datenordner durch `purge_installation` längst weg, es gibt nichts Neues zu
+sichern, und der zweite Lauf löscht die einzige Abschrift des Standes.
+Gemessen: **2 von 3 Dateien verloren** (die ganze Konfiguration und
+`verlauf.csv`); übrig blieb nur die Zweitschrift neben dem Konfigordner.
+Dieselbe Bauart steckte an vier weiteren Stellen.
+
+**Klasse C — die Zweitschrift wurde nach Größe statt nach Inhalt beurteilt.**
+Eine abgeschnittene Datei ist nicht leer: sie bestand jedes `[ -s ]`, galt als
+brauchbar und verdrängte den heilen Stand. Gemessen: 34 Byte verdrängten 958.
+
+| Lage | bis 1.3.17 | seit 1.3.18 |
+|---|---|---|
+| Sicherung beim Upgrade | `rm -rf` auf die alte, dann füllen | in `<ordner>.upgrade_sicherung.neu` bauen, jede Datei byteweise gegenprüfen, dann umbenennen; die alte fällt erst danach |
+| nichts zu sichern (nach `purge_installation`) | die alte Sicherung fiel trotzdem | sie bleibt unangetastet, und das steht im Protokoll |
+| Zweitschrift `<ordner>.backup.ble_scanner_ng.cfg` | `[ -s ]`, dann `cp -p` unmittelbar darüber | Inhaltsprüfung (`[CONFIG]`, mindestens ein `schlüssel=wert`, Zeilenumbruch als letztes Byte), dann über eine Nebendatei und `mv` |
+| „Zweitschrift angelegt" im Protokoll | stand auch da, wenn nichts kopiert wurde | nur nach nachgewiesener Wirkung; sonst `<WARNING>` mit Ablageort |
+| `verlauf.csv` zurückholen | `[ ! -s ]` entschied, das `rm -f` der Rettung fiel unbedingt | Inhaltsprüfung (Kopfzeile, Datenzeile mit Unixzeit), und die Rettung fällt erst, wenn der Verlauf steht |
+| Konfiguration zurückspielen | `rm -rf` auf die Sicherung, auch wenn das `cp` scheiterte | die Sicherung bleibt liegen, solange etwas nicht angekommen ist |
+| `postinstall.sh`, verlorene Konfiguration | `[ ! -f ] || [ ! -s ]`, dann `cp` unmittelbar aufs Ziel | Inhaltsprüfung auf **beiden** Seiten, und zurückgespielt wird über eine Nebendatei |
+| Bluetooth-Helfer in `postroot.sh` | `cat >` unmittelbar auf die Datei | daneben schreiben, auf Vollständigkeit prüfen, dann umbenennen |
+
+Gemessen wurde mit `ulimit -f 0` beziehungsweise `ulimit -f 1` — jeder
+Schreibvorgang scheitert, `mkdir`, `rm` und `mv` gelingen weiter. Das ist die
+volle Karte, nicht der Stromausfall; dass ENOSPC dieselbe Reihenfolge erzwingt
+wie SIGXFSZ, ist abgeleitet und nicht gemessen. Vorher **12 von 18 Prüfzeilen
+rot**, nachher **18 von 18 grün**, zwei Läufe wortgleich. Als Gegenprobe lief
+`GardenaSmartSystem 1.2.10` in derselben Lage durch die gleiche Messung: 0 von
+3 Dateien verloren, vorher wie nachher. Jede der zehn Korrekturen wurde
+einzeln in einer Kopie zurückgebaut; **10 von 10** machten genau ihre Zeile
+rot.
+
+**Am Gerät ist nichts davon gemessen.** Der Aufruf über `plugininstall.pl`,
+echte Rechte und ein echter Benutzer `loxberry` fehlen in WSL.
 
 ## Neu in 1.3.17 — der eigene Dienst wird argumentweise erkannt, und `daemon` startet nicht mehr blind
 
