@@ -26,13 +26,20 @@ def lb_wurzel_ermitteln():
     """Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
 
     Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
-    config/plugins UND webfrontend enthaelt. Trifft die uebliche
-    Installation genauso wie eine an einem anderen Ort.
+    config/plugins, data/plugins UND config/system/general.json enthaelt.
+    Rueckgabe "" heisst: keine Wurzel - jeder Aufrufer faengt das ab.
+
+    BERICHTIGT IN 1.3.19. Bis 1.3.18 genuegten config/plugins und webfrontend.
+    Genau diese Ordner hinterlaesst ein Pruefstand auf einem Arbeitsrechner;
+    am 05.09.2026 hielt eine solche Suche dort das Laufwerk fuer einen LoxBerry
+    und loeschte Daten (Regeln/06). Ein LoxBerry hat immer general.json, ein
+    solcher Rest nie. In WSL gemessen (Pruefung-BLE-Scanner-1.3.19, Fall W1).
     """
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
         if os.path.isdir(os.path.join(d, "config", "plugins")) \
-                and os.path.isdir(os.path.join(d, "webfrontend")):
+                and os.path.isdir(os.path.join(d, "data", "plugins")) \
+                and os.path.isfile(os.path.join(d, "config", "system", "general.json")):
             return d
         eltern = os.path.dirname(d)
         if eltern == d:
@@ -65,28 +72,108 @@ def _ordner_aus_ablageort():
 
 
 PLUGIN_NAME = "REPLACELBPPLUGINDIR"
-if PLUGIN_NAME.startswith("REPLACE"):
-    PLUGIN_NAME = _ordner_aus_ablageort()
-
 CONFIG_DIR = "REPLACELBPCONFIGDIR"
-if CONFIG_DIR.startswith("REPLACE"):
-    CONFIG_DIR = lb_wurzel_ermitteln() + "/config/plugins/" + PLUGIN_NAME
-
 LOG_DIR = "REPLACELBPLOGDIR"
-if LOG_DIR.startswith("REPLACE"):
-    LOG_DIR = lb_wurzel_ermitteln() + "/log/plugins/" + PLUGIN_NAME
-
 DATA_DIR = "REPLACELBPDATADIR"
-if DATA_DIR.startswith("REPLACE"):
-    DATA_DIR = lb_wurzel_ermitteln() + "/data/plugins/" + PLUGIN_NAME
+_HOME_INSTALLIERT = "REPLACELBHOMEDIR"
 
-HOME_DIR = os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln()
+
+def _ist_wurzel(d):
+    """Traegt d config/plugins und data/plugins? (Fuer ein ausdruecklich
+    genanntes LBHOMEDIR - general.json wird dort nicht verlangt, damit die
+    Attrappen der Pruefwerkzeuge weiter tragen; Bauart tb_lbhome() der
+    Linie Spotpreis-Tibber.)"""
+    return bool(d) and os.path.isdir(os.path.join(d, "config", "plugins")) \
+        and os.path.isdir(os.path.join(d, "data", "plugins"))
+
+
+def _lage():
+    """Wo liegt diese Datei, und darf sie die Anlage anfassen?
+
+    Rueckgabe (installiert, wurzel, ordner, gefundene_wurzel).
+
+    NEU IN 1.3.19 (Muster 3 der Nachlese). Bis 1.3.18 nahm ein ausgepacktes
+    Archiv unterhalb einer echten Wurzel - oder mit LBHOMEDIR allein, wie es
+    am Geraet in /etc/environment steht - Konfiguration, Daten, Protokoll und
+    MQTT-Zugang DER ANLAGE: _ordner_aus_ablageort() lieferte fuer bin/ den
+    festen Namen, und die Wurzelsuche fand die Anlage. Ein aus dem Archiv
+    gestarteter Dienst lief dann neben dem echten, mit dessen Konfiguration
+    (in WSL gemessen, Pruefung-BLE-Scanner-1.3.19, Faelle W3 und W4).
+
+    Die Anlage gilt nur, wenn
+      * der Installer die Platzhalter ersetzt hat (installiert), oder
+      * LBHOMEDIR UND LBPPLUGINDIR ausdruecklich gesetzt sind (so arbeiten
+        die Pruefwerkzeuge mit ihrer Attrappe), oder
+      * diese Datei physisch unter <wurzel>/bin/plugins/<ordner> liegt.
+    Sonst arbeitet alles im eigenen Baum, und der Dienst startet nicht.
+    """
+    hier = os.path.dirname(os.path.abspath(__file__))
+    gefunden = lb_wurzel_ermitteln()
+    if not any(x.startswith("REPLACE") for x in (PLUGIN_NAME, CONFIG_DIR, LOG_DIR, DATA_DIR)):
+        wurzel = "" if _HOME_INSTALLIERT.startswith("REPLACE") else _HOME_INSTALLIERT
+        if not _ist_wurzel(wurzel):
+            env = os.environ.get("LBHOMEDIR", "")
+            wurzel = env if _ist_wurzel(env) else gefunden
+        return True, wurzel, PLUGIN_NAME, gefunden
+    env_home = os.environ.get("LBHOMEDIR", "").rstrip("/")
+    env_ordner = os.path.basename(os.environ.get("LBPPLUGINDIR", "").rstrip("/"))
+    if _ist_wurzel(env_home) and env_ordner not in ("", ".", "bin", "plugins", "html",
+                                                    "htmlauth", "webfrontend"):
+        return True, env_home, env_ordner, gefunden
+    if gefunden:
+        soll = os.path.join(gefunden, "bin", "plugins", os.path.basename(hier))
+        if os.path.realpath(soll) == os.path.realpath(hier):
+            return True, gefunden, os.path.basename(hier), gefunden
+    return False, "", "", gefunden or (env_home if _ist_wurzel(env_home) else "")
+
+
+INSTALLIERT, HOME_DIR, _ORDNER, ARCHIV_WURZEL = _lage()
+if INSTALLIERT:
+    if PLUGIN_NAME.startswith("REPLACE"):
+        PLUGIN_NAME = _ORDNER
+        CONFIG_DIR = os.path.join(HOME_DIR, "config", "plugins", _ORDNER)
+        LOG_DIR = os.path.join(HOME_DIR, "log", "plugins", _ORDNER)
+        DATA_DIR = os.path.join(HOME_DIR, "data", "plugins", _ORDNER)
+    ARCHIV_WURZEL = ""
+else:
+    # Ausgepacktes Archiv, Pruefordner oder Entwicklungsbaum: alles bleibt
+    # im eigenen Baum. Bis 1.3.18 wurden die Pfade hier mit leerer Wurzel
+    # zusammengesetzt und lauteten /config/plugins/..., /data/plugins/... -
+    # absolute Pfade ab der Laufwerkswurzel (Fall W2).
+    _BASIS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    PLUGIN_NAME = _ordner_aus_ablageort()
+    CONFIG_DIR = os.path.join(_BASIS, "config")
+    LOG_DIR = os.path.join(_BASIS, "log")
+    DATA_DIR = os.path.join(_BASIS, "data")
+
 CONFIG_FILE = os.path.join(CONFIG_DIR, "ble_scanner_ng.cfg")
 VERLAUF_FILE = os.path.join(DATA_DIR, "verlauf.csv")
 
+# Merker des einmaligen Abraeumens und das zuletzt benutzte Themenpraefix
+# (ble_scanner_ng.py, Mqtt-Aufraeumen). Beide im Datenordner: purge_installation
+# loescht ihn bei jedem Update, danach wird einmal neu nachgesehen - das ist
+# gewollt und kostet eine Rueckfrage beim Broker.
+ALTLAST_MERKER = os.path.join(DATA_DIR, "retain_altlast")
+PRAEFIX_DATEI = os.path.join(DATA_DIR, "mqtt_praefix")
+
+# Die Ramdisk-Dateien tragen seit 1.3.19 den ORDNERNAMEN. Bis 1.3.18 hiessen
+# sie fest ble_scanner_ng_status.json/_steuer.json - eine Zweitinstallation
+# (Ordner ble_scanner_ng01) schrieb ihr Abbild ueber das der ersten, und ein
+# Testmodus-Auftrag der einen Oberflaeche landete beim Dienst der anderen (in
+# WSL gemessen, Pruefung-BLE-Scanner-1.3.19, Faelle Z2 bis Z6). Fuer die
+# gewoehnliche Installation (Ordner ble_scanner_ng) bleibt der Name derselbe.
+# Entschieden vom Hausherrn am 26.09.2026.
+ALTER_RAMDISK_NAME = "ble_scanner_ng"
 _SHM = "/run/shm" if os.path.isdir("/run/shm") else "/tmp"
-STATUS_FILE = _SHM + "/ble_scanner_ng_status.json"
-STEUER_FILE = _SHM + "/ble_scanner_ng_steuer.json"
+if INSTALLIERT:
+    _RAM = re.sub(r"[^A-Za-z0-9_-]", "_", PLUGIN_NAME) or ALTER_RAMDISK_NAME
+    STATUS_FILE = _SHM + "/" + _RAM + "_status.json"
+    STEUER_FILE = _SHM + "/" + _RAM + "_steuer.json"
+else:
+    # Nicht die Dateien der Anlage: die Ramdisk-Namen sind fest und fuer
+    # jede Installation dieselben.
+    STATUS_FILE = os.path.join(DATA_DIR, "ble_scanner_ng_status.json")
+    STEUER_FILE = os.path.join(DATA_DIR, "ble_scanner_ng_steuer.json")
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +212,7 @@ STEUER_FILE = _SHM + "/ble_scanner_ng_steuer.json"
 # Kommentar darueber hat den Rueckfall vorhergesagt und ihn nicht verhindert,
 # weil er nur eine Bitte ist. Solange fassung_setzen.py diese Stelle nicht
 # kennt, bleibt sie Handarbeit: WER DIE NUMMER ANHEBT, HEBT DIESE ZEILE MIT.
-VERSION_RUECKFALL = "1.3.16"
+VERSION_RUECKFALL = "1.3.19"
 
 
 def fassung():
@@ -274,10 +361,27 @@ RETAIN = {
     #    gehalten werden. Der laufend aus den Werbedaten gelesene
     #    Spannungswert ist dagegen ein Messwert und steht unter "sensor".
     "battery":        True,
-    # -- Zustaende des Dienstes: retained
+    # -- Letzter Wille: retained, und nur er (Regeln/07, entschieden am
+    #    18.09.2026). online=1 beim Verbinden - auch nach jeder
+    #    Neuverbindung - und online=0 als Letzter Wille stehen auf DEMSELBEN
+    #    Thema; die 0 setzt der Broker selbst, auch bei einem Absturz. Die
+    #    Deinstallation raeumt das Thema ab (ble_scanner_ng.py --mqtt-leeren).
     "server/online":          True,
-    "server/ok":              True,
-    "server/adapter_ok":      True,
+    # -- Aussagen des Dienstes ueber sich selbst: NIE retained (Regeln/07,
+    #    entschieden am 19.09.2026). server/ok ist der Name, den der Hausherr
+    #    am 18.09.2026 ausdruecklich ausgenommen hat; server/adapter_ok stellt
+    #    der Dienst aus ausbleibenden Sichtungen und eigenen D-Bus-Fehlern
+    #    fest, nicht der Adapter (Wachhund, stoerung_melden) - ein
+    #    Ausfallmerker der Geraeteschnittstelle. Stirbt der Dienst, stuenden
+    #    beide retained auf 1, und nach einem Neustart von Broker oder Gateway
+    #    laese Loxone "in Ordnung" von einem Dienst, der nicht mehr laeuft.
+    #    Bis 1.3.18 retained; der Altwert wird einmal abgeraeumt und
+    #    nachgelesen (Mqtt-Aufraeumen in ble_scanner_ng.py).
+    "server/ok":              False,
+    "server/adapter_ok":      False,
+    # -- Bleiben retained, weil sie auch nach dem Tod des Dienstes wahr
+    #    bleiben: der absolute Zeitpunkt der letzten Sichtung, die
+    #    installierte Fassung und der Name dieses Scanners.
     "server/letzte_sichtung": True,
     "server/version":         True,
     "server/scanner":         True,
@@ -336,6 +440,63 @@ def thema_stamm(unterthema):
     if teile[0] in ("person", "scanner"):
         return teile[0] + "/" + teile[-1]
     return teile[-1]
+
+
+def alte_ramdisk_namen_uebernehmen():
+    """Einmal beim Dienststart: die Ramdisk-Dateien unter dem alten, festen
+    Namen uebernehmen bzw. aufraeumen - NUR, wenn sie dieser Installation
+    gehoeren (seit 1.3.19).
+
+    Gehoeren heisst: dieser Ordner heisst anders als ble_scanner_ng, UND es
+    gibt keine Installation unter config/plugins/ble_scanner_ng - dann kann
+    die Datei unter dem alten Namen nur von dieser Installation stammen (vor
+    dem Update). Gibt es die Erstinstallation, gehoert sie ihr und bleibt
+    unberuehrt. Das Abbild wird entfernt (der Dienst schreibt es in jedem
+    Durchlauf neu), ein Auftrag wird unter den neuen Namen verschoben - er
+    gilt ohnehin nur 60 Sekunden (steuerdatei_lesen()).
+    Rueckgabe: Liste der Aenderungen, fuer das Protokoll.
+    """
+    if not INSTALLIERT or not HOME_DIR or _RAM == ALTER_RAMDISK_NAME:
+        return []
+    if os.path.isdir(os.path.join(HOME_DIR, "config", "plugins", ALTER_RAMDISK_NAME)):
+        return []
+    aus = []
+    for rest in ("_status.json", "_status.json.tmp"):
+        alt = _SHM + "/" + ALTER_RAMDISK_NAME + rest
+        try:
+            os.unlink(alt)
+            aus.append("entfernt " + alt)
+        except OSError:
+            pass
+    alt = _SHM + "/" + ALTER_RAMDISK_NAME + "_steuer.json"
+    if os.path.isfile(alt):
+        try:
+            if os.path.exists(STEUER_FILE):
+                os.unlink(alt)
+                aus.append("entfernt " + alt)
+            else:
+                os.replace(alt, STEUER_FILE)
+                aus.append("uebernommen " + alt + " -> " + STEUER_FILE)
+        except OSError:
+            pass
+    return aus
+
+
+def stamm_der_linie(rest, scanner):
+    """Gehoert <praefix>/<rest> zu dieser Linie? Rueckgabe: Stamm oder "".
+
+    Fuer das Abraeumen am Broker (ble_scanner_ng.py: Altlasten, altes
+    Praefix, --mqtt-leeren). Zur Linie gehoert, was einen Stamm aus RETAIN
+    traegt - retained wie fluechtig, denn bis 1.3.11 ging jedes Thema
+    retained hinaus. Ausgenommen ist scanner/<anderer>/...: mehrere Scanner
+    teilen sich ein Praefix, und deren Themen gehoeren dem anderen.
+    Ein Thema ohne bekannten Stamm (fremd) bleibt stehen.
+    """
+    teile = str(rest or "").split("/")
+    if teile and teile[0] == "scanner" and (len(teile) < 2 or teile[1] != scanner):
+        return ""
+    stamm = thema_stamm(rest)
+    return stamm if stamm in RETAIN else ""
 
 
 def retain_fuer(unterthema, wert=""):
@@ -867,9 +1028,12 @@ def bt_schalter_lage():
     """
     helfer_da = os.path.isfile(BT_HELFER) and os.access(BT_HELFER, os.X_OK)
     regel_da = False
-    for kandidat in ("/etc/sudoers.d/ble_scanner_ng",
-                     os.path.join(os.environ.get("LBHOMEDIR", "/opt/loxberry"),
-                                  "system", "sudoers", "ble_scanner_ng")):
+    # Bis 1.3.18 stand hier ein fester Rueckfall auf das uebliche
+    # Heimverzeichnis. Ohne Wurzel gibt es den zweiten Ort schlicht nicht.
+    kandidaten = ["/etc/sudoers.d/ble_scanner_ng"]
+    if HOME_DIR:
+        kandidaten.append(os.path.join(HOME_DIR, "system", "sudoers", "ble_scanner_ng"))
+    for kandidat in kandidaten:
         if os.path.isfile(kandidat):
             regel_da = True
             break

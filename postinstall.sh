@@ -7,6 +7,28 @@ PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
+# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset) - dieselben
+# Zeilen wie in preupgrade.sh und postupgrade.sh; das fuenfte Argument ist
+# das Wurzelverzeichnis.
+LBPLOG="${LBPLOG:-$5/log/plugins}"
+LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
+LBPDATA="${LBPDATA:-$5/data/plugins}"
+LBPBIN="${LBPBIN:-$5/bin/plugins}"
+
+# --- Ohne brauchbare Wurzel wird nichts angefasst ---------------------------
+#
+# NEU IN 1.3.19 (Muster 1 der Nachlese). Fehlten das fuenfte Argument und die
+# Umgebung, lauteten die Pfade bis 1.3.18 "/data/plugins/...",
+# "/config/plugins/..." - ab der Laufwerkswurzel; zeigte $5 auf einen Ordner
+# ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
+# Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
+# vollziehen.
+if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
+   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
+    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+    exit 0
+fi
 
 PLOG=$LBPLOG/$PDIR       # Achtung: liegt auf einer Ramdisk
 PCONFIG=$LBPCONFIG/$PDIR
@@ -198,9 +220,8 @@ if id loxberry >/dev/null 2>&1; then
     echo "<OK> Eigentuemer der Konfigurations-, Daten- und Protokollordner: loxberry."
 fi
 
-echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"
-echo "<INFO> gefundene Tags anhaken und speichern. Danach im Reiter MQTT das"
-echo "<INFO> Abo eintragen - ohne das kommt am Miniserver nichts an."
+# Die Anleitung fuer die Ersteinrichtung steht seit 1.3.19 am ENDE und nur
+# dort, wo sie stimmt (siehe unten).
 
 # ==== NETZ-EINSTELLUNGEN-UPDATE (automatisch eingefuegt, nicht doppeln) ====
 # Zurueckspielen aus der Zweitschrift - aber NUR, wenn die Datei des Nutzers
@@ -324,7 +345,11 @@ merker_frisch() {
     case "$_jetzt" in
         ''|*[!0-9]*) return 0 ;;
     esac
-    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
+    # 300 s Vorlauf (seit 1.3.19, Muster 8): eine Marke bis fuenf Minuten in
+    # der Zukunft gilt - die Uhr kann zwischen zwei Aufrufen nachgestellt
+    # werden. Bis 1.3.18 fiel sie dann durch, und der Dienst startete mitten
+    # im Upgrade (Fall M2).
+    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge -300 ]
 }
 
 if merker_frisch "$MERK_UPGRADE"; then
@@ -334,6 +359,24 @@ elif P=$(dienst_pid); then
 else
     echo "<INFO> Neuinstallation - der Dienst wird gestartet."
     dienst_starten
+fi
+
+# --- Schlusswort: Anleitung nur, wo sie stimmt ------------------------------
+#
+# BERICHTIGT IN 1.3.19. Bis 1.3.18 riet dieses Skript bei JEDEM Aufruf zur
+# Ersteinrichtung ("Geraete suchen ... speichern") - auch bei jedem Upgrade,
+# wo die Tags eingetragen sind und postupgrade.sh sie gleich zurueckspielt
+# (Fall E1; Regeln/06, "Nach einer Aktualisierung darf der Schlusstext nicht
+# zur Erstinstallation raten"). Entschieden wird nach INHALT: steht eine
+# Tag-Zeile in der Konfiguration, ist sie eingerichtet.
+if merker_frisch "$MERK_UPGRADE"; then
+    echo "<INFO> Die Einstellungen spielt postupgrade.sh gleich zurueck."
+elif grep -q '^tag[0-9][0-9]*=' "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null; then
+    echo "<INFO> Die Einstellungen sind uebernommen (Tags eingetragen) - es ist nichts weiter zu tun."
+else
+    echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"
+    echo "<INFO> gefundene Tags anhaken und speichern. Danach im Reiter MQTT das"
+    echo "<INFO> Abo eintragen - ohne das kommt am Miniserver nichts an."
 fi
 
 exit 0

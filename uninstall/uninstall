@@ -21,11 +21,19 @@ PVERSION=$4
 # Dateisystems durch und nimmt das erste Verzeichnis, das zufaellig
 # config/plugins und data/plugins traegt; auf dem Entwicklungsrechner war das
 # das Laufwerk selbst. Danach liefe "rm -f" gegen einen geratenen Baum.
+#
+# BERICHTIGT IN 1.3.19: die Suche verlangt jetzt auch
+# config/system/general.json. Bis 1.3.18 genuegten config/plugins und
+# data/plugins - genau die hinterlaesst ein Pruefstand; in WSL gemessen
+# (Pruefung-BLE-Scanner-1.3.19, Fall U4): in einem fremden Baum ohne
+# general.json wurde die Zweitschrift dieses Baums geloescht. Ein genanntes
+# $5 oder LBHOMEDIR gilt nur mit config/plugins und data/plugins darunter.
 lb_wurzel_suchen() {
     v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
     i=0
     while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
-        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ]; then
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
             echo "$v"
             return 0
         fi
@@ -35,7 +43,7 @@ lb_wurzel_suchen() {
     return 1
 }
 BASE=${5:-$LBHOMEDIR}
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ] || [ ! -d "$BASE/data/plugins" ]; then
     BASE=$(lb_wurzel_suchen)
 fi
 
@@ -55,6 +63,13 @@ if [ -z "$BASE" ]; then
     echo "<WARNING>   <LoxBerry>/config/plugins/$PDIR.backup.ble_scanner_ng.cfg"
     echo "<WARNING>   <LoxBerry>/data/plugins/$PDIR.upgrade_sicherung"
     echo "<WARNING> In der ersten stehen MAC-Adressen und Klarnamen."
+    # SEIT 1.3.19 wird danach NICHTS mehr getan. Bis 1.3.18 lief das Skript
+    # nach dieser Warnung weiter, mit Pfaden ab der Laufwerkswurzel
+    # ("/data/plugins/..."). Der Dienst, die Ramdisk-Dateien und die Themen
+    # im Broker gehoeren zu einer Installation, die hier niemand kennt.
+    echo "<WARNING> Der Dienst wurde nicht angehalten, und die zurueckbehaltenen"
+    echo "<WARNING> MQTT-Themen der Linie wurden nicht geleert."
+    exit 0
 fi
 
 PDATA="$BASE/data/plugins/$PDIR"
@@ -158,6 +173,49 @@ else
 fi
 rm -f "$PIDDATEI"
 
+# --- Die zurueckbehaltenen MQTT-Themen der Linie leeren ----------------------
+#
+# NEU IN 1.3.19. Bis 1.3.18 stand hier nur ein Hinweis, die Themen blieben
+# stehen. Regeln/07 (entschieden am 18.09.2026) erlaubt den retained Letzten
+# Willen server/online nur, wenn die Deinstallation das Thema abraeumt - sonst
+# bliebe die 0 eines entfernten Plugins fuer immer stehen. Geleert werden alle
+# retained Themen dieser Linie unter dem Praefix aus der Konfiguration, auch
+# Altwerte aus Vorfassungen, und hinterher wird beim Broker nachgelesen
+# (ble_scanner_ng.py mqtt_leeren()). Ein fremdes Thema und die Themen eines
+# anderen Scanners unter demselben Praefix bleiben stehen. Der Dienst ist oben
+# schon beendet - sonst schriebe er gleich wieder hinein.
+#
+# 'timeout -k 5 60': ohne -k schickt timeout nach 60 s nur SIGTERM, und ein
+# Programm, das es nicht annimmt, hielte die Deinstallation an (Muster 13 der
+# Nachlese, Vorbild Weissware 0.9.34). Nach 60 s SIGTERM, nach weiteren 5 s
+# SIGKILL, und der Abbruch steht als WARNING da. In WSL gemessen
+# (Pruefung-BLE-Scanner-1.3.19, Fall U3).
+#
+# Ein Einmallauf mit drei Argumenten - die Diensterkennung oben zaehlt ihn nie
+# als Dienst. Rueckgabe 0-2 meldet ble_scanner_ng.py selbst.
+bl_in_hochkomma() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+BL_SKRIPT="$BASE/bin/plugins/$PDIR/ble_scanner_ng.py"
+BL_RC=0
+if [ -f "$BL_SKRIPT" ] && command -v python3 >/dev/null 2>&1; then
+    if [ "$(id -u)" = "0" ] && [ -n "$BL_UID" ]; then
+        su -s /bin/sh loxberry -c "env PYTHONDONTWRITEBYTECODE=1 timeout -k 5 60 python3 $(bl_in_hochkomma "$BL_SKRIPT") --mqtt-leeren" \
+            < /dev/null 2>&1 || BL_RC=$?
+    else
+        env PYTHONDONTWRITEBYTECODE=1 timeout -k 5 60 python3 "$BL_SKRIPT" --mqtt-leeren \
+            < /dev/null 2>&1 || BL_RC=$?
+    fi
+    case "$BL_RC" in
+        0|1|2) ;;
+        124) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen wurde nach 60 s abgebrochen - unter dem Praefix der Linie kann noch etwas im Broker stehen. Von Hand: mosquitto_pub -r -n -t <thema>" ;;
+        137) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen reagierte nach 60 s nicht auf SIGTERM und wurde hart beendet (SIGKILL) - unter dem Praefix der Linie kann noch etwas im Broker stehen. Von Hand: mosquitto_pub -r -n -t <thema>" ;;
+        *) echo "<WARNING> MQTT: das Leeren der zurueckbehaltenen Themen endete unerwartet (Rueckgabe $BL_RC) - unter dem Praefix der Linie kann noch etwas im Broker stehen." ;;
+    esac
+else
+    echo "<INFO> python3 oder $BL_SKRIPT fehlt - zurueckbehaltene MQTT-Themen wurden nicht geleert."
+fi
+
 # --- Nur die EIGENEN Dateien wegraeumen -------------------------------------
 #
 # Bis 1.1.0 loeschte diese Stelle auch /tmp/BLE-Scanner.loglevel und
@@ -167,8 +225,22 @@ rm -f "$PIDDATEI"
 # ist es ein eigenstaendiges Plugin, das neben dem Original laufen kann:
 # dessen Dateien mitzunehmen wuerde eine fremde, weiterlaufende Installation
 # beschaedigen.
-rm -f /run/shm/ble_scanner_ng_status.json /tmp/ble_scanner_ng_status.json
-rm -f /run/shm/ble_scanner_ng_steuer.json /tmp/ble_scanner_ng_steuer.json
+#
+# Seit 1.3.19 tragen Abbild und Auftragsdatei den Ordnernamen. Die Dateien
+# unter dem alten, festen Namen gehoeren dieser Installation nur, wenn sie
+# selbst ble_scanner_ng heisst oder es keine Installation dieses Namens gibt -
+# sonst gehoeren sie der Erstinstallation und bleiben liegen (Fall Z7).
+BL_RAM=$(printf '%s' "$PDIR" | tr -c 'A-Za-z0-9_-' '_')
+BL_ALT_EIGEN=0
+if [ "$BL_RAM" = "ble_scanner_ng" ] || [ ! -d "$BASE/config/plugins/ble_scanner_ng" ]; then
+    BL_ALT_EIGEN=1
+fi
+for bl_ort in /run/shm /tmp; do
+    rm -f "$bl_ort/${BL_RAM}_status.json" "$bl_ort/${BL_RAM}_status.json.tmp" "$bl_ort/${BL_RAM}_steuer.json"
+    if [ "$BL_ALT_EIGEN" = 1 ]; then
+        rm -f "$bl_ort/ble_scanner_ng_status.json" "$bl_ort/ble_scanner_ng_status.json.tmp"               "$bl_ort/ble_scanner_ng_steuer.json"
+    fi
+done
 rm -f /tmp/ble_scanner_ng.loglevel /tmp/ble_scanner_ng.daemon.pid
 
 # --- Die Zweitschrift der Konfiguration -------------------------------------
@@ -212,10 +284,6 @@ fi
 # Eingeschaltet gelassenes Bluetooth wird NICHT wieder abgeschaltet: ob der
 # Adapter laufen soll, entscheidet das System und nicht dieses Plugin - und
 # ein anderes Plugin koennte ihn inzwischen benutzen.
-
-echo "<INFO> Die Themen im MQTT-Broker bleiben stehen. Wer sie loswerden will,"
-echo "<INFO> loescht sie dort - ein zurueckbehaltenes Thema verschwindet nur"
-echo "<INFO> durch eine Nachricht mit leerer Nutzlast."
 
 
 # ---------- Den Nachbarn der Sicherung wegraeumen ----------

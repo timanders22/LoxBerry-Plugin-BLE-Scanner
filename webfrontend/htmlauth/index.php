@@ -114,7 +114,11 @@ function bl_komma($roh, $bisher, $min, $max, $feld, &$mangel)
         $mangel[] = sprintf(bl_t('MANGEL.AUSSERHALB'), $feld, $n, $min, $max, $bisher);
         return (string) $bisher;
     }
-    return rtrim(rtrim(sprintf('%.2f', $n), '0'), '.');
+    // %F, nicht %f: %f setzt das Dezimalzeichen der eingestellten Locale -
+    // unter de_DE stuende "2,50" in der Datei, die Python als Zahl liest
+    // (Muster 10 der Nachlese; gemessen mit Windows-PHP 7.4 und 8.4 unter
+    // de-DE, Pruefung-BLE-Scanner-1.3.19, Fall L1).
+    return rtrim(rtrim(sprintf('%.2F', $n), '0'), '.');
 }
 
 /**
@@ -276,10 +280,14 @@ if ($bl_ist_post && isset($_POST['suchen'])) {
         $bl_error = sprintf(bl_t('TEXT.DISCOVER_FEHLT'), bl_e($skript));
     } else {
         $out = array();
-        @exec('timeout 40 python3 ' . escapeshellarg($skript) . ' 2>&1', $out);
+        $code = 0;
+        @exec(bl_frist(40, 'python3 ' . escapeshellarg($skript)) . ' 2>&1', $out, $code);
         $roh = trim(implode("\n", $out));
         $bl_such = @json_decode($roh, true);
-        if (!is_array($bl_such)) {
+        if ($code === 124 || $code === 137) {
+            $bl_error = sprintf(bl_t('TEXT.SUCHLAUF_ZEITGRENZE'), 40, $code);
+            $bl_such = null;
+        } elseif (!is_array($bl_such)) {
             $bl_error = bl_t('TEXT.SUCHLAUF_UNVERSTAENDLICH') . ' '
                       . bl_e(bl_kuerzen($roh, 400));
             $bl_such = null;
@@ -607,7 +615,7 @@ if (class_exists('LBWeb', false)) {
 
 <div class="sm-kacheln" id="bl-kacheln">
   <div class="sm-kachel"><b id="bl-k-dienst" class="<?= $bl_pid ? 'sm-an' : 'sm-aus' ?>"><?= $bl_pid ? bl_e(bl_t('TEXT.LAEUFT')) : bl_e(bl_t('TEXT.LAEUFT_NICHT')) ?></b><?= bl_e(bl_t('TEXT.K_DIENST')) ?></div>
-  <div class="sm-kachel"><b id="bl-k-anwesend"><?= $bl_status ? (int) $bl_status['anwesend'] : 0 ?></b><?= bl_e(bl_t('TEXT.K_ANWESEND')) ?></div>
+  <div class="sm-kachel"><b id="bl-k-anwesend"><?= $bl_status ? (int) ($bl_status['anwesend'] ?? 0) : 0 ?></b><?= bl_e(bl_t('TEXT.K_ANWESEND')) ?></div>
   <div class="sm-kachel"><b id="bl-k-tags"><?= (int) $bl_aktiv ?></b><?= bl_e(bl_t('TEXT.K_AKTIVE_TAGS')) ?></div>
   <div class="sm-kachel"><b id="bl-k-stille"><?= $bl_stille < 0 ? '?' : (int) $bl_stille ?></b><?= bl_e(bl_t('TEXT.K_EMPFANG')) ?></div>
   <div class="sm-kachel"><b id="bl-k-alter"><?= $bl_alter < 0 ? '?' : (int) $bl_alter ?></b><?= bl_e(bl_t('TEXT.K_ABBILD')) ?></div>

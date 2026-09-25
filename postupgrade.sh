@@ -16,6 +16,21 @@ LBPDATA="${LBPDATA:-$5/data/plugins}"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
+# --- Ohne brauchbare Wurzel wird nichts angefasst ---------------------------
+#
+# NEU IN 1.3.19 (Muster 1 der Nachlese). Fehlten das fuenfte Argument und die
+# Umgebung, lauteten die Pfade bis 1.3.18 "/data/plugins/...",
+# "/config/plugins/..." - ab der Laufwerkswurzel; zeigte $5 auf einen Ordner
+# ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
+# Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
+# vollziehen.
+if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
+   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
+    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+    exit 0
+fi
+
 PDATA=$LBPDATA/$PDIR
 PLOG=$LBPLOG/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
@@ -46,8 +61,16 @@ merker_frisch() {
     case "$_dann" in
         ''|*[!0-9]*) return 1 ;;
     esac
+    # Die Uhr wird als Zahl geprueft, bevor gerechnet wird (seit 1.3.19,
+    # Muster 8): ein "date", das nichts ausgibt, hinterliess bis 1.3.18 eine
+    # leere Zeichenkette in der Rechnung. Ohne lesbare Uhr: nicht starten
+    # (siehe oben). Und 300 s Vorlauf: ein Merker bis fuenf Minuten in der
+    # Zukunft gilt (Fall M3).
     _jetzt=$(date +%s 2>/dev/null) || return 1
-    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge 0 ]
+    case "$_jetzt" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge -300 ]
 }
 
 # --- Traegt der Verlauf INHALT? ---------------------------------------------
@@ -318,5 +341,17 @@ for modul in dbus gi paho.mqtt.client; do
         echo "<WARNING> Python-Modul $modul fehlt."
     fi
 done
+
+# --- Schlusswort (seit 1.3.19) ----------------------------------------------
+# Nach INHALT: steht nach dem Zurueckspielen eine Tag-Zeile in der
+# Konfiguration, ist nichts weiter zu tun; sonst (Rueckholung gescheitert oder
+# nie eingerichtet) die Anleitung der Ersteinrichtung.
+if grep -q '^tag[0-9][0-9]*=' "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null; then
+    echo "<OK> Aktualisierung abgeschlossen - die Einstellungen sind uebernommen, es ist nichts weiter zu tun."
+else
+    echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"
+    echo "<INFO> gefundene Tags anhaken und speichern. Danach im Reiter MQTT das"
+    echo "<INFO> Abo eintragen - ohne das kommt am Miniserver nichts an."
+fi
 
 exit 0

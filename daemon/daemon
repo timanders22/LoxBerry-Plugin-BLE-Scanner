@@ -88,8 +88,8 @@ BL_ARGUMENTE
 # 1. Laeuft gerade eine Aktualisierung? preupgrade.sh legt die Marke neben den
 #    Datenordner, postupgrade.sh entfernt sie. Nur eine Marke, die hoechstens
 #    eine Stunde alt ist, zaehlt - eine abgebrochene Installation darf den
-#    Dienst nicht fuer immer stilllegen. Aus der Zukunft oder ohne Zahl darin:
-#    sie gilt nicht.
+#    Dienst nicht fuer immer stilllegen. Mehr als fuenf Minuten aus der
+#    Zukunft oder ohne Zahl darin: sie gilt nicht.
 #    BL_START_TROTZ_MARKE=1 setzt nur ein Hakenskript, das die Marke selbst
 #    gelegt hat und dessen Start der letzte Schritt der Installation ist.
 if [ "${BL_START_TROTZ_MARKE:-0}" != "1" ] && [ -f "$marke" ]; then
@@ -115,7 +115,10 @@ if [ "${BL_START_TROTZ_MARKE:-0}" != "1" ] && [ -f "$marke" ]; then
     # ohne Zahl darin gilt dann nicht - sie belegt keinen Zeitpunkt.
     if [ -n "$seit" ]; then
         alter=$(( jetzt - seit ))
-        if [ "$alter" -ge 0 ] && [ "$alter" -lt 3600 ]; then
+        # 300 s Vorlauf (seit 1.3.19, Muster 8): eine Marke bis fuenf
+        # Minuten in der Zukunft gilt; bis 1.3.18 fiel sie durch, und der
+        # Dienst startete mitten in der Aktualisierung (Fall M1).
+        if [ "$alter" -ge -300 ] && [ "$alter" -lt 3600 ]; then
             melde "Start uebersprungen: eine Aktualisierung dieses Plugins laeuft."
             exit 0
         fi

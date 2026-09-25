@@ -33,13 +33,20 @@ if (!function_exists('bl_e')) {
     }
 }
 
-/* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen. */
+/* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
+ *
+ * BERICHTIGT IN 1.3.19: gesucht wird ein Verzeichnis mit config/plugins,
+ * data/plugins UND config/system/general.json. Bis 1.3.18 genuegten
+ * config/plugins und webfrontend - genau die hinterlaesst ein Pruefstand; am
+ * 05.09.2026 hielt eine solche Suche das Laufwerk eines Arbeitsrechners fuer
+ * einen LoxBerry (Regeln/06). Rueckgabe '' heisst: keine Wurzel. */
 if (!function_exists('lb_wurzel_ermitteln')) {
     function lb_wurzel_ermitteln()
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/data/plugins')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -50,27 +57,73 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* Ein ausdruecklich genanntes LBHOMEDIR gilt mit config/plugins UND
+ * data/plugins darunter - general.json wird dort nicht verlangt, damit die
+ * Attrappen der Pruefwerkzeuge weiter tragen (Bauart tb_lbhome() der Linie
+ * Spotpreis-Tibber). Sonst die Suche; danach nichts mehr. */
+function bl_lbhome()
+{
+    $h = rtrim((string) getenv('LBHOMEDIR'), '/');
+    if ($h !== '' && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')) {
+        return $h;
+    }
+    return lb_wurzel_ermitteln();
+}
+
+/*
+ * Die Pfade - der Anlage nur, wenn diese Oberflaeche dort installiert ist.
+ *
+ * BERICHTIGT IN 1.3.19 (Muster 3 der Nachlese), zwei Fehler an einer Stelle:
+ *
+ * 1. Ein ausgepacktes Archiv unterhalb einer echten Wurzel - oder mit
+ *    LBHOMEDIR allein, wie es am Geraet in /etc/environment steht - nahm die
+ *    Wurzel und fiel auf den festen Namen 'ble_scanner_ng' zurueck:
+ *    Konfiguration, PID-Datei und Dienst DER ANLAGE. "Dienst starten" aus dem
+ *    Archiv startete den Dienst der Anlage, "Testmodus" schrieb in ihre
+ *    Steuerdatei (in WSL gemessen, Pruefung-BLE-Scanner-1.3.19, P1, P4, P5).
+ * 2. Installiert liegt diese Datei unter
+ *    <wurzel>/webfrontend/htmlauth/plugins/<ordner>; der Ordnername wurde
+ *    aber aus ZWEI Ebenen darueber gelesen ('htmlauth') und fiel dann auf
+ *    den festen Namen zurueck. Eine Zweitinstallation ble_scanner_ng01
+ *    arbeitete damit auf der Konfiguration der ersten (Fall P3).
+ *
+ * Die Anlage gilt jetzt nur, wenn diese Datei dort physisch installiert liegt
+ * (realpath verglichen) oder LBHOMEDIR UND LBPPLUGINDIR ausdruecklich gesetzt
+ * sind (so arbeiten die Pruefwerkzeuge mit ihrer Attrappe). Sonst bleibt
+ * alles im eigenen Baum, 'home' ist leer, und bl_dienst()/bl_steuern()
+ * verweigern. 'archiv' nennt dann die gefundene Wurzel fuer die Meldung.
+ */
+/* Ordnername als Teil eines Dateinamens auf der Ramdisk - dieselbe Regel wie
+ * _RAM in bl_common.py. */
+function bl_ram_name($dir)
+{
+    $n = preg_replace('/[^A-Za-z0-9_-]/', '_', (string) $dir);
+    return $n !== '' ? $n : 'ble_scanner_ng';
+}
+
 function bl_paths()
 {
     static $p = null;
     if ($p !== null) {
         return $p;
     }
-    $home = getenv('LBHOMEDIR');
-    if (!$home) {
-        $home = lb_wurzel_ermitteln();
-    }
-    $dir = getenv('LBPPLUGINDIR');
-    if (!$dir) {
-        $dir = basename(dirname(dirname(__DIR__)));
-    }
-    if ($home && !is_dir($home . '/config/plugins/' . $dir)) {
-        foreach (array(basename(dirname(__DIR__)), 'ble_scanner_ng') as $cand) {
-            if (is_dir($home . '/config/plugins/' . $cand)) {
-                $dir = $cand;
-                break;
-            }
+    $home = bl_lbhome();
+    $lbp = basename(rtrim((string) getenv('LBPPLUGINDIR'), '/'));
+    $lbp_gilt = ($lbp !== '' && !in_array($lbp,
+        array('.', '/', 'html', 'htmlauth', 'bin', 'plugins', 'webfrontend'), true));
+    $dir = $lbp_gilt ? $lbp : basename(__DIR__);
+    $gefunden = $home;
+    if ($home !== '') {
+        $soll = @realpath($home . '/webfrontend/htmlauth/plugins/' . basename(__DIR__));
+        $ist = @realpath(__DIR__);
+        $installiert = ($soll !== false && $ist !== false && $soll === $ist);
+        $ausdruecklich = $lbp_gilt && $home === rtrim((string) getenv('LBHOMEDIR'), '/');
+        if (!$installiert && !$ausdruecklich) {
+            $home = '';
         }
+    }
+    if ($home === '' && !$lbp_gilt) {
+        $dir = 'ble_scanner_ng';
     }
     // Zustands- und Steuerdatei liegen auf der Ramdisk: nach einem Neustart
     // ist keine von beiden mehr gueltig, und genau so soll es sein.
@@ -91,9 +144,12 @@ function bl_paths()
             'logdir'    => $home . '/log/plugins/' . $dir,
             'datadir'   => $datadir,
             'verlauf'   => $datadir . '/verlauf.csv',
-            'status'    => $shm . '/ble_scanner_ng_status.json',
-            'steuer'    => $shm . '/ble_scanner_ng_steuer.json',
+            // Seit 1.3.19 mit dem Ordnernamen (Zweitinstallation, Faelle Z4
+            // und Z6); fuer ble_scanner_ng bleibt der Name derselbe.
+            'status'    => $shm . '/' . bl_ram_name($dir) . '_status.json',
+            'steuer'    => $shm . '/' . bl_ram_name($dir) . '_steuer.json',
             'pid'       => $datadir . '/dienst.pid',
+            'archiv'    => '',
         );
     } else {
         $base = dirname(dirname(__DIR__));
@@ -107,9 +163,12 @@ function bl_paths()
             'logdir'    => sys_get_temp_dir(),
             'datadir'   => $base . '/data',
             'verlauf'   => $base . '/data/verlauf.csv',
-            'status'    => $shm . '/ble_scanner_ng_status.json',
-            'steuer'    => $shm . '/ble_scanner_ng_steuer.json',
+            // Nicht die Dateien der Anlage: die Ramdisk-Namen sind fuer jede
+            // Installation dieselben (seit 1.3.19).
+            'status'    => $base . '/data/ble_scanner_ng_status.json',
+            'steuer'    => $base . '/data/ble_scanner_ng_steuer.json',
             'pid'       => $base . '/data/dienst.pid',
+            'archiv'    => $gefunden,
         );
     }
     return $p;
@@ -219,10 +278,14 @@ function bl_retain()
         'raum_seit'      => true,
         // -- Batteriestand: einmal taeglich, "zuletzt gueltiger Wert"
         'battery'        => true,
-        // -- Zustaende des Dienstes
+        // -- Letzter Wille (Regeln/07, 18.09.2026): retained, als Paar auf
+        //    einem Thema; die Deinstallation raeumt es ab
         'server/online'          => true,
-        'server/ok'              => true,
-        'server/adapter_ok'      => true,
+        // -- Aussagen des Dienstes ueber sich selbst: nie retained
+        //    (Regeln/07, 19.09.2026; bis 1.3.18 retained)
+        'server/ok'              => false,
+        'server/adapter_ok'      => false,
+        // -- bleiben auch nach dem Tod des Dienstes wahr
         'server/letzte_sichtung' => true,
         'server/version'         => true,
         'server/scanner'         => true,
@@ -851,6 +914,11 @@ function bl_dienst_pid()
 function bl_dienst($aktion)
 {
     $p = bl_paths();
+    // Seit 1.3.19: aus einem ausgepackten Archiv wird kein Dienst gestartet
+    // oder angehalten (Muster 3, Fall P4).
+    if ($p['home'] === '') {
+        return bl_archiv_text();
+    }
     $skript = $p['bindir'] . '/ble_scanner_ng.py';
     $datei = bl_pid_datei();
     $meldungen = array();
@@ -913,27 +981,67 @@ function bl_dienst($aktion)
     return implode("\n", $meldungen);
 }
 
+/** Die Meldung, wenn diese Oberflaeche nicht in der Installation liegt. */
+function bl_archiv_text()
+{
+    $a = bl_paths()['archiv'];
+    return sprintf(bl_t('TEXT.ARCHIV_VERWEIGERT'), $a !== '' ? $a : '-');
+}
+
 /**
  * Einen Auftrag an den laufenden Dienst geben, OHNE ihn neu zu starten.
  *
  * Die Oberflaeche erreicht den Dienst sonst nur ueber die
  * Konfigurationsdatei - und deren Aenderung loest einen Neustart aus. Fuer
  * Testmodus und Kalibrierung ist das gerade nicht erwuenscht.
+ *
+ * Rueckgabe seit 1.3.19: '' = eingereiht, sonst der Grund in Worten.
+ * BERICHTIGT IN 1.3.19 (Muster 5): bis 1.3.18 wurde der Auftrag auch ohne
+ * laufenden Dienst eingereiht, und der naechste Start fuhr ihn ungefragt hoch
+ * (Faelle P6, S1); aus einem Archiv schrieb er in die Steuerdatei der Anlage
+ * (P5). Der Dienst verwirft zusaetzlich jeden Auftrag, der aelter als 60 s ist.
  */
 function bl_steuern($art, $kennung = '', $dauer = 0)
 {
+    if (bl_paths()['home'] === '') {
+        return bl_archiv_text();
+    }
+    if (bl_dienst_pid() <= 0) {
+        return bl_t('TEST.STEUER_OHNE_DIENST');
+    }
     $daten = array('art' => (string) $art, 'kennung' => (string) $kennung,
                    'dauer' => (int) $dauer, 'zeit' => time());
     $json = json_encode($daten, JSON_UNESCAPED_UNICODE);
-    if ($json === false) {
-        return false;
+    if ($json === false || !bl_datei_schreiben(bl_paths()['steuer'], $json, 0640)) {
+        return bl_t('TEST.STEUER_FEHLER');
     }
-    return bl_datei_schreiben(bl_paths()['steuer'], $json, 0640);
+    return '';
+}
+
+/**
+ * Einen Befehl mit Zeitgrenze - IMMER mit Nachschlag fuer SIGKILL.
+ *
+ * NEU IN 1.3.19 (Muster 13 der Nachlese). Bis 1.3.18 stand an vier Stellen
+ * "timeout <n>" ohne -k: nach der Frist schickt timeout nur SIGTERM, und ein
+ * Programm, das es nicht annimmt (ein haengender D-Bus-Aufruf), hielt die
+ * Seite bis zu seinem eigenen Ende fest. In WSL gemessen
+ * (Pruefung-BLE-Scanner-1.3.19, Fall K1): Frist 2 s, SIGTERM-fester Befehl,
+ * 28 s statt 7 s. Die Rueckgabe 124 (Frist) und 137 (hart beendet) wertet
+ * bl_sh() aus.
+ */
+function bl_frist($sekunden, $befehl)
+{
+    return 'timeout -k 5 ' . (int) $sekunden . ' ' . $befehl;
 }
 
 /** Adresse des MQTT-Brokers, nur zur Anzeige, ohne Kennwort. */
 function bl_mqtt_broker()
 {
+    // Ohne Wurzel gibt es keine general.json - bis 1.3.18 wurde dann
+    // /config/system/general.json ab der Laufwerkswurzel gefragt (Fall P7).
+    if (bl_paths()['home'] === '') {
+        return '';
+    }
     $f = bl_paths()['home'] . '/config/system/general.json';
     if (!is_file($f)) {
         return '';
@@ -967,6 +1075,9 @@ function bl_mqtt_broker()
  */
 function bl_mqtt_autostart()
 {
+    if (bl_paths()['home'] === '') {
+        return null;
+    }
     $f = bl_paths()['home'] . '/config/system/general.json';
     if (!is_file($f)) {
         return null;
@@ -981,6 +1092,9 @@ function bl_mqtt_autostart()
 /** Miniserver aus general.json - fuer die Anzeige und den Probewert. */
 function bl_miniserver()
 {
+    if (bl_paths()['home'] === '') {
+        return array();
+    }
     $f = bl_paths()['home'] . '/config/system/general.json';
     if (!is_file($f)) {
         return array();
@@ -1685,15 +1799,13 @@ function bl_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        $home = getenv('LBHOMEDIR');
-        if (!$home || !is_dir($home)) {
-            foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-                if ($k !== '' && is_dir($k)) { $home = $k; break; }
-            }
-        }
-        $ordner = basename(dirname(__FILE__));
-        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
-        if (!is_dir($pfad)) {
+        // BERICHTIGT IN 1.3.19: bis 1.3.18 stand hier ein fester Rueckfall
+        // auf ein Heimverzeichnis, und ohne Wurzel wurde
+        // /templates/plugins/... ab der Laufwerkswurzel gefragt (Fall P7).
+        $pp = bl_paths();
+        $pfad = $pp['home'] !== ''
+            ? $pp['home'] . '/templates/plugins/' . $pp['plugin'] . '/lang' : '';
+        if ($pfad === '' || !is_dir($pfad)) {
             // Nicht installiert (Entwicklung): neben dem Plugin nachsehen.
             $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
         }
@@ -1719,11 +1831,10 @@ function bl_t($schluessel)
 /** Alle Sprachschluessel eines Abschnitts - fuer die Selbstpruefung. */
 function bl_sprachschluessel($abschnitt)
 {
-    $home = getenv('LBHOMEDIR');
-    if (!$home || !is_dir($home)) { $home = lb_wurzel_ermitteln(); }
-    $ordner = basename(dirname(__FILE__));
-    $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
-    if (!is_dir($pfad)) {
+    $pp = bl_paths();
+    $pfad = $pp['home'] !== ''
+        ? $pp['home'] . '/templates/plugins/' . $pp['plugin'] . '/lang' : '';
+    if ($pfad === '' || !is_dir($pfad)) {
         $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
     }
     $out = array();
@@ -1750,11 +1861,9 @@ function bl_sprachschluessel($abschnitt)
  */
 function bl_gateway_fassung()
 {
-    $home = getenv('LBHOMEDIR');
-    if (!$home && defined('LBHOMEDIR')) {
-        $home = LBHOMEDIR;
-    }
-    if (!$home || !is_dir($home)) {
+    // Seit 1.3.19 aus bl_paths(): nur die Wurzel dieser Installation.
+    $home = bl_paths()['home'];
+    if ($home === '' || !is_dir($home)) {
         return 0;
     }
     $d = @json_decode((string) @file_get_contents(

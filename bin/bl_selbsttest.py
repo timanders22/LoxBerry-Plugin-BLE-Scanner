@@ -523,8 +523,21 @@ def alles_pruefen():
              gem.retain_fuer("AABBCCDDEEFF/last_seen_ts", "1757000000"), True)
     p.gleich(G, "Lebenszeichen: server/ts ist NIE retained",
              gem.retain_fuer("server/ts", "1757000000"), False)
-    p.gleich(G, "Zustand des Dienstes: server/ok ist retained",
-             gem.retain_fuer("server/ok", "1"), True)
+    # Seit 1.3.19 (Regeln/07, 18. und 19.09.2026): was der Dienst ueber sich
+    # selbst sagt, ist nie retained; der Letzte Wille server/online schon.
+    p.gleich(G, "Aussage des Dienstes: server/ok ist NICHT retained",
+             gem.retain_fuer("server/ok", "1"), False)
+    p.gleich(G, "Aussage des Dienstes: server/adapter_ok ist NICHT retained",
+             gem.retain_fuer("server/adapter_ok", "1"), False)
+    p.gleich(G, "Letzter Wille: server/online ist retained",
+             gem.retain_fuer("server/online", "1"), True)
+    p.gleich(G, "Abräumen: ein fremdes Thema gehört nicht zur Linie",
+             gem.stamm_der_linie("fremd/x", "hausA"), "")
+    p.gleich(G, "Abräumen: der Zweig eines anderen Scanners gehört nicht zur Linie",
+             gem.stamm_der_linie("scanner/hausB/AABBCCDDEEFF/present", "hausA"), "")
+    p.gleich(G, "Abräumen: der eigene Scannerzweig gehört zur Linie",
+             gem.stamm_der_linie("scanner/hausA/AABBCCDDEEFF/present", "hausA"),
+             "scanner/present")
     p.gleich(G, "Sensorwerte sind NICHT retained",
              gem.retain_fuer("AABBCCDDEEFF/sensor/temperatur", "21.5"), False)
     p.gleich(G, "summary/names ist NICHT retained (regelmäßig leer)",
@@ -560,6 +573,21 @@ def alles_pruefen():
     ohne = sorted(s for s in staemme if s not in gem.RETAIN)
     p.merke(G, "jeder gesendete Themenstamm ist eingeordnet (%d gefunden)"
             % len(staemme), not ohne, "ohne Eintrag: " + ", ".join(ohne))
+
+    # =====================================================================
+    G = "Aufträge der Oberfläche"
+    # Seit 1.3.19: ein Auftrag gilt 60 Sekunden. Bis 1.3.18 nahm der Dienst
+    # auch einen Stunden alten an, den die Oberflaeche ohne laufenden Dienst
+    # eingereiht hatte.
+    d_st, _gs, _os = _dienst_bauen("[CONFIG]\nmqtt=0\n")
+    for alter_s, soll in ((600, False), (0, True)):
+        with open(gem.STEUER_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"art": "testmodus", "kennung": "AA:BB:CC:DD:EE:FF",
+                       "dauer": 60, "zeit": int(time.time()) - alter_s}, fh)
+        d_st.testmodus = {}
+        d_st.steuerdatei_lesen()
+        p.gleich(G, "ein %d s alter Auftrag wird %s" % (
+            alter_s, "angenommen" if soll else "verworfen"), bool(d_st.testmodus), soll)
 
     # =====================================================================
     G = "Reservierte Zweignamen"

@@ -1,11 +1,122 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.18
+Version 1.3.19
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.19 — der Broker wird aufgeräumt, und ein Archiv lässt die Anlage in Ruhe
+
+Nachlese nach den Hausregeln vom 18., 19. und 24.09.2026. Gemessen in WSL/Ubuntu
+an Wegwerfbäumen, mit echtem paho-mqtt gegen einen eigenen Prüfbroker, der das
+Retain-Kennzeichen **jedes empfangenen Pakets** aufschreibt — **nicht am Gerät**.
+Prüfstand, Erwartung und Messprotokolle: `Pruefung-BLE-Scanner-1.3.19/`.
+Bluetooth wird dabei nicht angefasst.
+
+### Retain: was der Dienst über sich selbst sagt, bleibt nicht stehen
+
+| Thema | bis 1.3.18 | seit 1.3.19 |
+|---|---|---|
+| `server/ok` | retained | flüchtig — der Name `ok` ist nach der Hausregel nie retained |
+| `server/adapter_ok` | retained | flüchtig — der Dienst schließt es aus ausbleibenden Sichtungen und eigenen D-Bus-Fehlern, das ist ein Ausfallmerker, keine Aussage des Adapters |
+| `server/online` | retained, als Letzter Wille | unverändert — `online=1` bei jeder Anmeldung, `online=0` setzt der Broker selbst |
+
+Stirbt der Dienst, stünden `ok=1` und `adapter_ok=1` sonst für immer im Broker, und
+nach einem Neustart von Broker oder Gateway läse Loxone „in Ordnung" von einem
+Dienst, der nicht mehr läuft. Der Preis: nach einem solchen Neustart fehlen beide,
+bis der Dienst wieder sendet.
+
+**Altwerte werden einmal abgeräumt — und nachgelesen.** Nach der Anmeldung fragt
+der Dienst den Broker, was unter dem Präfix noch zurückbehalten steht, das nach der
+Tabelle flüchtig ist (`server/ok`, `server/adapter_ok`, und aus der Zeit bis 1.3.11
+jedes Messwertthema), löscht es mit leerer Nutzlast, schickt den gültigen Wert
+sofort flüchtig hinterher und liest nach. Erst dann entsteht der Merker
+`data/plugins/<ordner>/retain_altlast` (mit Präfix, Scannername und Themenliste —
+ein Merker einer anderen Fassung zählt nicht). Verweigert der Broker das Lesen
+(SUBACK 0x80), weist er die Anmeldung ab oder bleibt etwas stehen, gibt es keinen
+Merker, eine Warnung im Protokoll und einen neuen Versuch nach einer Stunde.
+Themen, deren Stamm diese Linie nicht kennt, und der Zweig `scanner/<anderer>/…`
+eines anderen Scanners bleiben unberührt.
+
+**Die Deinstallation räumt ab.** Bis 1.3.18 gab `uninstall` nur einen Hinweis aus,
+und `server/online 0` eines entfernten Plugins blieb für immer stehen — das
+verletzt die Bedingung, unter der der Letzte Wille retained sein darf. Jetzt ruft
+`uninstall` nach dem Anhalten des Dienstes `ble_scanner_ng.py --mqtt-leeren`
+(mit `timeout -k 5 60`), löscht alle zurückbehaltenen Themen der Linie und liest
+nach; was nicht geht, steht als `<INFO>`/`<WARNING>` in der Ausgabe.
+
+**Ein Präfixwechsel baut die Verbindung neu auf.** Bis 1.3.18 wurde zur Laufzeit
+nur das Präfix umgesetzt: der Letzte Wille blieb auf dem alten `server/online`,
+auf dem neuen ging `online=1` nie hinaus, und die Themen des alten Präfixes blieben
+stehen. Jetzt entsteht eine neue Verbindung mit neuem Willen, und die
+zurückbehaltenen Themen des alten Präfixes werden abgeräumt (auch nach einem
+Neustart über die Oberfläche; das zuletzt benutzte Präfix steht in
+`data/plugins/<ordner>/mqtt_praefix`).
+
+### Wurzel, Archiv und Pfade
+
+* **Die Wurzel verlangt `config/system/general.json`** — in Python, PHP und
+  `uninstall`. Ohne sie wurde ein fremder Baum mit `config/plugins` für den
+  LoxBerry gehalten; `uninstall` löschte dort die Zweitschrift.
+* **Ohne Wurzel keine Pfade ab `/`.** Python bildete dann `/config/plugins/…`,
+  PHP fragte `/templates/plugins/…` und `/config/system/general.json`, dazu stand
+  ein festes Heimverzeichnis als Rückfall da. `uninstall`, `preupgrade.sh`,
+  `postinstall.sh` und `postupgrade.sh` warnen jetzt und tun nichts, statt ab der
+  Laufwerkswurzel zu arbeiten oder Ordner in einem fremden Baum anzulegen.
+* **Ein ausgepacktes Archiv fasst die Anlage nicht an.** Bis 1.3.18 nahm es
+  unterhalb einer echten Wurzel — oder mit `LBHOMEDIR` allein, wie es am Gerät
+  gesetzt ist — Konfiguration, Daten, Broker und Dienst der Anlage: „Dienst
+  starten" aus dem Archiv startete den Dienst der Anlage, „Testmodus" schrieb in
+  ihre Steuerdatei, und `ble_scanner_ng.py` lief als zweiter Dienst. Die Anlage
+  gilt jetzt nur, wenn die Datei dort installiert liegt oder `LBHOMEDIR` **und**
+  `LBPPLUGINDIR` gesetzt sind; sonst arbeitet alles im eigenen Baum, und Dienst
+  und Knöpfe verweigern mit Begründung.
+* **Eine Zweitinstallation findet ihren Ordner.** Die Oberfläche las den
+  Ordnernamen zwei Ebenen zu hoch (`htmlauth`) und fiel auf `ble_scanner_ng`
+  zurück — `ble_scanner_ng01` arbeitete auf der Konfiguration der ersten.
+* **Abbild und Auftragsdatei tragen den Ordnernamen**
+  (`/run/shm/<ordner>_status.json`, `…_steuer.json`). Bis 1.3.18 hießen sie für
+  jede Installation gleich: der Dienst einer Zweitinstallation schrieb sein
+  Abbild über das der ersten, und ein Testmodus-Auftrag der einen Oberfläche
+  landete beim Dienst der anderen. Für die gewöhnliche Installation
+  (`ble_scanner_ng`) bleibt der Name derselbe. Liegen beim ersten Start einer
+  Zweitinstallation noch Dateien unter dem alten Namen und gibt es keine
+  Erstinstallation daneben, sind es ihre eigenen: das Abbild wird entfernt, ein
+  Auftrag übernommen; gibt es die Erstinstallation, bleiben sie unberührt. Die
+  Deinstallation räumt nach derselben Regel ab.
+
+### Kleineres
+
+* **Testmodus, Kalibrieren, Batterielauf ohne laufenden Dienst** werden
+  abgewiesen statt eingereiht; der Dienst verwirft einen Auftrag, der älter als
+  60 Sekunden ist (bis 1.3.18 fuhr der nächste Start einen Stunden alten
+  Testmodus hoch).
+* **`timeout -k`** an allen vier Stellen der Oberfläche (Suchlauf,
+  Selbstprüfung, `bluetoothctl`): ein Befehl, der SIGTERM nicht annimmt, hielt die
+  Seite bis zu seinem eigenen Ende fest (gemessen: 28 statt 7 Sekunden).
+* **Marke und Merker der Aktualisierung** gelten mit 300 Sekunden Vorlauf; eine
+  Uhr, die keine Zahl liefert, bricht `postupgrade.sh` nicht mehr ab.
+* **Nach einer Aktualisierung** rät `postinstall.sh` nicht mehr zur
+  Ersteinrichtung; `postupgrade.sh` sagt „abgeschlossen", wenn Tags eingetragen
+  sind.
+* **Dämpfung** wird unter deutscher Locale mit Punkt gespeichert (`%F` statt `%f`).
+* **Probewert im Reiter *Test*** liest die Antwort über `fopen` statt über die
+  Kopfzeilenvariable, die PHP 8.5 schon beim Übersetzen als veraltet meldet. Dabei
+  fiel ein alter Fehler weg: war ein zweiter Miniserver nicht erreichbar, zeigte
+  die Seite dort die Statuszeile des **vorigen** („HTTP/1.0 500 …") statt
+  „Keine Antwort". Statuszeile und Text bei 200, 301, 404 und 500 sind vorher wie
+  nachher gleich (gemessen).
+* **Die Kachel „anwesend"** warnt nicht mehr bei einem Abbild ohne dieses Feld.
+* `VERSION_RUECKFALL` steht wieder auf der Nummer dieses Ordners.
+
+Kein Baustein der Loxone-Konfiguration hängt an einem Thema dieser Linie (Projektdatei
+vom 11.09.2026 gelesen); es fällt auch keines weg.
+
+**Am Gerät ist nichts davon gemessen.** Offen bleibt dort insbesondere, ob der
+Mosquitto des LoxBerry die Löschungen so annimmt wie der Prüfbroker, und der
+Aufruf von `uninstall` durch `plugininstall.pl`.
 
 ## Neu in 1.3.18 — nichts wird mehr weggeräumt, bevor der Ersatz nachweislich steht
 
@@ -968,6 +1079,12 @@ Allgemein: `server/online`, `server/ok`, `server/ts`, `server/adapter_ok`,
 `server/letzte_sichtung`, `server/version`, `server/scanner`,
 `summary/present`, `summary/tags`, `summary/tags_gesamt`, `summary/names` und
 `person/<Name>/present`.
+
+Nie zurückbehalten sind die Messwerte (`rssi`, `rssi_avg`, `distance`,
+`last_seen`, `sensor/…`), das Lebenszeichen `server/ts`, `summary/names` und —
+seit 1.3.19 — `server/ok` und `server/adapter_ok`. `server/online` ist der
+Letzte Wille: zurückbehalten, `1` bei jeder Anmeldung, `0` setzt der Broker; die
+Deinstallation räumt es ab. Die Tabelle steht im Reiter *MQTT*.
 
 ## Dateien
 

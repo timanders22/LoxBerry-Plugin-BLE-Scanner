@@ -34,6 +34,11 @@ function bl_sh($cmd)
             ? bl_t('TEST.ZEITGRENZE_LEER')
             : $text . "\n" . bl_t('TEST.ZEITGRENZE_HALB');
     }
+    // 137: nach der Frist nicht auf SIGTERM reagiert und hart beendet
+    // (timeout -k, seit 1.3.19 - bl_frist()).
+    if ($code === 137) {
+        return (trim($text) === '' ? '' : $text . "\n") . bl_t('TEST.ZEITGRENZE_HART');
+    }
     if ($code === 127) {
         return bl_t('TEST.BEFEHL_FEHLT');
     }
@@ -83,9 +88,13 @@ function bl_python($skript, $argumente = '')
     }
     $out = array();
     $code = 0;
-    @exec('timeout 60 python3 ' . escapeshellarg($datei) . ' ' . $argumente
+    @exec(bl_frist(60, 'python3 ' . escapeshellarg($datei) . ' ' . $argumente)
           . ' 2>&1', $out, $code);
-    return array($code === 0 || $code === 1, implode("\n", $out));
+    $text = implode("\n", $out);
+    if ($code === 124 || $code === 137) {
+        $text .= "\n" . bl_t($code === 124 ? 'TEST.ZEITGRENZE_HALB' : 'TEST.ZEITGRENZE_HART');
+    }
+    return array($code === 0 || $code === 1, $text);
 }
 
 /* ==================================================================
@@ -1033,8 +1042,8 @@ function bl_test_ausfuehren($was, $zusatz = '')
         case 'bluetooth':
             $adapter = bl_cfg($cfg, 'adapter', 'hci0');
             $t = sprintf(bl_t('TEST.BT_GESUCHT'), $adapter) . "\n\n";
-            $t .= "--- bluetoothctl list ---\n" . bl_sh('timeout 8 bluetoothctl list') . "\n\n";
-            $t .= "--- bluetoothctl show ---\n" . bl_sh('timeout 8 bluetoothctl show') . "\n\n";
+            $t .= "--- bluetoothctl list ---\n" . bl_sh(bl_frist(8, 'bluetoothctl list')) . "\n\n";
+            $t .= "--- bluetoothctl show ---\n" . bl_sh(bl_frist(8, 'bluetoothctl show')) . "\n\n";
             $t .= "--- bluetooth.service ---\n"
                 . bl_sh('systemctl is-active bluetooth 2>/dev/null; systemctl is-enabled bluetooth 2>/dev/null') . "\n\n";
             $t .= "--- dmesg | grep -i blue ---\n"
@@ -1164,8 +1173,25 @@ function bl_test_ausfuehren($was, $zusatz = '')
                 $ctx = stream_context_create(array('http' => array(
                     'method' => 'GET', 'header' => $kopf, 'timeout' => 5,
                     'ignore_errors' => true)));
-                $antwort = @file_get_contents($url, false, $ctx);
-                $kopfzeile = isset($http_response_header[0]) ? $http_response_header[0] : '';
+                // Seit 1.3.19 ueber fopen und stream_get_meta_data (Muster 14 der
+                // Nachlese): die magische Kopfzeilenvariable, die file_get_contents
+                // hinterlaesst, meldet PHP 8.5 schon beim Uebersetzen als
+                // "Deprecated". wrapper_data traegt dieselben Zeilen - bei einer
+                // Weiterleitung alle Antworten, die erste Zeile zuerst -, in
+                // PHP 7.4 bis 8.5 gleich; mit ignore_errors oeffnet fopen auch
+                // 4xx und 5xx. Vorher/nachher gleich gemessen
+                // (Pruefung-BLE-Scanner-1.3.19, messe_http.sh).
+                $antwort = false;
+                $kopfzeile = '';
+                $fh = @fopen($url, 'rb', false, $ctx);
+                if ($fh !== false) {
+                    $antwort = stream_get_contents($fh);
+                    $meta = stream_get_meta_data($fh);
+                    fclose($fh);
+                    if (isset($meta['wrapper_data'][0]) && is_string($meta['wrapper_data'][0])) {
+                        $kopfzeile = $meta['wrapper_data'][0];
+                    }
+                }
                 if ($antwort === false && $kopfzeile === '') {
                     $t .= '  ' . bl_t('TEST.PROBE_KEINE_ANTWORT') . "\n\n";
                 } else {
@@ -1181,24 +1207,24 @@ function bl_test_ausfuehren($was, $zusatz = '')
             if ($kennung === '') {
                 return array(bl_t('TEST.T_TESTMODUS'), bl_t('TEST.TESTMODUS_OHNE_TAG'));
             }
-            $ok = bl_steuern('testmodus', $kennung, 60);
+            $grund = bl_steuern('testmodus', $kennung, 60);
             return array(bl_t('TEST.T_TESTMODUS'),
-                         $ok ? sprintf(bl_t('TEST.TESTMODUS_LAEUFT'), $kennung)
-                             : bl_t('TEST.STEUER_FEHLER'));
+                         $grund === '' ? sprintf(bl_t('TEST.TESTMODUS_LAEUFT'), $kennung)
+                                       : $grund);
 
         case 'kalibrieren':
             $kennung = trim((string) $zusatz);
             if ($kennung === '') {
                 return array(bl_t('TEST.T_KALIBRIEREN'), bl_t('TEST.TESTMODUS_OHNE_TAG'));
             }
-            $ok = bl_steuern('kalibrierung', $kennung, 10);
+            $grund = bl_steuern('kalibrierung', $kennung, 10);
             return array(bl_t('TEST.T_KALIBRIEREN'),
-                         $ok ? bl_t('TEST.KALIBRIERUNG_LAEUFT') : bl_t('TEST.STEUER_FEHLER'));
+                         $grund === '' ? bl_t('TEST.KALIBRIERUNG_LAEUFT') : $grund);
 
         case 'batterie':
-            $ok = bl_steuern('batterie');
+            $grund = bl_steuern('batterie');
             return array(bl_t('TEST.T_BATTERIE'),
-                         $ok ? bl_t('TEST.BATTERIE_ANGEFORDERT') : bl_t('TEST.STEUER_FEHLER'));
+                         $grund === '' ? bl_t('TEST.BATTERIE_ANGEFORDERT') : $grund);
 
         case 'start':
             $a = bl_dienst('start');

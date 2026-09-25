@@ -127,6 +127,11 @@ log = logging.getLogger("ble_scanner_ng")
 def mqtt_zugangsdaten():
     """Zugangsdaten des MQTT-Gateways aus general.json lesen.
     Gross- und Kleinschreibung ist dort uneinheitlich - beide Varianten."""
+    # Ohne Wurzel (ausgepacktes Archiv) gibt es keinen Broker der Anlage. Bis
+    # 1.3.18 wurde der Pfad dann relativ zum Arbeitsverzeichnis gebildet.
+    if not gem.HOME_DIR:
+        log.warning("Keine LoxBerry-Wurzel - MQTT nicht möglich")
+        return None
     pfad = os.path.join(gem.HOME_DIR, "config", "system", "general.json")
     try:
         with open(pfad, "r", encoding="utf-8") as fh:
@@ -163,6 +168,214 @@ def mqtt_zugangsdaten():
     return None
 
 
+# ---------------------------------------------------------------------------
+# Zurueckbehaltene Themen am Broker loeschen - UND NACHLESEN (seit 1.3.19)
+# ---------------------------------------------------------------------------
+#
+# Drei Aufrufer: der Dienst raeumt einmal die Altwerte aus Vorfassungen ab
+# (server/ok und server/adapter_ok gingen bis 1.3.18 retained, bis 1.3.11
+# sogar jedes Thema), er raeumt nach einem Praefixwechsel das alte Praefix
+# ab, und uninstall/uninstall ruft "ble_scanner_ng.py --mqtt-leeren".
+#
+# Geloescht wird mit leerer Nutzlast und Retain (QoS 1), und hinterher wird
+# NACHGELESEN: ein neues Abonnement bekommt alles, was noch behalten ist. Erst
+# dann gilt die Sache als erledigt - der Rueckgabewert von publish() sagt nur,
+# dass etwas abging (Regeln/07, Beschattungswaechter 0.9.19 und BatterieBMS
+# 0.9.22: Merker nach dem Senden, Altwert stand weiter im Broker).
+#
+# Beide Abonnements gelten erst mit ihrem SUBACK. Ein Broker, dessen ACL das
+# Lesen verweigert, antwortet mit 0x80 und schickt danach nichts; ungeprueft
+# hiesse das "nichts behalten" (Muster 11 der Nachlese). CONNACK ungleich 0
+# heisst ebenso "nicht zu fragen", nie "nichts belegt". Bauart:
+# broker_leeren() in APC-UPS 1.2.13 (apc_common.py).
+#
+# auswahl(rest) entscheidet je Thema (rest = Thema ohne "<praefix>/").
+# nach_loeschen(themen) laeuft unmittelbar nach den Loeschungen, vor dem
+# Nachlesen - dort geht der gueltige Wert hinterher.
+#
+# Rueckgabe {"rc", "geleert", "rest", "grund"}: rc 0 = nichts (mehr)
+# behalten, 1 = nach dem Loeschen stand noch etwas, 2 = nicht zu fragen.
+
+CONNACK_TEXT = {1: "Protokollfassung abgelehnt", 2: "Client-Kennung abgelehnt",
+                3: "Broker nicht verfuegbar", 4: "Benutzername oder Kennwort falsch",
+                5: "nicht berechtigt"}
+
+
+def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
+    erg = {"rc": 2, "geleert": [], "rest": [], "grund": ""}
+    praefix = str(praefix or "").strip("/")
+    if not praefix or "#" in praefix or "+" in praefix:
+        erg["grund"] = "das Themenpraefix '{0}' taugt nicht fuer ein Abonnement".format(praefix)
+        return erg
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        erg["grund"] = "das Paket paho-mqtt fehlt"
+        return erg
+    z = mqtt_zugangsdaten()
+    if not z:
+        erg["grund"] = "kein MQTT-Broker in general.json"
+        return erg
+    wo = "{0}:{1}".format(z["host"], z["port"])
+    gesehen = set()
+    angemeldet = threading.Event()
+    code = {"wert": None}
+    subacks = {}
+
+    def bei_verbindung(_k, _d, _f, *rest):
+        # paho 1.x und VERSION1: rc als Zahl; VERSION2: ReasonCode mit .value
+        try:
+            code["wert"] = int(getattr(rest[0], "value", rest[0]) or 0) if rest else 0
+        except (TypeError, ValueError):
+            code["wert"] = 0
+        angemeldet.set()
+
+    def bei_nachricht(_k, _d, n):
+        # Nur BEHALTENES mit Inhalt: ein live gesendeter Wert ist keine
+        # Altlast, und ein leeres Thema ist schon geloescht.
+        if not (n.retain and n.payload):
+            return
+        thema = str(n.topic)
+        if thema.startswith(praefix + "/") and auswahl(thema[len(praefix) + 1:]):
+            gesehen.add(thema)
+
+    def bei_abo(_k, _d, mid, codes, *_rest):
+        werte = []
+        try:
+            for c in (codes or ()):
+                werte.append(int(getattr(c, "value", c)))
+        except (TypeError, ValueError):
+            werte = [0x80]
+        subacks[mid] = werte or [0x80]
+
+    def abonnieren():
+        """praefix/# abonnieren und den SUBACK abwarten. "" = bestaetigt."""
+        erg_sub = k.subscribe(praefix + "/#")
+        try:
+            rc_sub, mid = int(erg_sub[0]), erg_sub[1]
+        except (TypeError, ValueError, IndexError):
+            return "das Abonnement liess sich nicht absenden ({0!r})".format(erg_sub)
+        if rc_sub != 0:
+            return "das Abonnement liess sich nicht absenden (rc {0})".format(rc_sub)
+        ende = time.time() + 10
+        while mid not in subacks and time.time() < ende:
+            time.sleep(0.05)
+        if mid not in subacks:
+            return "der Broker {0} hat das Abonnement nicht bestaetigt (kein SUBACK)".format(wo)
+        schlecht = [w for w in subacks[mid] if w >= 0x80]
+        if schlecht:
+            return ("der Broker {0} verweigert das Lesen von '{1}/#' (SUBACK 0x{2:02X})"
+                    .format(wo, praefix, schlecht[0]))
+        return ""
+
+    name = "ble-scanner-ng-leeren-{0}".format(os.getpid())
+    k = None
+    for art in ("VERSION2", "VERSION1"):
+        api = getattr(getattr(mqtt, "CallbackAPIVersion", None), art, None)
+        if api is None:
+            continue
+        try:
+            k = mqtt.Client(api, client_id=name)
+            break
+        except (AttributeError, TypeError, ValueError):
+            k = None
+    if k is None:
+        k = mqtt.Client(client_id=name)          # paho-mqtt 1.x
+    k.on_connect = bei_verbindung
+    k.on_message = bei_nachricht
+    k.on_subscribe = bei_abo
+    if z.get("user"):
+        k.username_pw_set(str(z["user"]), str(z.get("pass") or "") or None)
+    try:
+        k.connect(z["host"], z["port"], 30)
+    except Exception as fehler:  # noqa: BLE001
+        erg["grund"] = "der Broker {0} ist nicht erreichbar ({1}: {2})".format(
+            wo, type(fehler).__name__, fehler)
+        return erg
+    k.loop_start()
+    try:
+        if not angemeldet.wait(10):
+            erg["grund"] = "der Broker {0} hat auf die Verbindung nicht geantwortet".format(wo)
+            return erg
+        if code["wert"]:
+            erg["grund"] = "der Broker {0} hat die Anmeldung abgewiesen (CONNACK {1}: {2})".format(
+                wo, code["wert"], CONNACK_TEXT.get(code["wert"], "unbekannter Grund"))
+            return erg
+        grund = abonnieren()
+        if grund:
+            erg["grund"] = grund
+            return erg
+        time.sleep(warten)
+        k.unsubscribe(praefix + "/#")
+        zu_leeren = sorted(gesehen)
+        for thema in zu_leeren:
+            info = k.publish(thema, b"", qos=1, retain=True)
+            try:
+                info.wait_for_publish(5)
+            except TypeError:                    # paho 1.x vor 1.6 kennt kein timeout
+                info.wait_for_publish()
+        erg["geleert"] = zu_leeren
+        if nach_loeschen is not None and zu_leeren:
+            try:
+                nach_loeschen(zu_leeren)
+            except Exception:  # noqa: BLE001
+                pass
+        gesehen.clear()
+        grund = abonnieren()
+        if grund:
+            erg["grund"] = "Nachlesen nicht moeglich - " + grund
+            return erg
+        time.sleep(warten)
+        erg["rest"] = sorted(gesehen)
+        erg["rc"] = 1 if erg["rest"] else 0
+    except Exception as fehler:  # noqa: BLE001
+        erg["rc"] = 2
+        erg["grund"] = "das Loeschen am Broker {0} scheiterte ({1}: {2})".format(
+            wo, type(fehler).__name__, fehler)
+    finally:
+        try:
+            k.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        k.loop_stop()
+    return erg
+
+
+def mqtt_leeren():
+    """Fuer uninstall/uninstall: die zurueckbehaltenen Themen dieser Linie am
+    Broker abraeumen und nachlesen (seit 1.3.19).
+
+    Entschieden am 18.09.2026 (Regeln/07): ein retained Letzter Wille ist nur
+    erlaubt, wenn die Deinstallation das Thema abraeumt - sonst bliebe die 0
+    eines entfernten Plugins fuer immer stehen. Bis 1.3.18 gab uninstall nur
+    einen Hinweis aus. Geraeumt wird jedes Thema unter dem Praefix aus der
+    Konfiguration, dessen Stamm diese Linie fuehrt (gem.stamm_der_linie),
+    samt Altlasten aus Vorfassungen; ein fremdes Thema und die Themen eines
+    anderen Scanners bleiben stehen.
+
+    Ausgabe in der Form der Installationsmeldungen; Rueckgabe 0 erledigt,
+    1 Reste, 2 nicht moeglich.
+    """
+    cfg, _tags, _alt = gem.konfiguration_lesen()
+    praefix = (cfg.get("themenpraefix") or "blescanner").strip("/") or "blescanner"
+    scanner = (cfg.get("scanner_name") or "").strip() or gem.rechnername()
+    erg = broker_leeren(praefix, lambda rest: gem.stamm_der_linie(rest, scanner) != "")
+    if erg["rc"] == 2:
+        print("<INFO> MQTT: zurueckbehaltene Themen unter {0}/ nicht geleert - {1}. "
+              "Von Hand: mosquitto_pub -r -n -t <thema>".format(praefix, erg["grund"]))
+        return 2
+    if erg["rest"]:
+        print("<WARNING> MQTT: {0} zurueckbehaltene Themen stehen nach dem Loeschen "
+              "noch im Broker: {1}".format(len(erg["rest"]), ", ".join(erg["rest"])))
+        return 1
+    if erg["geleert"]:
+        print("<OK> MQTT: {0} zurueckbehaltene Themen unter {1}/ geloescht und "
+              "nachgelesen.".format(len(erg["geleert"]), praefix))
+    else:
+        print("<OK> MQTT: unter {0}/ stand nichts zurueckbehalten (nachgelesen).".format(praefix))
+    return 0
+
+
 class Mqtt:
     """Duenne Huelle um paho-mqtt. Faellt still aus, wenn Bibliothek oder
     Gateway fehlen - der HTTP-Weg funktioniert dann weiter.
@@ -194,6 +407,10 @@ class Mqtt:
         self.gesendet = 0
         self.letzter_erfolg = 0
         self.abo_rueckruf = None
+        # Seit 1.3.19: nach JEDER gelungenen Anmeldung (auch nach einer
+        # Neuverbindung durch paho) - der Dienst stoesst dort das Abraeumen
+        # von Altwerten und altem Praefix an. Laeuft in einem eigenen Faden.
+        self.nach_verbindung = None
 
     def start(self):
         try:
@@ -218,9 +435,14 @@ class Mqtt:
         if zugang["user"]:
             self.client.username_pw_set(zugang["user"], zugang["pass"] or "")
         # Das Testament traegt denselben Retain-Stand wie das Thema selbst -
-        # server/online ist ein Zustand (Tabelle: retained). Genau deshalb ist
-        # es NICHT das Lebenszeichen: stirbt der Prozess hart, setzt der Broker
-        # die 0 von selbst. Das Lebenszeichen ist server/ts und geht fluechtig.
+        # server/online ist der Letzte Wille (Tabelle: retained). Genau deshalb
+        # ist es NICHT das Lebenszeichen: stirbt der Prozess hart, setzt der
+        # Broker die 0 von selbst. Das Lebenszeichen ist server/ts und geht
+        # fluechtig. Die drei Bedingungen aus Regeln/07 (18.09.2026): (a)
+        # online=1 in bei_verbindung() - bei JEDER Anmeldung, auch nach einer
+        # Neuverbindung durch paho; und ein Praefixwechsel baut seit 1.3.19
+        # eine neue Verbindung mit neuem Willen auf. (b) beide retained. (c)
+        # uninstall/uninstall ruft "ble_scanner_ng.py --mqtt-leeren".
         self.client.will_set(self.praefix + "/server/online", "0",
                              retain=gem.retain_fuer("server/online", "0"))
 
@@ -236,6 +458,11 @@ class Mqtt:
                         self.abo_rueckruf(self.client)
                     except Exception as fehler:       # noqa: BLE001
                         log.warning("MQTT-Abo fehlgeschlagen: %s", fehler)
+                if self.nach_verbindung:
+                    try:
+                        self.nach_verbindung()
+                    except Exception as fehler:       # noqa: BLE001
+                        log.warning("MQTT-Aufraeumen nicht angestossen: %s", fehler)
             else:
                 # Falsche Zugangsdaten behebt kein Warten, deshalb wird der
                 # Grund benannt - fuer paho 1.x (4, 5) wie 2.x (134, 135).
@@ -339,6 +566,10 @@ class Mqtt:
 
 def miniserver_liste():
     """Miniserver aus general.json."""
+    # Ohne Wurzel keine general.json - bis 1.3.18 wurde der Pfad dann
+    # relativ zum Arbeitsverzeichnis gebildet (Fall W7).
+    if not gem.HOME_DIR:
+        return []
     pfad = os.path.join(gem.HOME_DIR, "config", "system", "general.json")
     try:
         with open(pfad, "r", encoding="utf-8") as fh:
@@ -430,6 +661,14 @@ class Dienst:
         self.praefix = self.cfg.get("themenpraefix") or "blescanner"
         self.scanner = (self.cfg.get("scanner_name") or "").strip() or gem.rechnername()
         self.mqtt = Mqtt(self.praefix)
+        self.mqtt.nach_verbindung = self.mqtt_aufraeumen_anstossen
+        # Stand des Abraeumens am Broker (seit 1.3.19): altlast_erledigt wird
+        # erst nach dem Nachlesen wahr; aufraeumen_offen heisst "stuendlich
+        # erneut versuchen" (runde()).
+        self.aufraeumen_faden = None
+        self.aufraeumen_zeit = 0.0
+        self.aufraeumen_offen = False
+        self.altlast_erledigt = False
         self.bluez = None
         self.laeuft = True
         self.startzeit = time.time()
@@ -476,6 +715,129 @@ class Dienst:
         self.letzte_uebersicht = []
         self.letzte_personen = {}
         self.stoerung = ""
+
+    # -- Aufraeumen am Broker (seit 1.3.19) ---------------------------------
+
+    def _mqtt_neu(self):
+        """Eine neue MQTT-Huelle fuer das aktuelle Praefix - samt Letztem
+        Willen auf dessen server/online (Mqtt.start)."""
+        m = Mqtt(self.praefix)
+        m.nach_verbindung = self.mqtt_aufraeumen_anstossen
+        if self._zahl("raum", 0) == 1:
+            m.abo_rueckruf = self.raum_abonnieren
+        return m
+
+    def mqtt_aufraeumen_anstossen(self):
+        """Aus bei_verbindung() im paho-Netzfaden: das Abraeumen laeuft in
+        einem eigenen Faden, damit die Anmeldung nicht auf zwei Rueckfragen
+        beim Broker wartet."""
+        with self.sperre:
+            if self.aufraeumen_faden is not None and self.aufraeumen_faden.is_alive():
+                return
+            self.aufraeumen_zeit = time.time()
+            self.aufraeumen_faden = threading.Thread(
+                target=self.mqtt_aufraeumen, name="mqtt-aufraeumen", daemon=True)
+            self.aufraeumen_faden.start()
+
+    def _altlast_kennung(self, praefix, scanner):
+        """Inhalt des Merkers. Traegt Kennung, Praefix, Scanner und die
+        Stammliste - ein Merker einer anderen Fassung, eines anderen Praefixes
+        oder mit anderer Liste zaehlt nicht, dann wird neu nachgesehen."""
+        staemme = sorted(s for s, r in gem.RETAIN.items() if not r)
+        return "ble-scanner-ng-altlast-1|{0}|{1}|{2}".format(
+            praefix, scanner, ",".join(staemme))
+
+    @staticmethod
+    def _merker_schreiben(pfad, inhalt):
+        try:
+            os.makedirs(os.path.dirname(pfad), exist_ok=True)
+            temp = pfad + ".neu"
+            with open(temp, "w", encoding="utf-8") as fh:
+                fh.write(inhalt + "\n")
+            os.replace(temp, pfad)
+            return True
+        except OSError as fehler:
+            log.warning("Merker %s nicht schreibbar: %s", pfad, fehler)
+            return False
+
+    @staticmethod
+    def _merker_lesen(pfad):
+        try:
+            with open(pfad, "r", encoding="utf-8") as fh:
+                return fh.read().strip()
+        except OSError:
+            return ""
+
+    def mqtt_aufraeumen(self):
+        """Zurueckbehaltenes, das nicht (mehr) stehen darf, einmal abraeumen -
+        mit Nachlesen beim Broker, Merker erst danach.
+
+        1. Altes Praefix. Bis 1.3.18 blieben nach einem Praefixwechsel alle
+           retained Themen des alten Praefixes fuer immer stehen, samt
+           server/online=0 aus dem Letzten Willen (Pruefung-BLE-Scanner-1.3.19,
+           Faelle X1 und X2). Das zuletzt benutzte Praefix steht in
+           gem.PRAEFIX_DATEI; es wird erst nach bestaetigtem Abraeumen
+           ueberschrieben.
+        2. Altwerte unter dem aktuellen Praefix: alles, was nach RETAIN
+           fluechtig ist, aber aus einer Vorfassung noch behalten im Broker
+           steht - server/ok und server/adapter_ok bis 1.3.18, jedes Thema
+           bis 1.3.11 (Faelle R5 bis R10). Unmittelbar nach der Loeschung
+           geht der gueltige Wert fluechtig hinterher.
+        Scheitert eine Rueckfrage (kein Broker, CONNACK != 0, SUBACK 0x80),
+        bleibt der Merker aus, und runde() versucht es stuendlich erneut.
+        """
+        praefix = self.praefix
+        scanner = self.scanner
+        offen = False
+
+        alt = self._merker_lesen(gem.PRAEFIX_DATEI)
+        if alt and alt != praefix:
+            erg = broker_leeren(alt, lambda rest: gem.stamm_der_linie(rest, scanner) != "")
+            if erg["rc"] == 0:
+                log.info("MQTT: altes Themenpraefix %s abgeraeumt (%d Thema/Themen, "
+                         "nachgelesen).", alt, len(erg["geleert"]))
+                self._merker_schreiben(gem.PRAEFIX_DATEI, praefix)
+            else:
+                offen = True
+                log.warning("MQTT: altes Themenpraefix %s nicht abgeraeumt (%s) - "
+                            "neuer Versuch in einer Stunde.", alt,
+                            erg["grund"] or "%d stehen noch im Broker" % len(erg["rest"]))
+        elif alt != praefix:
+            self._merker_schreiben(gem.PRAEFIX_DATEI, praefix)
+
+        kennung = self._altlast_kennung(praefix, scanner)
+        if self._merker_lesen(gem.ALTLAST_MERKER) == kennung:
+            self.altlast_erledigt = True
+        if not self.altlast_erledigt:
+            def fluechtig(rest):
+                stamm = gem.stamm_der_linie(rest, scanner)
+                return stamm != "" and not gem.RETAIN.get(stamm, False)
+
+            def nachsenden(themen):
+                for thema in themen:
+                    rest = thema[len(praefix) + 1:]
+                    wert = self.letzter_stand.get(rest)
+                    if wert not in (None, ""):
+                        self.mqtt.senden(rest, wert)
+
+            erg = broker_leeren(praefix, fluechtig, nach_loeschen=nachsenden)
+            if erg["rc"] == 2:
+                offen = True
+                log.warning("MQTT: Altwerte im Broker nicht geprueft (%s) - "
+                            "neuer Versuch in einer Stunde.", erg["grund"])
+            elif erg["rest"]:
+                offen = True
+                log.warning("MQTT: %d Altwert(e) stehen nach dem Loeschen noch im "
+                            "Broker (%s) - neuer Versuch in einer Stunde.",
+                            len(erg["rest"]), ", ".join(erg["rest"]))
+            else:
+                if self._merker_schreiben(gem.ALTLAST_MERKER, kennung):
+                    self.altlast_erledigt = True
+                if erg["geleert"]:
+                    log.info("MQTT: %d zurueckbehaltene Altwert(e) geloescht und "
+                             "nachgelesen: %s", len(erg["geleert"]),
+                             ", ".join(erg["geleert"]))
+        self.aufraeumen_offen = offen
 
     # -- Hilfen -------------------------------------------------------------
 
@@ -1224,6 +1586,22 @@ class Dienst:
             return
         art = str(auftrag.get("art", ""))
         kennung = str(auftrag.get("kennung", ""))
+        # NEU IN 1.3.19 (Muster 5 der Nachlese): ein Auftrag gilt 60 Sekunden.
+        # Bis 1.3.18 nahm der Dienst auch einen Stunden alten an - die
+        # Oberflaeche reihte ihn ohne laufenden Dienst ein, und der naechste
+        # Start fuhr den Testmodus ungefragt hoch (in WSL gemessen,
+        # Pruefung-BLE-Scanner-1.3.19, Fall S1). bl_steuern() schreibt den
+        # Zeitpunkt seit jeher mit. Aus der Zukunft gelten 300 s Vorlauf.
+        try:
+            zeit = int(auftrag.get("zeit"))
+        except (TypeError, ValueError):
+            zeit = None
+        jetzt = time.time()
+        if zeit is None or jetzt - zeit > 60 or zeit - jetzt > 300:
+            log.warning("Auftrag der Oberfläche verworfen (%s, %s) - er ist zu alt "
+                        "oder ohne Zeitpunkt.", art or "?",
+                        "ohne Zeitpunkt" if zeit is None else "%d s" % int(jetzt - zeit))
+            return
         if art == "testmodus" and kennung:
             dauer = min(300, max(10, int(auftrag.get("dauer", 60) or 60)))
             with self.sperre:
@@ -1525,6 +1903,11 @@ class Dienst:
         self.wachhund()
         self.batterie_runde()
 
+        # Gescheitertes Abraeumen am Broker stuendlich erneut (seit 1.3.19).
+        if self.aufraeumen_offen and self.mqtt.verbunden \
+                and time.time() - self.aufraeumen_zeit >= 3600:
+            self.mqtt_aufraeumen_anstossen()
+
         if time.time() - self.letztes_aufraeumen > 900:
             self.letztes_aufraeumen = time.time()
             try:
@@ -1574,12 +1957,25 @@ class Dienst:
 
         neuer_praefix = self.cfg.get("themenpraefix") or "blescanner"
         if neuer_praefix != alter_praefix:
-            log.info("Themenpräfix geändert: %s -> %s. Die alten Themen bleiben "
-                     "im Broker stehen, bis sie dort entfernt werden.",
+            # BERICHTIGT IN 1.3.19. Bis 1.3.18 wurde hier nur das Praefix der
+            # MQTT-Huelle umgesetzt: der Letzte Wille blieb auf dem ALTEN
+            # server/online, und online=1 ging auf dem neuen nie hinaus
+            # (Regeln/07, Bedingung a; Fall X2). Jetzt wird die Verbindung mit
+            # dem neuen Willen neu aufgebaut; die retained Themen des alten
+            # Praefixes raeumt mqtt_aufraeumen() nach der Anmeldung ab.
+            log.info("Themenpräfix geändert: %s -> %s. Die MQTT-Verbindung wird "
+                     "neu aufgebaut; die Themen des alten Präfixes werden abgeräumt.",
                      alter_praefix, neuer_praefix)
             self.praefix = neuer_praefix
-            self.mqtt.praefix = neuer_praefix
             self.veroeffentlicht.clear()
+            self.altlast_erledigt = False
+            lief = self.mqtt.client is not None
+            if lief:
+                self.mqtt.stop()
+                self.mqtt.client = None
+            self.mqtt = self._mqtt_neu()
+            if lief and altes_mqtt == "1" and self.cfg.get("mqtt", "1") == "1":
+                self.mqtt.start()
         if self.cfg.get("adapter", "hci0") != alter_adapter:
             log.info("Bluetooth-Adapter geändert: %s -> %s. Die Suche wird "
                      "umgehängt.", alter_adapter, self.cfg.get("adapter", "hci0"))
@@ -1773,6 +2169,32 @@ class Dienst:
 
 
 def main():
+    # GENAU EIN SCHALTER (seit 1.3.19): "--mqtt-leeren" fuer die
+    # Deinstallation. Er startet keinen Dienst. Mit drei Argumenten gilt der
+    # Aufruf fuer jede Diensterkennung dieses Plugins als Einmallauf (argv[1]
+    # ist das Skript, argv[2] der Schalter). Bis 1.3.18 wurde JEDES Argument
+    # uebergangen, und ein Aufruf mit Tippfehler startete einen zweiten Dienst.
+    if sys.argv[1:] == ["--mqtt-leeren"]:
+        sys.exit(mqtt_leeren())
+    if sys.argv[1:]:
+        for a in sys.argv[1:]:
+            sys.stderr.write("Unbekannter Schalter: {0}\n".format(a))
+        sys.stderr.write("Dieses Skript ist der Dauerdienst; es kennt nur --mqtt-leeren "
+                         "(fuer die Deinstallation).\n")
+        sys.exit(2)
+    # Aus einem ausgepackten Archiv startet kein Dienst (Muster 3, Fall W4):
+    # er nahm bis 1.3.18 Konfiguration, Daten und Broker der Anlage.
+    if not gem.INSTALLIERT:
+        sys.stderr.write(
+            "ble_scanner_ng.py: Diese Datei liegt nicht in einer LoxBerry-Installation "
+            "(ausgepacktes Archiv oder Pruefordner"
+            + (" unter " + gem.ARCHIV_WURZEL if gem.ARCHIV_WURZEL else "") + ").\n"
+            "Damit nichts in die Anlage kommt, startet hier kein Dienst. Abhilfe: den "
+            "Dienst der Installation starten oder LBHOMEDIR und LBPPLUGINDIR "
+            "ausdruecklich setzen.\n")
+        sys.exit(1)
+    for zeile in gem.alte_ramdisk_namen_uebernehmen():
+        log.info("Ramdisk-Datei unter dem alten Namen: %s", zeile)
     dienst = Dienst()
 
     def beenden(signum, rahmen):   # noqa: ARG001

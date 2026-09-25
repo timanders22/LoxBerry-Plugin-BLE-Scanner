@@ -18,6 +18,21 @@ LBPBIN="${LBPBIN:-$5/bin/plugins}"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
+# --- Ohne brauchbare Wurzel wird nichts angefasst ---------------------------
+#
+# NEU IN 1.3.19 (Muster 1 der Nachlese). Fehlten das fuenfte Argument und die
+# Umgebung, lauteten die Pfade bis 1.3.18 "/data/plugins/...",
+# "/config/plugins/..." - ab der Laufwerkswurzel; zeigte $5 auf einen Ordner
+# ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
+# Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
+# vollziehen.
+if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
+   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
+    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+    exit 0
+fi
+
 PDATA=$LBPDATA/$PDIR
 PCONFIG=$LBPCONFIG/$PDIR
 
