@@ -348,6 +348,11 @@ VORGABEN = {
     # -- Batterie ueber GATT (stoert den Scan - deshalb ab Werk aus)
     "batterie": "0",
     "batterie_uhrzeit": "04:00",
+    # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
+    #    Anwesenheit-1): ab Werk AUS - eine eingerichtete Anlage sendet nach
+    #    dem Update nichts Neues. Die Zuordnung "<WLAN-Name>=<Person>, ...".
+    "wlan_kopplung": "0",
+    "wlan_zuordnung": "",
 }
 
 # Erlaubte Schluessel der Zusatzangaben je Tag (viertes Feld der Tag-Zeile).
@@ -442,6 +447,10 @@ RETAIN = {
     # -- Personen
     "person/present":       True,
     "person/last_seen_ts":  True,
+    # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026): beides
+    #    Zustaende, nie leer ("-" ohne Aussage, Entscheidung 5).
+    "person/anwesend_gesamt": True,
+    "person/quelle":          True,
     # -- zweiter Themenzweig je Scanner
     "scanner/present":      True,
 
@@ -559,6 +568,73 @@ def retain_fuer(unterthema, wert=""):
     if str(wert) == "":
         return False
     return bool(RETAIN.get(thema_stamm(unterthema), False))
+
+
+# ---------------------------------------------------------------------------
+# Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026, Anwesenheit-1)
+# ---------------------------------------------------------------------------
+#
+# Das Praefix des WiFi-Scanners ist dort fest: bin/check.pl sendet
+# "wifi_ng/" . mqtt_topic_name(<Name>) retained (0/1) und je Lauf
+# wifi_ng/status/ok und wifi_ng/status/ts ohne Retain; der Listener haelt
+# wifi_ng/status/interval (Minuten) retained (LoxBerry-Plugin-WiFi-Scanner-NG
+# 3.2.9, check.pl:731-762, mqtt_listener.pl:309). Gekoppelt wird nur ueber
+# diese Themen, nie ueber Dateien der anderen Linie.
+WLAN_PRAEFIX = "wifi_ng"
+
+_ZUORDNUNG_PAAR = re.compile(r"^([A-Za-z0-9_-]{1,40})\s*=\s*([A-Za-z0-9_-]{1,40})$")
+
+
+def wlan_zuordnung_lesen(text):
+    """"Anna_Handy=Anna, Bernd=Bernd" -> [("Anna_Handy", "Anna"), ("Bernd", "Bernd")].
+
+    Links der Name, unter dem der WiFi-Scanner die Person sendet
+    (wifi_ng/<Name>), rechts die Person dieses Plugins (person/<Name>/...).
+    Ein Paar, das nicht so aussieht, wird uebergangen - die Oberflaeche weist
+    es beim Speichern ab; hier kommt nur an, was von Hand in der Datei steht.
+    Doppelte Namen: das erste Paar gilt.
+    """
+    aus = []
+    wl = set()
+    pe = set()
+    for stueck in str(text or "").split(","):
+        m = _ZUORDNUNG_PAAR.match(stueck.strip())
+        if not m or m.group(1) in wl or m.group(2) in pe:
+            continue
+        wl.add(m.group(1))
+        pe.add(m.group(2))
+        aus.append((m.group(1), m.group(2)))
+    return aus[:20]
+
+
+def wlan_frist(intervall_min):
+    """Bis wann gilt der WiFi-Scanner als lebendig? Dreimal sein Takt
+    (wifi_ng/status/interval in Minuten; unbekannt: 3 min wie ab Werk),
+    mindestens 180 s - dieselbe Regel wie Entscheidung 4 (OK ab 3x Takt)."""
+    try:
+        takt = int(intervall_min)
+    except (TypeError, ValueError):
+        takt = 0
+    if takt <= 0:
+        takt = 3
+    return max(180, 3 * takt * 60)
+
+
+def anwesenheit_gesamt(ble, wlan):
+    """Beide Quellen zu einer Aussage: (gesamt, quelle).
+
+    ble, wlan: 1 da, 0 weg, None ohne Aussage (WiFi-Scanner schweigt, Person
+    ohne aktiven Tag). 1, wenn eine Quelle "da" sagt; 0, wenn alle Quellen mit
+    Aussage "weg" sagen; "-" ohne jede Aussage. quelle nennt die Quellen, die
+    das Ergebnis tragen.
+    """
+    da = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 1]
+    weg = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 0]
+    if da:
+        return 1, "+".join(da)
+    if weg:
+        return 0, "+".join(weg)
+    return "-", "-"
 
 
 def mac_normieren(wert):

@@ -829,6 +829,12 @@ class Dienst:
         self.letzte_uebersicht = []
         self.letzte_personen = {}
         self.stoerung = ""
+        # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
+        # ab Werk aus): was der WiFi-Scanner zuletzt sagte. ts_empfang ist die
+        # monotone Zeit, zu der ein NICHT zurueckbehaltenes status/ts ankam.
+        self.wlan_sperre = threading.Lock()
+        self.wlan = {"ts_empfang": 0.0, "ts": 0, "ok": "", "intervall": 0, "personen": {}}
+        self.wlan_lage = {"an": 0}
 
     # -- Aufraeumen am Broker (seit 1.3.19) ---------------------------------
 
@@ -837,8 +843,8 @@ class Dienst:
         Willen auf dessen server/online (Mqtt.start)."""
         m = Mqtt(self.praefix)
         m.nach_verbindung = self.mqtt_aufraeumen_anstossen
-        if self._zahl("raum", 0) == 1:
-            m.abo_rueckruf = self.raum_abonnieren
+        if self._zahl("raum", 0) == 1 or self.cfg.get("wlan_kopplung", "0") == "1":
+            m.abo_rueckruf = self.abonnieren
         return m
 
     def mqtt_aufraeumen_anstossen(self):
@@ -961,6 +967,13 @@ class Dienst:
                 pn = (t.get("opt") or {}).get("person", "").strip()
                 if t.get("aktiv") == "1" and pn:
                     personen.add(gem.thema_saeubern(pn))
+            # Personen der WLAN-Kopplung (Verbesserungsbau 30.09.2026): ihre
+            # Themen anwesend_gesamt/quelle bleiben nur, solange die Kopplung
+            # an ist und die Zuordnung sie fuehrt.
+            gekoppelt = set()
+            if self.cfg.get("wlan_kopplung", "0") == "1":
+                gekoppelt = {pn for _wn, pn in
+                             gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
         altlast = not self.altlast_erledigt
         entfall = not self.entfallen_erledigt
 
@@ -975,6 +988,8 @@ class Dienst:
             if teile[0] in ("server", "summary"):
                 return False
             if teile[0] == "person":
+                if teile[-1] in ("anwesend_gesamt", "quelle"):
+                    return not (len(teile) == 3 and teile[1] in gekoppelt)
                 return not (len(teile) > 1 and teile[1] in personen)
             if teile[0] == "scanner":
                 return not (len(teile) > 2 and teile[2] in zweige)
@@ -1391,9 +1406,18 @@ class Dienst:
                 tag, zweig, eintrag, anwesend, roh, avg, stufe, alter, zustand))
 
         # -- Personen
+        # person/<P>/last_seen_ts seit dem Verbesserungsbau vom 30.09.2026 (a1)
+        # wie <T>/last_seen_ts: beim Wechsel der Anwesenheit der Person sofort,
+        # sonst hoechstens alle 60 s. Bis dahin ging es mit jeder neuen
+        # Sichtung hinaus - in jedem Durchlauf, solange jemand da war.
         for name, p in personen.items():
-            self._senden("person/{0}/present".format(name), p["present"], erzwingen)
-            self._senden("person/{0}/last_seen_ts".format(name), p["ts"], erzwingen)
+            p_wechsel = self._senden("person/{0}/present".format(name), p["present"], erzwingen)
+            self._senden("person/{0}/last_seen_ts".format(name), p["ts"], erzwingen,
+                         abstand=60, wechsel=p_wechsel)
+
+        # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
+        #    ab Werk aus)
+        self.wlan_zusammenfuehren(personen, erzwingen)
 
         # -- Zusammenfassung
         aktive = sum(1 for t in self.tags if t.get("aktiv") == "1")
@@ -1534,6 +1558,123 @@ class Dienst:
         if not kennung:
             return
         self.raumdaten.setdefault(kennung, {})[scanner] = (time.time(), wert)
+
+    # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026) ------
+
+    def abonnieren(self, client):
+        """Die Abos nach jeder Anmeldung: Raumzuordnung und/oder WiFi-Scanner.
+        Ein gemeinsamer Empfaenger verteilt die Nachrichten."""
+        if self._zahl("raum", 0) == 1:
+            self.raum_abonnieren(client)
+        if self.cfg.get("wlan_kopplung", "0") == "1":
+            client.subscribe(gem.WLAN_PRAEFIX + "/#", qos=0)
+            log.info("Anwesenheit mit dem WLAN-Scanner: abonniert %s/#", gem.WLAN_PRAEFIX)
+        client.on_message = self.nachricht
+
+    def nachricht(self, c, u, nachricht):
+        try:
+            if self.wlan_nachricht(nachricht):
+                return
+        except Exception as fehler:      # noqa: BLE001
+            log.warning("Nachricht des WLAN-Scanners nicht auswertbar: %s", fehler)
+            return
+        self.raum_nachricht(c, u, nachricht)
+
+    def wlan_nachricht(self, nachricht):
+        """Eine Nachricht unter wifi_ng/ merken. Rueckgabe: war es eine?
+
+        Das Lebenszeichen status/ts und status/ok zaehlen nur, wenn sie NICHT
+        zurueckbehalten ankamen: ein Abo bekommt beim Anmelden jeden
+        behaltenen Wert und haelt ihn sonst fuer laufenden Verkehr (Regeln/07;
+        der WiFi-Scanner sandte status/* bis 3.2.3 retained - ein Altwert im
+        Broker saehe sonst wie ein lebender Scanner aus).
+        """
+        praefix = gem.WLAN_PRAEFIX + "/"
+        thema = str(getattr(nachricht, "topic", ""))
+        if not thema.startswith(praefix):
+            return False
+        rest = thema[len(praefix):]
+        try:
+            wert = bytes(nachricht.payload or b"").decode("utf-8", "replace").strip()
+        except (TypeError, ValueError):
+            wert = ""
+        behalten = bool(getattr(nachricht, "retain", False))
+        with self.wlan_sperre:
+            if rest == "status/ts":
+                if not behalten:
+                    self.wlan["ts_empfang"] = time.monotonic()
+                    try:
+                        self.wlan["ts"] = int(float(wert))
+                    except ValueError:
+                        self.wlan["ts"] = 0
+            elif rest == "status/ok":
+                if not behalten:
+                    self.wlan["ok"] = wert[:8]
+            elif rest == "status/interval":
+                try:
+                    self.wlan["intervall"] = int(float(wert))
+                except ValueError:
+                    pass
+            elif re.fullmatch(r"[A-Za-z0-9_-]{1,40}", rest):
+                if wert == "":
+                    self.wlan["personen"].pop(rest, None)
+                elif rest in self.wlan["personen"] or len(self.wlan["personen"]) < 200:
+                    self.wlan["personen"][rest] = wert[:8]
+        return True
+
+    def wlan_zusammenfuehren(self, personen, erzwingen):
+        """person/<P>/anwesend_gesamt und person/<P>/quelle je Zuordnung.
+
+        Nur bei eingeschalteter Kopplung (ab Werk aus). Schweigt der
+        WiFi-Scanner (kein frisches Lebenszeichen, status/ok nicht 1, MQTT
+        aus), hat er keine Aussage - dann zaehlt nur BLE, und die Lage steht im
+        Abbild fuer den Reiter Test.
+        """
+        if self.cfg.get("wlan_kopplung", "0") != "1":
+            self.wlan_lage = {"an": 0}
+            return
+        zuordnung = gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))
+        with self.wlan_sperre:
+            empfang = self.wlan["ts_empfang"]
+            ok = self.wlan["ok"]
+            takt = self.wlan["intervall"]
+            werte = dict(self.wlan["personen"])
+        frist = gem.wlan_frist(takt)
+        alter = int(time.monotonic() - empfang) if empfang else -1
+        if self.cfg.get("mqtt", "1") != "1":
+            grund = "mqtt"
+        elif not empfang:
+            grund = "nie"
+        elif alter > frist:
+            grund = "alt"
+        elif ok != "1":
+            grund = "ok"
+        else:
+            grund = ""
+        frisch = grund == ""
+        if frisch != bool(self.wlan_lage.get("frisch")) or self.wlan_lage.get("an") != 1:
+            if frisch:
+                log.info("Anwesenheit mit dem WLAN-Scanner: er meldet sich - beide Quellen zaehlen.")
+            else:
+                log.warning("Anwesenheit mit dem WLAN-Scanner: er schweigt (%s) - es zaehlt "
+                            "nur BLE.", {"mqtt": "MQTT ist aus",
+                                         "nie": "noch kein Lebenszeichen wifi_ng/status/ts",
+                                         "alt": "Lebenszeichen aelter als %d s" % frist,
+                                         "ok": "wifi_ng/status/ok ist nicht 1"}.get(grund, grund))
+        lage = {}
+        for wlan_name, person in zuordnung:
+            ble = personen.get(person)
+            ble_wert = int(ble["present"]) if ble is not None else None
+            roh = werte.get(wlan_name) if frisch else None
+            wlan_wert = 1 if roh == "1" else (0 if roh == "0" else None)
+            gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, wlan_wert)
+            self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
+            self._senden("person/{0}/quelle".format(person), quelle, erzwingen)
+            lage[person] = {"wlan_name": wlan_name, "ble": ble_wert, "wlan": wlan_wert,
+                            "gesamt": gesamt, "quelle": quelle}
+        self.wlan_lage = {"an": 1, "frisch": 1 if frisch else 0, "grund": grund,
+                          "alter": alter, "frist": frist, "ok": ok, "intervall": takt,
+                          "personen": lage}
 
     def _kennung_zum_zweig(self, zweig):
         for tag in self.tags:
@@ -1756,6 +1897,9 @@ class Dienst:
             "sichtbar": sichtbar,
             "testwerte": testwerte,
             "kalibrierung": kal,
+            # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026):
+            # die Lage fuer die Pruefzeile im Reiter Test.
+            "wlan": self.wlan_lage,
         }
         try:
             temp = gem.STATUS_FILE + ".tmp"
@@ -2248,6 +2392,7 @@ class Dienst:
         alter_praefix = self.praefix
         alter_adapter = self.cfg.get("adapter", "hci0")
         altes_mqtt = self.cfg.get("mqtt", "1")
+        alte_wlan = (self.cfg.get("wlan_kopplung", "0"), self.cfg.get("wlan_zuordnung", ""))
 
         self.cfg, self.tags, _ = gem.konfiguration_lesen()
         self.ms = miniserver_liste()
@@ -2311,6 +2456,30 @@ class Dienst:
                 log.info("MQTT wurde ausgeschaltet.")
                 self.mqtt.stop()
                 self.mqtt.client = None
+        # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026): Kopplung
+        # oder Zuordnung geaendert - Abo nachziehen und entfallene Themen mit
+        # Nachlesen abraeumen (mqtt_aufraeumen, "entfallen").
+        neue_wlan = (self.cfg.get("wlan_kopplung", "0"), self.cfg.get("wlan_zuordnung", ""))
+        if neue_wlan != alte_wlan:
+            log.info("Anwesenheit mit dem WLAN-Scanner: Einstellung geaendert (%s).",
+                     "an" if neue_wlan[0] == "1" else "aus")
+            if neue_wlan[0] != "1":
+                with self.wlan_sperre:
+                    self.wlan = {"ts_empfang": 0.0, "ts": 0, "ok": "", "intervall": 0,
+                                 "personen": {}}
+                self.wlan_lage = {"an": 0}
+            if neue_wlan[0] == "1" or self._zahl("raum", 0) == 1:
+                self.mqtt.abo_rueckruf = self.abonnieren
+            self.entfallen_erledigt = False
+            if self.mqtt.client is not None and self.mqtt.verbunden:
+                try:
+                    if neue_wlan[0] == "1" and alte_wlan[0] != "1":
+                        self.abonnieren(self.mqtt.client)
+                    elif neue_wlan[0] != "1" and alte_wlan[0] == "1":
+                        self.mqtt.client.unsubscribe(gem.WLAN_PRAEFIX + "/#")
+                except Exception as fehler:      # noqa: BLE001
+                    log.warning("MQTT-Abo des WLAN-Scanners nicht umgestellt: %s", fehler)
+                self.mqtt_aufraeumen_anstossen()
         log.info("Konfiguration neu eingelesen: %d Tag(s), davon %d aktiv",
                  len(self.tags), sum(1 for t in self.tags if t.get("aktiv") == "1"))
 
@@ -2473,8 +2642,8 @@ class Dienst:
         self.letztes_aufraeumen = time.time()
 
         if self.cfg.get("mqtt", "1") == "1":
-            if self._zahl("raum", 0) == 1:
-                self.mqtt.abo_rueckruf = self.raum_abonnieren
+            if self._zahl("raum", 0) == 1 or self.cfg.get("wlan_kopplung", "0") == "1":
+                self.mqtt.abo_rueckruf = self.abonnieren
             self.abo_datei_nachziehen()
             self.mqtt.start()
         else:

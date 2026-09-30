@@ -153,6 +153,14 @@ Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
        </form> und wurde nie mitgesendet - der Wachposten wies diese
        Knoepfe alle ab. Dazu eine Pruefzeile, die das zaehlt.
 
+1.3.14 bis 1.3.21
+       Weitere Aenderungen dieser Fortfuehrung; die Einzelheiten stehen je
+       Fassung im README. Zuletzt 1.3.21: person/<P>/last_seen_ts nur beim
+       Wechsel, Start- und Dienstprotokoll getrennt, Kasten mit dem noetigen
+       Befehl bei fehlendem Adapter oder bluez, Anwesenheit zusammen mit dem
+       WLAN-Scanner (ab Werk aus), Eingaben nach einer Beanstandung zurueck
+       ins Formular, Warnung beim Sichern.
+
 Die urheberrechtliche Nennung des Originalautors steht weiterhin in dieser
 Datei, im README, in der Hilfeseite und im Kopf der Python-Dateien.
 

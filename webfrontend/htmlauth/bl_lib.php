@@ -246,7 +246,21 @@ function bl_defaults()
         'beacon'             => '1',
         'batterie'           => '0',
         'batterie_uhrzeit'   => '04:00',
+        // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026), ab Werk aus
+        'wlan_kopplung'      => '0',
+        'wlan_zuordnung'     => '',
     );
+}
+
+/**
+ * Schluessel, die eine aeltere Konfiguration oder Sicherung noch nicht kennt
+ * (Verbesserungsbau 30.09.2026). Fehlen sie, gilt die Werkseinstellung - das
+ * ist kein Mangel: die Zeile "Konfiguration heil" bleibt gruen, und eine
+ * Sicherung aus 1.3.21 wird weiter zurueckgespielt.
+ */
+function bl_schluessel_spaeter()
+{
+    return array('wlan_kopplung', 'wlan_zuordnung');
 }
 
 /**
@@ -297,6 +311,8 @@ function bl_regeln()
         'beacon'             => array('schalter'),
         'batterie'           => array('schalter'),
         'batterie_uhrzeit'   => array('muster', '/^([01]?\d|2[0-3]):[0-5]\d$/'),
+        'wlan_kopplung'      => array('schalter'),
+        'wlan_zuordnung'     => array('zuordnung'),
     );
 }
 
@@ -356,6 +372,32 @@ function bl_wert_pruefen($k, $roh)
             return in_array($w, $r[1], true) ? array(true, $w, '') : array(false, '', 'muster');
         case 'muster':
             return preg_match($r[1], $w) ? array(true, $w, '') : array(false, '', 'muster');
+        case 'zuordnung':
+            // "<WLAN-Name>=<Person>, ..." (Verbesserungsbau 30.09.2026): je Seite
+            // die Zeichen eines MQTT-Themas, jeder Name hoechstens einmal,
+            // hoechstens 20 Paare. Leer ist zulaessig. Abgewiesen, nicht
+            // zurechtgebogen; nur die Leerzeichen um , und = fallen weg.
+            if ($w === '') {
+                return array(true, '', '');
+            }
+            $bl_zu = array();
+            $bl_wl = array();
+            $bl_pe = array();
+            foreach (preg_split('/\s*,\s*/', $w) as $bl_paar) {
+                if (!preg_match('/^([A-Za-z0-9_-]{1,40})\s*=\s*([A-Za-z0-9_-]{1,40})$/', $bl_paar, $bl_m)) {
+                    return array(false, '', 'muster');
+                }
+                if (isset($bl_wl[$bl_m[1]]) || isset($bl_pe[$bl_m[2]])) {
+                    return array(false, '', 'doppelt');
+                }
+                $bl_wl[$bl_m[1]] = true;
+                $bl_pe[$bl_m[2]] = true;
+                $bl_zu[] = $bl_m[1] . '=' . $bl_m[2];
+            }
+            if (count($bl_zu) > 20) {
+                return array(false, '', 'grenze');
+            }
+            return array(true, implode(', ', $bl_zu), '');
         case 'text':
             return bl_unzulaessige_zeichen($roh) ? array(false, '', 'zeichen')
                                                  : array(true, $w, '');
@@ -471,6 +513,9 @@ function bl_retain()
         // -- Personen und zweiter Themenzweig je Scanner
         'person/present'      => true,
         'person/last_seen_ts' => true,
+        // -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026)
+        'person/anwesend_gesamt' => true,
+        'person/quelle'          => true,
         'scanner/present'     => true,
 
         // -- Messwerte mit Zeitbezug: NICHT retained
@@ -1742,18 +1787,59 @@ function bl_gesendete_themen()
     return array_keys($out);
 }
 
-/** Logdatei-Kandidaten. */
-function bl_log_file()
+/**
+ * Die Protokolle des Plugins, benannt (Verbesserungsbau 30.09.2026, a2).
+ *
+ * Bis 1.3.21 zeigte der Reiter Logdateien nur die juengste *.log-Datei. Seit
+ * 1.3.20 gibt es aber zwei: ble_scanner_ng.log schreibt der Dienst selbst,
+ * ble_scanner_ng_start.log fuellen nur die Startwege (daemon, Waechter,
+ * Oberflaeche, postinstall/postupgrade) mit dem, was VOR dem Dienst scheitert.
+ * Je nach Zeitpunkt stand die eine oder die andere da, ohne Namen.
+ *
+ * Rueckgabe: Liste von array('art' => dienst|start|weitere, 'datei' => Pfad),
+ * in fester Reihenfolge: Dienst, Start, dann jede weitere *.log-Datei des
+ * Ordners, juengste zuerst. Nur Dateien, die es gibt.
+ */
+function bl_log_dateien()
 {
-    $c = glob(bl_paths()['logdir'] . '/*.log');
-    if (!$c) {
-        return '';
+    $ordner = bl_paths()['logdir'];
+    $aus = array();
+    $bekannt = array('dienst' => $ordner . '/ble_scanner_ng.log',
+                     'start'  => $ordner . '/ble_scanner_ng_start.log');
+    foreach ($bekannt as $art => $datei) {
+        if (is_file($datei)) {
+            $aus[] = array('art' => $art, 'datei' => $datei);
+        }
     }
-    usort($c, function ($a, $b) {
+    $rest = array();
+    foreach ((array) glob($ordner . '/*.log') as $datei) {
+        if (is_string($datei) && is_file($datei) && !in_array($datei, $bekannt, true)) {
+            $rest[] = $datei;
+        }
+    }
+    usort($rest, function ($a, $b) {
         $fa = @filemtime($a); $fb = @filemtime($b);
         return ($fb ?: 0) - ($fa ?: 0);
     });
-    return $c[0];
+    foreach ($rest as $datei) {
+        $aus[] = array('art' => 'weitere', 'datei' => $datei);
+    }
+    return $aus;
+}
+
+/**
+ * Das Dienstprotokoll - die Datei, die die Kappung betrifft ('' = keins).
+ * Bis 1.3.21 die juengste *.log-Datei, also oft das Startprotokoll, das gar
+ * nicht gekappt wird; die Pruefzeile "Protokoll" mass dann die falsche Datei.
+ */
+function bl_log_file()
+{
+    foreach (bl_log_dateien() as $l) {
+        if ($l['art'] === 'dienst') {
+            return $l['datei'];
+        }
+    }
+    return '';
 }
 
 /**
@@ -2244,17 +2330,22 @@ function bl_sicherung_bauen($cfg, $tags)
     return $aus;
 }
 
-function bl_sicherung_lesen($roh)
+function bl_sicherung_lesen($roh, &$namen = null)
 {
+    // X-3 (Verbesserungsbau 30.09.2026): zu jeder Beanstandung ein NAME, nie
+    // ein Wert - fuer die Warnung beim Sichern (bl_rueckspiel_altwerte()).
+    $namen = array();
     $mangel = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
+        $namen[] = '_';
         return array(null, array(bl_t('TEXT.SICH_KEIN_JSON')), 0, array());
     }
     /* Fremdes wird VOR dem Zusammenfuehren abgelehnt: der Kopf muss dieses
      * Plugin nennen (seit 1.3.20). */
     if (!isset($daten['_']) || !is_array($daten['_']) || !isset($daten['_']['plugin'])
         || $daten['_']['plugin'] !== 'ble_scanner_ng') {
+        $namen[] = '_';
         return array(null, array(bl_t('TEXT.SICH_KEIN_KOPF')), 0, array());
     }
     $neu = bl_defaults();
@@ -2267,6 +2358,7 @@ function bl_sicherung_lesen($roh)
         if (!in_array($k, $bekannt, true)) {
             $mangel[] = sprintf(bl_t('TEXT.SICH_FREMD'),
                                  htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
+            $namen[] = (string) $k;
             continue;
         }
         /* Jeder Wert mit denselben Regeln wie das Formular, zuerst is_string
@@ -2278,6 +2370,7 @@ function bl_sicherung_lesen($roh)
                                 is_string($w) || is_int($w)
                                     ? htmlspecialchars(bl_kuerzen((string) $w, 40), ENT_QUOTES, 'UTF-8')
                                     : gettype($w));
+            $namen[] = (string) $k;
             continue;
         }
         $neu[$k] = $wert;
@@ -2285,6 +2378,7 @@ function bl_sicherung_lesen($roh)
     }
     if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
         $mangel[] = bl_t('TEXT.SICH_SCHWELLEN');
+        $namen[] = 'rssi_nah/rssi_mittel';
     }
     /* Die Tags (seit 1.3.20, O3): jeder einzeln geprueft, doppelte Kennungen
      * abgewiesen. Eine Datei OHNE den Schluessel "tags" ist unvollstaendig -
@@ -2292,8 +2386,10 @@ function bl_sicherung_lesen($roh)
     $tags = array();
     if (!array_key_exists('tags', $daten)) {
         $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
+        $namen[] = 'tags';
     } elseif (!is_array($daten['tags'])) {
         $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
+        $namen[] = 'tags';
     } else {
         $gesehen = array();
         foreach (array_values($daten['tags']) as $nr => $t) {
@@ -2301,10 +2397,12 @@ function bl_sicherung_lesen($roh)
             if ($tag === null) {
                 $mangel[] = sprintf(bl_t('TEXT.SICH_TAG'), $nr + 1,
                                     htmlspecialchars($grund, ENT_QUOTES, 'UTF-8'));
+                $namen[] = 'tags[' . ($nr + 1) . '].' . $grund;
                 continue;
             }
             if (isset($gesehen[$tag['kennung']])) {
                 $mangel[] = sprintf(bl_t('MANGEL.DOPPELT'), $tag['kennung']);
+                $namen[] = 'tags[' . ($nr + 1) . '].kennung';
                 continue;
             }
             $gesehen[$tag['kennung']] = true;
@@ -2313,6 +2411,7 @@ function bl_sicherung_lesen($roh)
     }
     if ($anzahl === 0) {
         $mangel[] = bl_t('TEXT.SICH_LEER');
+        $namen[] = '_';
     }
     /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
      *
@@ -2333,15 +2432,40 @@ function bl_sicherung_lesen($roh)
      * eigenen Datei - faellt nicht auf Werk zurueck und darf hier fehlen. */
     $fehlend = array();
     foreach (array_keys(bl_defaults()) as $fk) {
-        if (!array_key_exists($fk, $daten)) {
+        if (!array_key_exists($fk, $daten) && !in_array($fk, bl_schluessel_spaeter(), true)) {
             $fehlend[] = $fk;
         }
     }
     if ($fehlend) {
         $mangel[] = sprintf(bl_t('TEXT.SICH_FEHLEND'), count($fehlend),
             htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
+        foreach ($fehlend as $fk) {
+            $namen[] = $fk;
+        }
     }
+    $namen = array_values(array_unique($namen));
     return array($mangel ? null : $neu, $mangel, $anzahl, $tags);
+}
+
+/**
+ * Wuerde die eigene Sicherung das eigene Zurueckspielen bestehen? (X-3,
+ * Verbesserungsbau 30.09.2026). Gebaut wie beim Sichern, geprueft mit
+ * DERSELBEN Funktion wie beim Zurueckspielen. Rueckgabe: die Namen der
+ * beanstandeten Einstellungen bzw. Tags (leer = alles in Ordnung), nie Werte.
+ * Anlass: ein Wert, der von Hand oder aus einer Vorfassung in der Datei
+ * steht, liess sich sichern, aber nicht zurueckspielen - das merkte man erst
+ * beim Umzug.
+ */
+function bl_rueckspiel_altwerte($cfg, $tags)
+{
+    $js = json_encode(bl_sicherung_bauen($cfg, $tags),
+                      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    if ($js === false) {
+        return array('_');
+    }
+    $namen = array();
+    bl_sicherung_lesen($js, $namen);
+    return $namen;
 }
 
 
@@ -2412,6 +2536,234 @@ function bl_abbild_lage($cfg, $pid)
  * die eingetippten Tag-Zeilen - keine Zugangsdaten (diese Linie fuehrt keine,
  * und der Probewert zeigt nur Adresse und Name des Miniservers).
  */
+/* ==================================================================
+ * Eingaben nach einer Beanstandung (Verbesserungsbau 30.09.2026, X-2;
+ * Regeln/04 "Nach einer Beanstandung stehen die eingetippten Werte wieder
+ * im Formular"; Entscheidung 16: gespeichert wird dann nichts)
+ *
+ * Nur nach einer Beanstandung, nur das eine Formular und nur seine Felder.
+ * Diese Linie fuehrt keine Zugangsdaten und kein Token - es gibt kein Feld,
+ * das nicht mitreisen duerfte.
+ * ================================================================== */
+
+/** Die Felder je Formular: array(text => [...], haken => [...]). */
+function bl_eingabe_felder($form)
+{
+    $felder = array(
+        'settings' => array(
+            'text'  => array('loxberry_id', 'adapter', 'betriebsart', 'wachhund_stille',
+                             'discovery_rssi', 'log_kappung_kb', 'intervall', 'abwesenheit_nach',
+                             'aktualisierung', 'ankunft_sichtungen', 'rssi_minimum', 'rssi_nah',
+                             'rssi_mittel', 'glaettung_fenster', 'hysterese_db', 'daempfung',
+                             'batterie_uhrzeit', 'ereignisse_tage', 'scanner_name',
+                             'raum_hysterese_db', 'raum_ausgleich_db', 'wlan_zuordnung'),
+            'haken' => array('http_push', 'wachhund', 'glaettung', 'beacon', 'entfernung',
+                             'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung'),
+        ),
+        'mqtt' => array(
+            'text'  => array('themenpraefix'),
+            'haken' => array('mqtt'),
+        ),
+    );
+    return isset($felder[$form]) ? $felder[$form] : null;
+}
+
+/** Ein eingetippter Wert, der mitreisen darf (UTF-8, hoechstens 256 Byte). */
+function bl_eingabe_tauglich($v)
+{
+    return is_string($v) && strlen($v) <= 256 && preg_match('//u', $v) === 1;
+}
+
+/**
+ * Die eingetippten Werte eines Formulars aus $_POST, fuer die Einmalmeldung.
+ * $bean_tags: je Zeilenindex der Tag-Tabelle die beanstandeten Felder.
+ */
+function bl_eingaben_sammeln($form, $beanstandet, $bean_tags = array())
+{
+    $f = bl_eingabe_felder($form);
+    if ($f === null || !$beanstandet) {
+        return null;
+    }
+    $werte = array();
+    foreach ($f['text'] as $feld) {
+        if (isset($_POST[$feld]) && bl_eingabe_tauglich($_POST[$feld])) {
+            $werte[$feld] = $_POST[$feld];
+        }
+    }
+    foreach ($f['haken'] as $feld) {
+        $werte[$feld] = isset($_POST[$feld]) ? '1' : '';
+    }
+    $tags = array();
+    if ($form === 'settings') {
+        $feld = function ($name, $i) {
+            return (isset($_POST[$name]) && is_array($_POST[$name]) && isset($_POST[$name][$i])
+                    && bl_eingabe_tauglich($_POST[$name][$i])) ? $_POST[$name][$i] : '';
+        };
+        $kenn = isset($_POST['tag_kennung']) && is_array($_POST['tag_kennung']) ? $_POST['tag_kennung'] : array();
+        foreach ($kenn as $i => $_k) {
+            if (count($tags) >= 200) {
+                break;
+            }
+            $z = array('kennung' => $feld('tag_kennung', $i), 'alt' => $feld('tag_alt', $i),
+                       'name' => $feld('tag_name', $i),
+                       'aktiv' => (isset($_POST['tag_aktiv']) && is_array($_POST['tag_aktiv'])
+                                   && !empty($_POST['tag_aktiv'][$i])) ? '1' : '0',
+                       'weg' => (isset($_POST['tag_weg']) && is_array($_POST['tag_weg'])
+                                 && !empty($_POST['tag_weg'][$i])) ? '1' : '',
+                       'opt' => array());
+            foreach (bl_tag_optionen() as $k) {
+                $z['opt'][$k] = $feld('tag_' . $k, $i);
+            }
+            // Eine unberuehrte neue Zeile reist nicht mit.
+            if (trim($z['kennung']) === '' && $z['alt'] === '' && trim($z['name']) === '') {
+                continue;
+            }
+            $z['bean'] = isset($bean_tags[$i]) && is_array($bean_tags[$i])
+                       ? array_values(array_unique($bean_tags[$i])) : array();
+            $tags[] = $z;
+        }
+        // Aus dem Suchlauf angehakte Geraete: als neue Zeile, damit sie nicht verloren gehen.
+        $neue = isset($_POST['neu_kennung']) && is_array($_POST['neu_kennung']) ? $_POST['neu_kennung'] : array();
+        foreach ($neue as $roh => $_an) {
+            if (count($tags) >= 200 || !bl_eingabe_tauglich((string) $roh)) {
+                continue;
+            }
+            $nn = isset($_POST['neu_name']) && is_array($_POST['neu_name']) && isset($_POST['neu_name'][$roh])
+                  && bl_eingabe_tauglich($_POST['neu_name'][$roh]) ? $_POST['neu_name'][$roh] : '';
+            $tags[] = array('kennung' => (string) $roh, 'alt' => '', 'name' => $nn, 'aktiv' => '1',
+                            'weg' => '', 'opt' => array(), 'bean' => array());
+        }
+    }
+    return array('form' => $form, 'werte' => $werte,
+                 'beanstandet' => array_values(array_unique(array_map('strval', $beanstandet))),
+                 'tags' => $tags);
+}
+
+/** Die Eingaben aus der Einmalmeldung annehmen (nur bekannte Felder, nur Text). */
+function bl_eingaben_setzen($roh = null)
+{
+    static $ein = array('form' => '', 'werte' => array(), 'beanstandet' => array(), 'tags' => array());
+    if ($roh === null) {
+        return $ein;
+    }
+    if (!is_array($roh) || !isset($roh['form']) || !is_string($roh['form'])
+        || bl_eingabe_felder($roh['form']) === null) {
+        return $ein;
+    }
+    $f = bl_eingabe_felder($roh['form']);
+    $bekannt = array_merge($f['text'], $f['haken']);
+    $werte = array();
+    if (isset($roh['werte']) && is_array($roh['werte'])) {
+        foreach ($roh['werte'] as $k => $v) {
+            if (in_array((string) $k, $bekannt, true) && is_string($v)) {
+                $werte[(string) $k] = $v;
+            }
+        }
+    }
+    $bean = array();
+    if (isset($roh['beanstandet']) && is_array($roh['beanstandet'])) {
+        foreach ($roh['beanstandet'] as $b) {
+            if (is_string($b) && (in_array($b, $f['text'], true) || $b === 'tags')) {
+                $bean[] = $b;
+            }
+        }
+    }
+    $tags = array();
+    if ($roh['form'] === 'settings' && isset($roh['tags']) && is_array($roh['tags'])) {
+        foreach (array_slice($roh['tags'], 0, 200) as $t) {
+            if (!is_array($t)) {
+                continue;
+            }
+            $s = function ($k) use ($t) {
+                return isset($t[$k]) && is_string($t[$k]) ? $t[$k] : '';
+            };
+            $opt = array();
+            foreach (bl_tag_optionen() as $k) {
+                if (isset($t['opt'][$k]) && is_string($t['opt'][$k]) && $t['opt'][$k] !== '') {
+                    $opt[$k] = $t['opt'][$k];
+                }
+            }
+            $tb = array();
+            if (isset($t['bean']) && is_array($t['bean'])) {
+                foreach ($t['bean'] as $b) {
+                    if (is_string($b) && in_array($b, array_merge(array('kennung', 'name'), bl_tag_optionen()), true)) {
+                        $tb[] = $b;
+                    }
+                }
+            }
+            $tags[] = array('art' => '', 'kennung' => $s('kennung'), 'mac' => '', 'name' => $s('name'),
+                            'aktiv' => $s('aktiv') === '1' ? '1' : '0', 'opt' => $opt,
+                            '_alt' => $s('alt'), '_weg' => $s('weg') === '1', '_bean' => $tb);
+        }
+    }
+    if ($bean) {
+        $ein = array('form' => $roh['form'], 'werte' => $werte, 'beanstandet' => $bean, 'tags' => $tags);
+    }
+    return $ein;
+}
+
+/** Welches Formular zeigt gerade Eingaben ('' = keines)? */
+function bl_eingaben_aktiv()
+{
+    $ein = bl_eingaben_setzen();
+    return $ein['form'];
+}
+
+/** Die Tag-Zeilen, wie sie eingetippt waren (nur fuer das Formular Einstellungen). */
+function bl_eingabe_tagzeilen()
+{
+    $ein = bl_eingaben_setzen();
+    return $ein['form'] === 'settings' ? $ein['tags'] : array();
+}
+
+/** Wert eines Textfelds: die Eingabe nach einer Beanstandung, sonst der gespeicherte. */
+function bl_eingabe($form, $feld, $gespeichert)
+{
+    $ein = bl_eingaben_setzen();
+    if ($ein['form'] === $form && array_key_exists($feld, $ein['werte'])) {
+        return $ein['werte'][$feld];
+    }
+    return $gespeichert;
+}
+
+/** Haken: nach einer Beanstandung der abgeschickte Stand, sonst der gespeicherte. */
+function bl_eingabe_an($form, $feld, $gespeichert)
+{
+    $ein = bl_eingaben_setzen();
+    if ($ein['form'] === $form && array_key_exists($feld, $ein['werte'])) {
+        return $ein['werte'][$feld] === '1';
+    }
+    return (bool) $gespeichert;
+}
+
+/** Das beanstandete Feld wird rot umrandet (Klasse sm-beanstandet). */
+function bl_markierung($feld)
+{
+    $ein = bl_eingaben_setzen();
+    return in_array($feld, $ein['beanstandet'], true)
+        ? ' class="sm-beanstandet" aria-invalid="true"' : '';
+}
+
+/** Dasselbe fuer ein Feld einer eingetippten Tag-Zeile. */
+function bl_tag_markierung($tag, $feld)
+{
+    return (isset($tag['_bean']) && is_array($tag['_bean']) && in_array($feld, $tag['_bean'], true))
+        ? ' class="sm-beanstandet" aria-invalid="true"' : '';
+}
+
+/** Die Zusatzangaben einer Zeile aufgeklappt, wenn eine davon beanstandet ist. */
+function bl_tag_offen($tag)
+{
+    if (isset($tag['_bean']) && is_array($tag['_bean'])) {
+        foreach ($tag['_bean'] as $b) {
+            if ($b !== 'kennung' && $b !== 'name') {
+                return ' open';
+            }
+        }
+    }
+    return '';
+}
+
 function bl_einmal_datei()
 {
     $p = bl_paths();
@@ -2461,6 +2813,8 @@ function bl_einmal_lesen()
     $aus['saved'] = !empty($d['saved']);
     $aus['such'] = isset($d['such']) && is_array($d['such']) ? $d['such'] : null;
     $aus['tags'] = isset($d['tags']) && is_array($d['tags']) ? $d['tags'] : null;
+    // X-2 (Verbesserungsbau 30.09.2026): geprueft wird in bl_eingaben_setzen().
+    $aus['eingaben'] = isset($d['eingaben']) && is_array($d['eingaben']) ? $d['eingaben'] : null;
     return $aus;
 }
 
@@ -2475,6 +2829,10 @@ function bl_zweig_themen()
     return array(
         'person/<P>/present'      => array('s' => 'THEMA.P_PRESENT', 'art' => 'digital'),
         'person/<P>/last_seen_ts' => array('s' => 'THEMA.P_LAST_SEEN_TS', 'art' => 'analog'),
+        // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026), nur
+        // bei eingeschalteter Kopplung
+        'person/<P>/anwesend_gesamt' => array('s' => 'THEMA.P_GESAMT', 'art' => 'digital'),
+        'person/<P>/quelle'          => array('s' => 'THEMA.P_QUELLE', 'art' => 'text'),
         'scanner/<S>/<T>/present' => array('s' => 'THEMA.SC_PRESENT', 'art' => 'digital'),
         'scanner/<S>/<T>/rssi'    => array('s' => 'THEMA.SC_RSSI', 'art' => 'analog'),
     );

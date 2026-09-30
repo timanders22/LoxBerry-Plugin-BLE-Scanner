@@ -475,6 +475,111 @@ def alles_pruefen():
     d6.auswerten(erzwingen=True)
     p.gleich(G, "und als abwesend, wenn keiner mehr da ist",
              gesendet6.get("person/Anna/present"), "0")
+    # a1 (Verbesserungsbau 30.09.2026): person/<P>/last_seen_ts wie
+    # <T>/last_seen_ts - beim Wechsel sofort, sonst hoechstens alle 60 s.
+    # Gegenprobe: ohne abstand=60 wird die mittlere Zeile rot.
+    gesendet6.clear()
+    d6.letzter_stand.clear()
+    d6.gesendet_um.clear()
+    _sichtung_setzen(d6, "11:22:33:44:55:66", -70, 10)
+    d6.auswerten(erzwingen=False)
+    kommt = gesendet6.get("person/Anna/last_seen_ts")
+    p.merke(G, "person/<P>/last_seen_ts geht beim Kommen sofort hinaus",
+            kommt not in (None, "", "0"), "gemessen: %s" % kommt)
+    gesendet6.clear()
+    _sichtung_setzen(d6, "11:22:33:44:55:66", -70, 0)
+    d6.auswerten(erzwingen=False)
+    p.merke(G, "eine 10 s juengere Sichtung sendet es nicht erneut (hoechstens alle 60 s)",
+            "person/Anna/last_seen_ts" not in gesendet6,
+            "gesendet: %s" % gesendet6.get("person/Anna/last_seen_ts"))
+    gesendet6.clear()
+    _sichtung_setzen(d6, "11:22:33:44:55:66", -70, 100)
+    d6.auswerten(erzwingen=False)
+    p.merke(G, "beim Gehen geht es im selben Durchlauf mit",
+            gesendet6.get("person/Anna/present") == "0"
+            and gesendet6.get("person/Anna/last_seen_ts") not in (None, ""),
+            "present %s, last_seen_ts %s" % (gesendet6.get("person/Anna/present"),
+                                             gesendet6.get("person/Anna/last_seen_ts")))
+
+    # =====================================================================
+    G = "Anwesenheit mit dem WLAN-Scanner"
+    # Verbesserungsbau 30.09.2026 (Anwesenheit-1, ab Werk aus). Die Themen des
+    # WiFi-Scanners sind in dessen check.pl belegt (wifi_ng/<Name> retained,
+    # status/ok und status/ts je Lauf ohne Retain, status/interval retained).
+    p.gleich(G, "BLE da, WLAN weg: da (Quelle ble)", gem.anwesenheit_gesamt(1, 0), (1, "ble"))
+    p.gleich(G, "BLE weg, WLAN da: da (Quelle wlan)", gem.anwesenheit_gesamt(0, 1), (1, "wlan"))
+    p.gleich(G, "beide da", gem.anwesenheit_gesamt(1, 1), (1, "ble+wlan"))
+    p.gleich(G, "beide weg: weg", gem.anwesenheit_gesamt(0, 0), (0, "ble+wlan"))
+    p.gleich(G, "WLAN ohne Aussage: es zaehlt BLE", gem.anwesenheit_gesamt(0, None), (0, "ble"))
+    p.gleich(G, "keine Aussage: -", gem.anwesenheit_gesamt(None, None), ("-", "-"))
+    p.gleich(G, "Zuordnung lesen (Leerzeichen, kaputtes Paar)",
+             gem.wlan_zuordnung_lesen("Anna_Handy = Anna, Bernd=Bernd,kaputt,x=Anna"),
+             [("Anna_Handy", "Anna"), ("Bernd", "Bernd")])
+    p.gleich(G, "Frist: 3x Takt, unbekannt 3 min, mindestens 180 s",
+             (gem.wlan_frist(3), gem.wlan_frist(0), gem.wlan_frist(1)), (540, 540, 180))
+    p.gleich(G, "anwesend_gesamt und quelle sind retained, auch mit -",
+             (gem.retain_fuer("person/Anna/anwesend_gesamt", "-"),
+              gem.retain_fuer("person/Anna/quelle", "ble")), (True, True))
+
+    class _Nachricht(object):
+        def __init__(self, thema, wert, retain=False):
+            self.topic = gem.WLAN_PRAEFIX + "/" + thema
+            self.payload = wert.encode("utf-8")
+            self.retain = retain
+
+    cfg_w = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel|person=Anna\n")
+    dw0, gw0, _ow0 = _dienst_bauen(cfg_w)
+    _sichtung_setzen(dw0, "AA:BB:CC:DD:EE:FF", -70, 0)
+    dw0.auswerten(erzwingen=True)
+    p.merke(G, "ab Werk aus: kein anwesend_gesamt, keine quelle",
+            not any(k.endswith(("/anwesend_gesamt", "/quelle")) for k in gw0),
+            ", ".join(k for k in gw0 if k.startswith("person/")))
+    dw, gw, _ow = _dienst_bauen(cfg_w + "wlan_kopplung=1\nwlan_zuordnung=Anna_Handy=Anna,Gast=Gast\n")
+
+    def _wl(thema, wert, retain=False):
+        dw.wlan_nachricht(_Nachricht(thema, wert, retain))
+
+    def _paar(person):
+        return (gw.get("person/%s/anwesend_gesamt" % person), gw.get("person/%s/quelle" % person))
+
+    _sichtung_setzen(dw, "AA:BB:CC:DD:EE:FF", -70, 0)
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "WLAN-Scanner noch nie gehoert, BLE da: 1 aus ble", _paar("Anna"), ("1", "ble"))
+    p.gleich(G, "Person ohne Tag, WLAN ohne Aussage: -", _paar("Gast"), ("-", "-"))
+    p.gleich(G, "Lage im Abbild: schweigt (nie)",
+             (dw.wlan_lage.get("frisch"), dw.wlan_lage.get("grund")), (0, "nie"))
+    _wl("status/ts", str(int(time.time())), retain=True)
+    _wl("status/ok", "1", retain=True)
+    _wl("Anna_Handy", "1", retain=True)
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "ein zurueckbehaltenes status/ts macht den Scanner nicht frisch",
+             dw.wlan_lage.get("frisch"), 0)
+    _wl("status/ok", "1")
+    _wl("status/ts", str(int(time.time())))
+    _sichtung_setzen(dw, "AA:BB:CC:DD:EE:FF", -70, 100)
+    gw.clear()
+    dw.letzter_stand.clear()
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "WLAN da, BLE weg: 1 aus wlan", _paar("Anna"), ("1", "wlan"))
+    p.gleich(G, "Lage im Abbild: frisch", dw.wlan_lage.get("frisch"), 1)
+    _wl("Anna_Handy", "0")
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "beide weg: 0 aus ble+wlan", _paar("Anna"), ("0", "ble+wlan"))
+    _wl("status/ok", "0")
+    _wl("Anna_Handy", "1")
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "status/ok 0: WLAN ohne Aussage, es zaehlt BLE", _paar("Anna"), ("0", "ble"))
+    _wl("status/ok", "1")
+    _wl("status/ts", str(int(time.time())))
+    with dw.wlan_sperre:
+        dw.wlan["ts_empfang"] -= 10000
+    dw.auswerten(erzwingen=True)
+    p.gleich(G, "Lebenszeichen aelter als die Frist: es zaehlt nur BLE",
+             (_paar("Anna"), dw.wlan_lage.get("grund")), (("0", "ble"), "alt"))
+    p.merke(G, "nie eine leere Nutzlast auf anwesend_gesamt oder quelle",
+            all(v != "" for k, v in gw.items() if k.endswith(("/anwesend_gesamt", "/quelle"))),
+            ", ".join("%s=%s" % (k, v) for k, v in sorted(gw.items()) if k.startswith("person/")))
 
     # =====================================================================
     G = "HTTP-Weg"

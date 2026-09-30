@@ -1,11 +1,32 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.20
+Version 1.3.21
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.21
+
+Verbesserungen aus dem Durchgang vom 30.09.2026 (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`). Gemessen an Attrappen
+für bluez, Broker und WLAN-Scanner unter PHP 7.4, 8.3 und 8.5; nicht am Gerät.
+
+* `person/<P>/last_seen_ts` geht beim Wechsel sofort hinaus, sonst höchstens
+  alle 60 s (bisher in jedem Takt).
+* Reiter Logdateien: Dienst- und Startprotokoll getrennt und benannt; die
+  Prüfzeile „Protokoll“ misst jetzt das Dienstprotokoll.
+* Fehlen Bluetooth-Adapter oder bluez, steht oben ein Kasten mit dem nötigen
+  Befehl zum Abtippen.
+* **Neu, ab Werk aus: Anwesenheit zusammen mit dem WiFi-Scanner NG.** Je Person
+  lässt sich ein WLAN-Gerät zuordnen; `person/<P>/anwesend_gesamt` ist 1, wenn
+  eine Quelle „da“ sagt, 0 wenn beide „weg“ sagen, und `…/quelle` nennt `ble`
+  oder `wlan`. Schweigt der WiFi-Scanner, zählt BLE allein, und der Reiter Test
+  sagt es. Der WiFi-Scanner muss dafür über MQTT senden (nicht UDP).
+* Nach einer Beanstandung wird nichts gespeichert; die eingetippten Werte stehen
+  wieder im Formular. „Einstellungen sichern“ warnt gelb bei Werten, die das
+  eigene Zurückspielen nicht bestünden.
 
 ## Neu in 1.3.20 — der Dienst kommt nach dem Systemstart wieder, und ein Wächter hält ihn am Leben
 
@@ -1148,14 +1169,43 @@ Auf Wunsch dazu `distance`, `battery`, `battery_ts`, `raum`, `raum_seit` und
 
 Allgemein: `server/online`, `server/ok`, `server/ts`, `server/adapter_ok`,
 `server/letzte_sichtung`, `server/version`, `server/scanner`,
-`summary/present`, `summary/tags`, `summary/tags_gesamt`, `summary/names` und
-`person/<Name>/present`.
+`summary/present`, `summary/tags`, `summary/tags_gesamt`, `summary/names`,
+`person/<Name>/present` und `person/<Name>/last_seen_ts` (wie `last_seen_ts`
+je Tag: beim Wechsel der Anwesenheit sofort, sonst höchstens alle 60 s).
 
 Nie zurückbehalten sind die Messwerte (`rssi`, `rssi_avg`, `distance`,
 `last_seen`, `sensor/…`), das Lebenszeichen `server/ts`, `summary/names` und —
 seit 1.3.19 — `server/ok` und `server/adapter_ok`. `server/online` ist der
 Letzte Wille: zurückbehalten, `1` bei jeder Anmeldung, `0` setzt der Broker; die
 Deinstallation räumt es ab. Die Tabelle steht im Reiter *MQTT*.
+
+## Anwesenheit mit dem WLAN-Scanner (ab Werk aus)
+
+Im Reiter *Einstellungen*, Abschnitt „Anwesenheit mit dem WLAN-Scanner“, lässt
+sich je Person die Anwesenheit aus diesem Plugin mit der aus dem Plugin
+**WiFi-Scanner NG** zusammenführen. Ab Werk ist das aus; eine eingerichtete
+Anlage sendet nach dem Update nichts Neues.
+
+* **Quelle:** nur die MQTT-Themen des WiFi-Scanners, nie seine Dateien:
+  `wifi_ng/<Name>` (0/1, retained), das Lebenszeichen `wifi_ng/status/ts` und
+  `wifi_ng/status/ok` (je Lauf, ohne Retain) und `wifi_ng/status/interval`
+  (Takt in Minuten). Belegt in WiFi-Scanner NG 3.2.9, `bin/check.pl` und
+  `bin/mqtt_listener.pl`. Der WiFi-Scanner sendet nur dann über MQTT, wenn dort
+  **UDP ausgeschaltet** ist.
+* **Einstellung:** der Haken „Anwesenheit mit dem WLAN-Scanner zusammenführen“
+  und die Zuordnung `WLAN-Name=Person, …` – links der Name, unter dem der
+  WiFi-Scanner die Person sendet, rechts der Name aus der Zusatzangabe
+  *Person* der Tags.
+* **Gesendet** je Zuordnung, beide retained:
+  `person/<Person>/anwesend_gesamt` – 1, wenn eine Quelle „da“ sagt; 0, wenn
+  beide „weg“ sagen; `-` ohne Aussage – und `person/<Person>/quelle` – `ble`,
+  `wlan`, `ble+wlan` oder `-`.
+* **Schweigt der WiFi-Scanner** (kein Lebenszeichen seit dreimal seinem Takt,
+  mindestens 3 Minuten, oder `status/ok` ungleich 1), zählt nur BLE; der Reiter
+  *Test* sagt es in einer eigenen Zeile. Ein zurückbehaltenes Lebenszeichen
+  aus einer älteren WiFi-Scanner-Fassung zählt nicht als Lebenszeichen.
+* **Abschalten** oder eine Person aus der Zuordnung nehmen: der Dienst räumt
+  ihre beiden Themen am Broker ab (mit Nachlesen); die Deinstallation ebenso.
 
 ## Dateien
 

@@ -41,6 +41,12 @@ $bl_such    = null;
 $bl_test_titel = '';
 $bl_test_text  = '';
 $bl_eingetippt = null;   // Tag-Zeilen aus dem Suchlauf, ueber die Umleitung getragen
+// X-2 (Verbesserungsbau 30.09.2026): welches Formular, welche Felder und
+// Tag-Zeilen beanstandet wurden - daraus reisen die Eingaben mit der
+// Einmalmeldung. Entscheidung 16: gespeichert wird dann nichts.
+$bl_eingaben_form = '';
+$bl_beanstandet   = array();
+$bl_bean_tags     = array();
 $bl_ist_post = (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST');
 
 /* ---------------------------------------------------------------- *
@@ -61,6 +67,10 @@ if (!$bl_ist_post) {
         $bl_test_text = $bl_einmal['test_text'];
         $bl_such = $bl_einmal['such'];
         $bl_eingetippt = $bl_einmal['tags'];
+        // X-2: nach einer Beanstandung die eingetippten Werte zeigen.
+        if (is_array($bl_einmal['eingaben'])) {
+            bl_eingaben_setzen($bl_einmal['eingaben']);
+        }
     }
 }
 
@@ -165,8 +175,12 @@ function bl_feld_zahl($k, $roh, $bisher, $feld, &$mangel)
  * Bezeichnung eintrug und dann auf "Geräte suchen" drueckte, fand sie
  * danach nicht wieder, ohne jeden Hinweis.
  */
-function bl_tags_aus_post(&$mangel, $bestand = array())
+function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
 {
+    // X-2 (Verbesserungsbau 30.09.2026): $bean[Zeilenindex][] = Feld.
+    if (!is_array($bean)) {
+        $bean = array();
+    }
     $tags = array();
     $gesehen = array();
     $kenn  = isset($_POST['tag_kennung']) && is_array($_POST['tag_kennung']) ? $_POST['tag_kennung'] : array();
@@ -202,6 +216,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
                 // Eine GELEERTE Adresse loescht nichts; entfernt wird ueber
                 // den Haken "Entfernen" (Regeln/04, leeres Feld loescht nichts).
                 $mangel[] = sprintf(bl_t('MANGEL.KENNUNG_LEER'), $bezeichnung);
+                $bean[$i][] = 'kennung';
                 if (!isset($gesehen[$vorher['kennung']])) {
                     $gesehen[$vorher['kennung']] = true;
                     $tags[] = $vorher;
@@ -211,6 +226,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
         }
         list($art, $kennung) = bl_unzulaessige_zeichen($roh) ? array('', '') : bl_kennung($roh);
         if ($art === '') {
+            $bean[$i][] = 'kennung';
             // ABWEISEN und melden, nicht stillschweigend verwerfen.
             if ($vorher !== null) {
                 $mangel[] = sprintf(bl_t('MANGEL.KENNUNG_BLEIBT'), bl_saubere_eingabe($roh),
@@ -226,6 +242,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
         }
         if (isset($gesehen[$kennung])) {
             $mangel[] = sprintf(bl_t('MANGEL.DOPPELT'), $kennung);
+            $bean[$i][] = 'kennung';
             if ($vorher !== null && !isset($gesehen[$vorher['kennung']])) {
                 $gesehen[$vorher['kennung']] = true;
                 $tags[] = $vorher;
@@ -242,6 +259,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
             $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . bl_t('TEXT.SP_BEZEICHNUNG'),
                                 is_string($name_roh) ? bl_saubere_eingabe($name_roh) : '',
                                 $vorher !== null ? $vorher['name'] : '-');
+            $bean[$i][] = 'name';
             $name = $vorher !== null ? $vorher['name'] : null;
             if ($vorher === null) { $zeile_ok = false; }
         } else {
@@ -251,6 +269,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
         foreach ($erlaubt as $k) {
             $wert_roh = isset($_POST['tag_' . $k][$i]) ? $_POST['tag_' . $k][$i] : '';
             if (!is_string($wert_roh) || bl_unzulaessige_zeichen($wert_roh)) {
+                $bean[$i][] = $k;
                 $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . $k,
                                     is_string($wert_roh) ? bl_saubere_eingabe($wert_roh) : '',
                                     isset($vopt[$k]) ? $vopt[$k] : '-');
@@ -266,6 +285,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
         if (isset($opt['abw']) && (!ctype_digit($opt['abw']) || (int) $opt['abw'] < 5 || (int) $opt['abw'] > 3600)) {
             $mangel[] = sprintf(bl_t('MANGEL.TAG_ABW'), $kennung, $opt['abw'],
                                 isset($vopt['abw']) ? $vopt['abw'] : '-');
+            $bean[$i][] = 'abw';
             unset($opt['abw']);
             if (isset($vopt['abw'])) { $opt['abw'] = $vopt['abw']; }
             if ($vorher === null) { $zeile_ok = false; }
@@ -273,6 +293,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
         if (isset($opt['ref']) && (!bl_ganzzahl($opt['ref']) || (int) $opt['ref'] > 0 || (int) $opt['ref'] < -120)) {
             $mangel[] = sprintf(bl_t('MANGEL.TAG_REF'), $kennung, $opt['ref'],
                                 isset($vopt['ref']) ? $vopt['ref'] : '-');
+            $bean[$i][] = 'ref';
             unset($opt['ref']);
             if (isset($vopt['ref'])) { $opt['ref'] = $vopt['ref']; }
             if ($vorher === null) { $zeile_ok = false; }
@@ -287,6 +308,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array())
             $mangel[] = sprintf(bl_t('MANGEL.ALIAS_RESERVIERT'), $kennung,
                                 $opt['alias'], implode(', ', bl_reservierte_zweige()),
                                 isset($vopt['alias']) ? $vopt['alias'] : '-');
+            $bean[$i][] = 'alias';
             unset($opt['alias']);
             if (isset($vopt['alias'])) { $opt['alias'] = $vopt['alias']; }
             if ($vorher === null) { $zeile_ok = false; }
@@ -430,6 +452,16 @@ if ($bl_ist_post && isset($_POST['test']) && is_string($_POST['test'])) {
  * Handler; hier werden sie aus dem Bestand uebernommen. */
 if ($bl_ist_post && isset($_POST['save'])) {
     $neu = $bl_cfg;
+    // X-2: neue Beanstandungen seit dem letzten Merken gehoeren zu diesen Feldern.
+    $bl_n0 = count($bl_fehler);
+    $bl_merk = function (...$felder) use (&$bl_fehler, &$bl_beanstandet, &$bl_n0) {
+        if (count($bl_fehler) > $bl_n0) {
+            foreach ($felder as $f) {
+                $bl_beanstandet[] = $f;
+            }
+        }
+        $bl_n0 = count($bl_fehler);
+    };
 
     // Muster und Texte seit 1.3.20 gegen die ROHE Eingabe: bis 1.3.19 wurden
     // Anfuehrungszeichen vorher still entfernt, und aus "hc\"i0" wurde ein
@@ -443,6 +475,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
                                is_string($adapter_roh) ? bl_saubere_eingabe($adapter_roh) : '',
                                $bl_cfg['adapter']);
     }
+    $bl_merk('adapter');
 
     $betriebsart = isset($_POST['betriebsart']) && is_string($_POST['betriebsart']) ? $_POST['betriebsart'] : '';
     if (in_array($betriebsart, array('signal', 'abfrage'), true)) {
@@ -450,10 +483,12 @@ if ($bl_ist_post && isset($_POST['save'])) {
     } else {
         $bl_fehler[] = sprintf(bl_t('MANGEL.BETRIEBSART'), bl_saubere_eingabe($betriebsart));
     }
+    $bl_merk('betriebsart');
 
     $neu['http_push']   = isset($_POST['http_push']) ? '1' : '0';
     $neu['loxberry_id'] = bl_text_feld(isset($_POST['loxberry_id']) ? $_POST['loxberry_id'] : '',
                                        $bl_cfg['loxberry_id'], bl_t('FELD.LOXBERRY_ID'), $bl_fehler);
+    $bl_merk('loxberry_id');
 
     // Ganze Zahlen: dieselbe Tabelle wie das Zurueckspielen (bl_regeln()).
     $bl_zahlfelder = array(
@@ -469,6 +504,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
     foreach ($bl_zahlfelder as $bl_k => $bl_feld) {
         $neu[$bl_k] = bl_feld_zahl($bl_k, isset($_POST[$bl_k]) ? $_POST[$bl_k] : '',
                                    $bl_cfg[$bl_k], bl_t($bl_feld), $bl_fehler);
+        $bl_merk($bl_k);
     }
     $neu['glaettung']          = isset($_POST['glaettung']) ? '1' : '0';
     $neu['wachhund']           = isset($_POST['wachhund']) ? '1' : '0';
@@ -488,6 +524,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
                                is_string($uhr_roh) ? bl_saubere_eingabe($uhr_roh) : '',
                                $bl_cfg['batterie_uhrzeit']);
     }
+    $bl_merk('batterie_uhrzeit');
 
     $sname_roh = isset($_POST['scanner_name']) ? $_POST['scanner_name'] : '';
     list($ok, $w) = bl_wert_pruefen('scanner_name', $sname_roh);
@@ -498,6 +535,23 @@ if ($bl_ist_post && isset($_POST['save'])) {
                                is_string($sname_roh) ? bl_saubere_eingabe($sname_roh) : '',
                                $bl_cfg['scanner_name']);
     }
+    $bl_merk('scanner_name');
+
+    // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026, ab Werk aus).
+    $neu['wlan_kopplung'] = isset($_POST['wlan_kopplung']) ? '1' : '0';
+    $zu_roh = isset($_POST['wlan_zuordnung']) ? $_POST['wlan_zuordnung'] : '';
+    list($ok, $w) = bl_wert_pruefen('wlan_zuordnung', $zu_roh);
+    if ($ok) {
+        $neu['wlan_zuordnung'] = $w;
+        if ($neu['wlan_kopplung'] === '1' && $w === '') {
+            $bl_fehler[] = bl_t('MANGEL.WLAN_OHNE_ZUORDNUNG');
+        }
+    } else {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.WLAN_ZUORDNUNG'),
+                               is_string($zu_roh) ? bl_saubere_eingabe($zu_roh) : '',
+                               $bl_cfg['wlan_zuordnung'] !== '' ? $bl_cfg['wlan_zuordnung'] : '-');
+    }
+    $bl_merk('wlan_zuordnung');
 
     if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
         // Vertauscht eingegeben. BERICHTIGT IN 1.3.20: bis 1.3.19 wurden die
@@ -510,10 +564,19 @@ if ($bl_ist_post && isset($_POST['save'])) {
         $neu['rssi_nah'] = $bl_cfg['rssi_nah'];
         $neu['rssi_mittel'] = $bl_cfg['rssi_mittel'];
     }
+    $bl_merk('rssi_nah', 'rssi_mittel');
 
-    $tags = bl_tags_aus_post($bl_fehler, $bl_tags);
+    $tags = bl_tags_aus_post($bl_fehler, $bl_tags, $bl_bean_tags);
+    $bl_merk('tags');
 
-    if (bl_config_write($neu, $tags)) {
+    // Entscheidung 16 (30.09.2026): bei einer Beanstandung wird NICHTS
+    // gespeichert, auch nicht die uebrigen richtigen Felder, und der Dienst
+    // wird nicht neu gestartet. Bis 1.3.21 wurden die richtigen Felder
+    // gespeichert und nur das beanstandete behielt seinen Wert. Die
+    // eingetippten Werte stehen nach der Umleitung wieder im Formular (X-2).
+    if ($bl_fehler) {
+        $bl_eingaben_form = 'settings';
+    } elseif (bl_config_write($neu, $tags)) {
         $bl_saved = true;
         require_once __DIR__ . '/bl_test.php';
         // Neu starten nur, wenn der Dienst auch lief. Bis 1.2.10 startete
@@ -541,16 +604,22 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
     $praefix = is_string($praefix_roh) ? trim($praefix_roh) : '';
     if ($praefix === '') {
         $bl_fehler[] = bl_t('MANGEL.PRAEFIX_LEER');
+        $bl_beanstandet[] = 'themenpraefix';
     } elseif (!preg_match('/^[A-Za-z0-9_-]+$/', $praefix)) {
         // ABWEISEN, nicht filtern. Bis 1.2.10 wurde hier hart gefiltert:
         // aus "haus/keller etage" wurde "hauskelleretage", und das landete
         // danach in jeder angezeigten Adresse und im MQTT-Abo. Seit 1.3.20
         // auch Anfuehrungszeichen: gegen die rohe Eingabe geprueft (C9).
         $bl_fehler[] = sprintf(bl_t('MANGEL.PRAEFIX'), bl_saubere_eingabe($praefix), $neu['themenpraefix']);
+        $bl_beanstandet[] = 'themenpraefix';
     } else {
         $neu['themenpraefix'] = $praefix;
     }
-    if (bl_config_write($neu, $bestand_tags)) {
+    // Entscheidung 16: bei einer Beanstandung wird nichts gespeichert - bis
+    // 1.3.21 ging der Haken MQTT trotzdem in die Datei.
+    if ($bl_fehler) {
+        $bl_eingaben_form = 'mqtt';
+    } elseif (bl_config_write($neu, $bestand_tags)) {
         $bl_saved = true;
         require_once __DIR__ . '/bl_test.php';
         // Die Abo-Datei des Gateways auf das Praefix bringen (seit 1.3.20,
@@ -589,7 +658,15 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
  * ueberwachten Personen - eine Anwesenheitsliste, und der Hinweis am Knopf
  * sagt das. Ein Download endet ohne Umleitung. */
 if ($bl_ist_post && isset($_POST['bl_sichern'])) {
-    $bl_js = json_encode(bl_sicherung_bauen($bl_cfg, $bl_tags),
+    // X-3 (Verbesserungsbau 30.09.2026): besteht ein gespeicherter Wert das
+    // eigene Zurueckspielen nicht, steht die Warnung im Kopf der Datei (nur
+    // Namen). Geliefert wird die Sicherung trotzdem vollstaendig.
+    $bl_sich = bl_sicherung_bauen($bl_cfg, $bl_tags);
+    $bl_sich_warn = bl_rueckspiel_altwerte($bl_cfg, $bl_tags);
+    if ($bl_sich_warn) {
+        $bl_sich['_']['warnung'] = sprintf(bl_t('TEXT.SICH_ALTWERTE_KOPF'), implode(', ', $bl_sich_warn));
+    }
+    $bl_js = json_encode($bl_sich,
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($bl_js !== false) {
         header('Content-Type: application/json; charset=utf-8');
@@ -683,6 +760,7 @@ if ($bl_ist_post) {
         'test_titel' => $bl_test_titel, 'test_text' => $bl_test_text,
         'such' => is_array($bl_such) ? $bl_such : null,
         'tags' => is_array($bl_eingetippt) ? $bl_eingetippt : null,
+        'eingaben' => bl_eingaben_sammeln($bl_eingaben_form, $bl_beanstandet, $bl_bean_tags),
     );
     if (bl_einmal_schreiben($bl_einmal_neu)) {
         header('Location: index.php?form=' . rawurlencode(substr($bl_tab, 4)), true, 303);
@@ -709,7 +787,7 @@ $bl_alter   = bl_status_alter();
 $bl_stille  = bl_stille();
 $bl_broker  = bl_mqtt_broker();
 $bl_autostart = bl_mqtt_autostart();
-$bl_log     = bl_log_file();
+$bl_logs    = bl_log_dateien();
 $bl_aktiv   = 0;
 foreach ($bl_tags as $t) { if ($t['aktiv'] === '1') { $bl_aktiv++; } }
 $bl_zustand = bl_zustaende();
@@ -718,6 +796,10 @@ $bl_verlauf = bl_verlauf_lesen(24);
 // Gilt das Abbild? Ohne laufenden Dienst oder zu alt: keine Aussage (O5).
 list($bl_abbild_gilt, $bl_abbild_grund) = bl_abbild_lage($bl_cfg, $bl_pid);
 $bl_soll = bl_soll_laufen();
+// Fehlen Adapter oder bluez: ein Kasten oben mit dem noetigen Befehl
+// (Verbesserungsbau 30.09.2026, b1). Nur auf einer Installation.
+require_once __DIR__ . '/bl_test.php';
+$bl_bt_hilfe = $bl_p['home'] !== '' ? bl_bt_abhilfe(bl_bt_fakten($bl_cfg)) : array();
 
 
 if (class_exists('LBWeb', false)) {
@@ -817,6 +899,10 @@ if (class_exists('LBWeb', false)) {
     background-repeat: no-repeat; background-position: right 10px center;
     padding-right: 32px; cursor: pointer; }
 .sm-tbl select { padding-right: 28px; background-position: right 7px center; }
+/* Eigene Zutat, nicht aus der Vorlage (Verbesserungsbau 30.09.2026, X-2):
+   das beanstandete Feld nach einer Beanstandung rot umrandet. */
+.sm-wrap input.sm-beanstandet, .sm-wrap select.sm-beanstandet {
+    border: 2px solid #c62828 !important; background-color: #fff5f5; }
 
 </style>
 <div class="sm-wrap">
@@ -837,7 +923,9 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-warnung"><b><?= bl_e(bl_t('TEXT.BEANSTANDUNGEN')) ?></b>
 <ul style="margin:6px 0 0 18px;">
 <?php foreach ($bl_fehler as $m) { ?><li><?= bl_e($m) ?></li><?php } ?>
-</ul></div>
+</ul>
+<?php if (bl_eingaben_aktiv() !== '') { ?><p style="margin:6px 0 0;"><?= bl_e(bl_t('TEXT.EINGABEN_ZURUECK')) ?></p><?php } ?>
+</div>
 <?php } ?>
 <?php if ($bl_altformat) { ?>
 <div class="sm-hinweis"><?= bl_e(bl_t('TEXT.ALTES_FORMAT')) ?></div>
@@ -847,6 +935,18 @@ if (class_exists('LBWeb', false)) {
          da; was zu tun ist, stand hinter dem Knopf "Status". */ ?>
 <?php if (!$bl_pid && $bl_p['home'] !== '') { ?>
 <div class="sm-warnung" id="bl-kein-dienst"><b><?= bl_e(bl_t($bl_soll ? 'TEXT.KEIN_DIENST_SOLL' : 'TEXT.KEIN_DIENST_ANGEHALTEN')) ?></b></div>
+<?php } ?>
+<?php /* Adapter oder bluez fehlen (Verbesserungsbau 30.09.2026, b1): der Befehl
+         steht in einem eigenen Block, nicht in einer Tabellenzelle - eine
+         Zelle bringt beim Kopieren einen Tabulator mit. */ ?>
+<?php if ($bl_bt_hilfe) { ?>
+<div class="sm-fehler" id="bl-bt-kasten"><b><?= bl_e(bl_t('TEXT.BT_KASTEN')) ?></b>
+<?php foreach ($bl_bt_hilfe as $bl_h) { ?>
+<p style="margin:8px 0 4px;"><?= bl_e($bl_h['grund']) ?></p>
+<div class="sm-mono" data-befehl="1" style="display:block;padding:8px;margin:4px 0;user-select:all;"><?= bl_e($bl_h['befehl']) ?></div>
+<?php } ?>
+<p class="sm-klein" style="margin:6px 0 0;"><?= bl_e(bl_t('TEXT.BT_KASTEN_DANACH')) ?></p>
+</div>
 <?php } ?>
 
 <div class="sm-kacheln" id="bl-kacheln">
@@ -906,25 +1006,27 @@ if (class_exists('LBWeb', false)) {
 <th style="width:60px;"><?= bl_e(bl_t('TEXT.SP_AKTIV')) ?></th>
 <th style="width:70px;"><?= bl_e(bl_t('TEXT.SP_ENTFERNEN')) ?></th>
 <th style="width:200px;"><?= bl_e(bl_t('TEXT.SP_ZUSTAND')) ?></th></tr>
-<?php foreach ($bl_tags as $i => $tag) {
+<?php // X-2: nach einer Beanstandung die Zeilen, wie sie eingetippt waren.
+$bl_zeilen_tab = bl_eingaben_aktiv() === 'settings' ? bl_eingabe_tagzeilen() : $bl_tags;
+foreach ($bl_zeilen_tab as $i => $tag) {
     $z = isset($bl_zustand[$tag['kennung']]) ? $bl_zustand[$tag['kennung']] : null;
     $o = $tag['opt']; ?>
 <tr>
-<td><input data-role="none" type="text" name="tag_kennung[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>" style="width:100%;box-sizing:border-box;"><input data-role="none" type="hidden" name="tag_alt[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>"></td>
-<td><input data-role="none" type="text" name="tag_name[<?= (int) $i ?>]" value="<?= bl_e($tag['name']) ?>" style="width:100%;box-sizing:border-box;" placeholder="<?= bl_e(bl_t('TEXT.PH_BEZEICHNUNG')) ?>">
-<details>
+<td><input data-role="none" type="text" name="tag_kennung[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>" style="width:100%;box-sizing:border-box;"<?= bl_tag_markierung($tag, 'kennung') ?>><input data-role="none" type="hidden" name="tag_alt[<?= (int) $i ?>]" value="<?= bl_e(isset($tag['_alt']) ? $tag['_alt'] : $tag['kennung']) ?>"></td>
+<td><input data-role="none" type="text" name="tag_name[<?= (int) $i ?>]" value="<?= bl_e($tag['name']) ?>" style="width:100%;box-sizing:border-box;"<?= bl_tag_markierung($tag, 'name') ?> placeholder="<?= bl_e(bl_t('TEXT.PH_BEZEICHNUNG')) ?>">
+<details<?= bl_tag_offen($tag) ?>>
 <summary><?= bl_e(bl_t('TEXT.MEHR_EINSTELLUNGEN')) ?></summary>
 <div class="sm-klein" style="margin-top:6px;">
-<?= bl_e(bl_t('FELD.ALIAS')) ?>: <input data-role="none" type="text" name="tag_alias[<?= (int) $i ?>]" value="<?= bl_e(isset($o['alias']) ? $o['alias'] : '') ?>" size="14">
-&nbsp; <?= bl_e(bl_t('FELD.PERSON')) ?>: <input data-role="none" type="text" name="tag_person[<?= (int) $i ?>]" value="<?= bl_e(isset($o['person']) ? $o['person'] : '') ?>" size="12">
-&nbsp; <?= bl_e(bl_t('FELD.ABW_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_abw[<?= (int) $i ?>]" value="<?= bl_e(isset($o['abw']) ? $o['abw'] : '') ?>" size="5">
-&nbsp; <?= bl_e(bl_t('FELD.REF_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_ref[<?= (int) $i ?>]" value="<?= bl_e(isset($o['ref']) ? $o['ref'] : '') ?>" size="5">
+<?= bl_e(bl_t('FELD.ALIAS')) ?>: <input data-role="none" type="text" name="tag_alias[<?= (int) $i ?>]" value="<?= bl_e(isset($o['alias']) ? $o['alias'] : '') ?>"<?= bl_tag_markierung($tag, 'alias') ?> size="14">
+&nbsp; <?= bl_e(bl_t('FELD.PERSON')) ?>: <input data-role="none" type="text" name="tag_person[<?= (int) $i ?>]" value="<?= bl_e(isset($o['person']) ? $o['person'] : '') ?>"<?= bl_tag_markierung($tag, 'person') ?> size="12">
+&nbsp; <?= bl_e(bl_t('FELD.ABW_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_abw[<?= (int) $i ?>]" value="<?= bl_e(isset($o['abw']) ? $o['abw'] : '') ?>"<?= bl_tag_markierung($tag, 'abw') ?> size="5">
+&nbsp; <?= bl_e(bl_t('FELD.REF_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_ref[<?= (int) $i ?>]" value="<?= bl_e(isset($o['ref']) ? $o['ref'] : '') ?>"<?= bl_tag_markierung($tag, 'ref') ?> size="5">
 &nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_batt[<?= (int) $i ?>]" value="1"<?= (isset($o['batt']) && $o['batt'] === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BATT_JE_TAG')) ?></label>
 <div class="sm-hilfe"><?= bl_e(bl_t('TEXT.ALIAS_HILFE')) ?></div>
 </div>
 </details></td>
 <td style="text-align:center;"><input data-role="none" type="checkbox" name="tag_aktiv[<?= (int) $i ?>]" value="1"<?= $tag['aktiv'] === '1' ? ' checked' : '' ?>></td>
-<td style="text-align:center;"><input data-role="none" type="checkbox" name="tag_weg[<?= (int) $i ?>]" value="1"></td>
+<td style="text-align:center;"><input data-role="none" type="checkbox" name="tag_weg[<?= (int) $i ?>]" value="1"<?= !empty($tag['_weg']) ? ' checked' : '' ?>></td>
 <td><?php if ($z && !$bl_abbild_gilt) {
         // Seit 1.3.20 (O5): ohne laufenden Dienst oder mit altem Abbild
         // nie "anwesend" und nie gruen - keine Aussage, mit dem Stand.
@@ -1001,12 +1103,12 @@ if (class_exists('LBWeb', false)) {
 <h2><?= bl_e(bl_t('TEXT.WEG_ZUM_MINISERVER')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.MQTT_IM_REITER')) ?></p>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="http_push" value="1"<?= bl_cfg($bl_cfg, 'http_push', '0') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HTTP_PUSH')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="http_push" value="1"<?= bl_eingabe_an('settings', 'http_push', bl_cfg($bl_cfg, 'http_push', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HTTP_PUSH')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HTTP_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.LOXBERRY_ID')) ?></label>
-<input data-role="none" type="text" name="loxberry_id" value="<?= bl_e(bl_cfg($bl_cfg, 'loxberry_id', '')) ?>">
+<input data-role="none" type="text" name="loxberry_id" value="<?= bl_e(bl_eingabe('settings', 'loxberry_id', bl_cfg($bl_cfg, 'loxberry_id', ''))) ?>"<?= bl_markierung('loxberry_id') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOXBERRY_ID_HILFE')) ?></p>
 </div>
 <?php $bl_ms = bl_miniserver(); if ($bl_ms) { ?>
@@ -1017,100 +1119,111 @@ if (class_exists('LBWeb', false)) {
 <h2><?= bl_e(bl_t('TEXT.ADAPTER_UND_BETRIEB')) ?></h2>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.ADAPTER')) ?></label>
-<input data-role="none" type="text" name="adapter" value="<?= bl_e(bl_cfg($bl_cfg, 'adapter', 'hci0')) ?>">
+<input data-role="none" type="text" name="adapter" value="<?= bl_e(bl_eingabe('settings', 'adapter', bl_cfg($bl_cfg, 'adapter', 'hci0'))) ?>"<?= bl_markierung('adapter') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ADAPTER_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.BETRIEBSART')) ?></label>
-<select data-role="none" name="betriebsart">
-<option value="signal"<?= bl_cfg($bl_cfg, 'betriebsart', 'signal') === 'signal' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.BA_SIGNAL')) ?></option>
-<option value="abfrage"<?= bl_cfg($bl_cfg, 'betriebsart', 'signal') === 'abfrage' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.BA_ABFRAGE')) ?></option>
+<select data-role="none" name="betriebsart"<?= bl_markierung('betriebsart') ?>>
+<option value="signal"<?= bl_eingabe('settings', 'betriebsart', bl_cfg($bl_cfg, 'betriebsart', 'signal')) === 'signal' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.BA_SIGNAL')) ?></option>
+<option value="abfrage"<?= bl_eingabe('settings', 'betriebsart', bl_cfg($bl_cfg, 'betriebsart', 'signal')) === 'abfrage' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.BA_ABFRAGE')) ?></option>
 </select>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BETRIEBSART_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="wachhund" value="1"<?= bl_cfg($bl_cfg, 'wachhund', '1') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.WACHHUND')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="wachhund" value="1"<?= bl_eingabe_an('settings', 'wachhund', bl_cfg($bl_cfg, 'wachhund', '1') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.WACHHUND')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.WACHHUND_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.STILLE')) ?></label>
-<input data-role="none" type="number" name="wachhund_stille" min="60" max="86400" value="<?= bl_e(bl_cfg($bl_cfg, 'wachhund_stille', '300')) ?>">
+<input data-role="none" type="number" name="wachhund_stille" min="60" max="86400" value="<?= bl_e(bl_eingabe('settings', 'wachhund_stille', bl_cfg($bl_cfg, 'wachhund_stille', '300'))) ?>"<?= bl_markierung('wachhund_stille') ?>>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.DISCOVERY_RSSI')) ?></label>
-<input data-role="none" type="number" name="discovery_rssi" min="-120" max="0" value="<?= bl_e(bl_cfg($bl_cfg, 'discovery_rssi', '0')) ?>">
+<input data-role="none" type="number" name="discovery_rssi" min="-120" max="0" value="<?= bl_e(bl_eingabe('settings', 'discovery_rssi', bl_cfg($bl_cfg, 'discovery_rssi', '0'))) ?>"<?= bl_markierung('discovery_rssi') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.DISCOVERY_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.LOGKAPPUNG')) ?></label>
-<input data-role="none" type="number" name="log_kappung_kb" min="16" max="20000" value="<?= bl_e(bl_cfg($bl_cfg, 'log_kappung_kb', '500')) ?>">
+<input data-role="none" type="number" name="log_kappung_kb" min="16" max="20000" value="<?= bl_e(bl_eingabe('settings', 'log_kappung_kb', bl_cfg($bl_cfg, 'log_kappung_kb', '500'))) ?>"<?= bl_markierung('log_kappung_kb') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOGKAPPUNG_HILFE')) ?></p>
 </div>
 
 <h2><?= bl_e(bl_t('TEXT.ZEITEN_UND_SCHWELLEN')) ?></h2>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.INTERVALL')) ?></label>
-<input data-role="none" type="number" name="intervall" min="2" max="600" value="<?= bl_e(bl_cfg($bl_cfg, 'intervall', '5')) ?>"></div>
+<input data-role="none" type="number" name="intervall" min="2" max="600" value="<?= bl_e(bl_eingabe('settings', 'intervall', bl_cfg($bl_cfg, 'intervall', '5'))) ?>"<?= bl_markierung('intervall') ?>></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.ABWESEND')) ?></label>
-<input data-role="none" type="number" name="abwesenheit_nach" min="5" max="3600" value="<?= bl_e(bl_cfg($bl_cfg, 'abwesenheit_nach', '30')) ?>">
+<input data-role="none" type="number" name="abwesenheit_nach" min="5" max="3600" value="<?= bl_e(bl_eingabe('settings', 'abwesenheit_nach', bl_cfg($bl_cfg, 'abwesenheit_nach', '30'))) ?>"<?= bl_markierung('abwesenheit_nach') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ABWESEND_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.AKTUALISIERUNG')) ?></label>
-<input data-role="none" type="number" name="aktualisierung" min="5" max="86400" value="<?= bl_e(bl_cfg($bl_cfg, 'aktualisierung', '60')) ?>"></div>
+<input data-role="none" type="number" name="aktualisierung" min="5" max="86400" value="<?= bl_e(bl_eingabe('settings', 'aktualisierung', bl_cfg($bl_cfg, 'aktualisierung', '60'))) ?>"<?= bl_markierung('aktualisierung') ?>></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.ANKUNFT')) ?></label>
-<input data-role="none" type="number" name="ankunft_sichtungen" min="1" max="20" value="<?= bl_e(bl_cfg($bl_cfg, 'ankunft_sichtungen', '1')) ?>">
+<input data-role="none" type="number" name="ankunft_sichtungen" min="1" max="20" value="<?= bl_e(bl_eingabe('settings', 'ankunft_sichtungen', bl_cfg($bl_cfg, 'ankunft_sichtungen', '1'))) ?>"<?= bl_markierung('ankunft_sichtungen') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ANKUNFT_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RSSI_MINIMUM')) ?></label>
-<input data-role="none" type="number" name="rssi_minimum" min="-120" max="0" value="<?= bl_e(bl_cfg($bl_cfg, 'rssi_minimum', '-100')) ?>">
+<input data-role="none" type="number" name="rssi_minimum" min="-120" max="0" value="<?= bl_e(bl_eingabe('settings', 'rssi_minimum', bl_cfg($bl_cfg, 'rssi_minimum', '-100'))) ?>"<?= bl_markierung('rssi_minimum') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RSSI_MINIMUM_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RSSI_NAH')) ?></label>
-<input data-role="none" type="number" name="rssi_nah" min="-120" max="0" value="<?= bl_e(bl_cfg($bl_cfg, 'rssi_nah', '-65')) ?>"></div>
+<input data-role="none" type="number" name="rssi_nah" min="-120" max="0" value="<?= bl_e(bl_eingabe('settings', 'rssi_nah', bl_cfg($bl_cfg, 'rssi_nah', '-65'))) ?>"<?= bl_markierung('rssi_nah') ?>></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RSSI_MITTEL')) ?></label>
-<input data-role="none" type="number" name="rssi_mittel" min="-120" max="0" value="<?= bl_e(bl_cfg($bl_cfg, 'rssi_mittel', '-85')) ?>"></div>
+<input data-role="none" type="number" name="rssi_mittel" min="-120" max="0" value="<?= bl_e(bl_eingabe('settings', 'rssi_mittel', bl_cfg($bl_cfg, 'rssi_mittel', '-85'))) ?>"<?= bl_markierung('rssi_mittel') ?>></div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="glaettung" value="1"<?= bl_cfg($bl_cfg, 'glaettung', '1') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.GLAETTUNG')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="glaettung" value="1"<?= bl_eingabe_an('settings', 'glaettung', bl_cfg($bl_cfg, 'glaettung', '1') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.GLAETTUNG')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.GLAETTUNG_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.FENSTER')) ?></label>
-<input data-role="none" type="number" name="glaettung_fenster" min="1" max="30" value="<?= bl_e(bl_cfg($bl_cfg, 'glaettung_fenster', '5')) ?>"></div>
+<input data-role="none" type="number" name="glaettung_fenster" min="1" max="30" value="<?= bl_e(bl_eingabe('settings', 'glaettung_fenster', bl_cfg($bl_cfg, 'glaettung_fenster', '5'))) ?>"<?= bl_markierung('glaettung_fenster') ?>></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.HYSTERESE')) ?></label>
-<input data-role="none" type="number" name="hysterese_db" min="0" max="20" value="<?= bl_e(bl_cfg($bl_cfg, 'hysterese_db', '3')) ?>">
+<input data-role="none" type="number" name="hysterese_db" min="0" max="20" value="<?= bl_e(bl_eingabe('settings', 'hysterese_db', bl_cfg($bl_cfg, 'hysterese_db', '3'))) ?>"<?= bl_markierung('hysterese_db') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HYSTERESE_HILFE')) ?></p></div>
 
 <h2><?= bl_e(bl_t('TEXT.MEHR_WERTE')) ?></h2>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="beacon" value="1"<?= bl_cfg($bl_cfg, 'beacon', '1') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BEACON')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="beacon" value="1"<?= bl_eingabe_an('settings', 'beacon', bl_cfg($bl_cfg, 'beacon', '1') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BEACON')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BEACON_HILFE')) ?></p></div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="entfernung" value="1"<?= bl_cfg($bl_cfg, 'entfernung', '0') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.ENTFERNUNG')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="entfernung" value="1"<?= bl_eingabe_an('settings', 'entfernung', bl_cfg($bl_cfg, 'entfernung', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.ENTFERNUNG')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ENTFERNUNG_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.DAEMPFUNG')) ?></label>
-<input data-role="none" type="text" name="daempfung" value="<?= bl_e(bl_cfg($bl_cfg, 'daempfung', '2.5')) ?>">
+<input data-role="none" type="text" name="daempfung" value="<?= bl_e(bl_eingabe('settings', 'daempfung', bl_cfg($bl_cfg, 'daempfung', '2.5'))) ?>"<?= bl_markierung('daempfung') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.DAEMPFUNG_HILFE')) ?></p></div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="batterie" value="1"<?= bl_cfg($bl_cfg, 'batterie', '0') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BATTERIE')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="batterie" value="1"<?= bl_eingabe_an('settings', 'batterie', bl_cfg($bl_cfg, 'batterie', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BATTERIE')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BATTERIE_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.BATTERIE_UHRZEIT')) ?></label>
-<input data-role="none" type="text" name="batterie_uhrzeit" value="<?= bl_e(bl_cfg($bl_cfg, 'batterie_uhrzeit', '04:00')) ?>" placeholder="04:00"></div>
+<input data-role="none" type="text" name="batterie_uhrzeit" value="<?= bl_e(bl_eingabe('settings', 'batterie_uhrzeit', bl_cfg($bl_cfg, 'batterie_uhrzeit', '04:00'))) ?>"<?= bl_markierung('batterie_uhrzeit') ?> placeholder="04:00"></div>
 
 <h2><?= bl_e(bl_t('TEXT.AUFZEICHNUNG')) ?></h2>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="ereignisse" value="1"<?= bl_cfg($bl_cfg, 'ereignisse', '1') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.EREIGNISSE')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="ereignisse" value="1"<?= bl_eingabe_an('settings', 'ereignisse', bl_cfg($bl_cfg, 'ereignisse', '1') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.EREIGNISSE')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.EREIGNISSE_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.EREIGNISTAGE')) ?></label>
-<input data-role="none" type="number" name="ereignisse_tage" min="1" max="365" value="<?= bl_e(bl_cfg($bl_cfg, 'ereignisse_tage', '7')) ?>"></div>
+<input data-role="none" type="number" name="ereignisse_tage" min="1" max="365" value="<?= bl_e(bl_eingabe('settings', 'ereignisse_tage', bl_cfg($bl_cfg, 'ereignisse_tage', '7'))) ?>"<?= bl_markierung('ereignisse_tage') ?>></div>
 
 <h2><?= bl_e(bl_t('TEXT.MEHRERE_SCANNER')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.SCANNER_HILFE')) ?></p>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.SCANNER_NAME')) ?></label>
-<input data-role="none" type="text" name="scanner_name" value="<?= bl_e(bl_cfg($bl_cfg, 'scanner_name', '')) ?>" placeholder="<?= bl_e($bl_status ? (string) ($bl_status['scanner'] ?? '') : '') ?>"></div>
+<input data-role="none" type="text" name="scanner_name" value="<?= bl_e(bl_eingabe('settings', 'scanner_name', bl_cfg($bl_cfg, 'scanner_name', ''))) ?>"<?= bl_markierung('scanner_name') ?> placeholder="<?= bl_e($bl_status ? (string) ($bl_status['scanner'] ?? '') : '') ?>"></div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="scanner_themen" value="1"<?= bl_cfg($bl_cfg, 'scanner_themen', '0') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.SCANNER_THEMEN')) ?></label></div>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="scanner_themen" value="1"<?= bl_eingabe_an('settings', 'scanner_themen', bl_cfg($bl_cfg, 'scanner_themen', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.SCANNER_THEMEN')) ?></label></div>
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="raum" value="1"<?= bl_cfg($bl_cfg, 'raum', '0') === '1' ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.RAUM')) ?></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="raum" value="1"<?= bl_eingabe_an('settings', 'raum', bl_cfg($bl_cfg, 'raum', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.RAUM')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RAUM_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RAUM_HYST')) ?></label>
-<input data-role="none" type="number" name="raum_hysterese_db" min="0" max="30" value="<?= bl_e(bl_cfg($bl_cfg, 'raum_hysterese_db', '5')) ?>"></div>
+<input data-role="none" type="number" name="raum_hysterese_db" min="0" max="30" value="<?= bl_e(bl_eingabe('settings', 'raum_hysterese_db', bl_cfg($bl_cfg, 'raum_hysterese_db', '5'))) ?>"<?= bl_markierung('raum_hysterese_db') ?>></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RAUM_AUSGLEICH')) ?></label>
-<input data-role="none" type="number" name="raum_ausgleich_db" min="-30" max="30" value="<?= bl_e(bl_cfg($bl_cfg, 'raum_ausgleich_db', '0')) ?>">
+<input data-role="none" type="number" name="raum_ausgleich_db" min="-30" max="30" value="<?= bl_e(bl_eingabe('settings', 'raum_ausgleich_db', bl_cfg($bl_cfg, 'raum_ausgleich_db', '0'))) ?>"<?= bl_markierung('raum_ausgleich_db') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.AUSGLEICH_HILFE')) ?></p></div>
+
+<?php /* Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
+         Anwesenheit-1): ab Werk aus. Gekoppelt wird nur ueber die MQTT-Themen
+         des WiFi-Scanners (wifi_ng/...), nie ueber seine Dateien. */ ?>
+<h2><?= bl_e(bl_t('TEXT.WLAN_UEBERSCHRIFT')) ?></h2>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.WLAN_HILFE')) ?></p>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="wlan_kopplung" value="1"<?= bl_eingabe_an('settings', 'wlan_kopplung', bl_cfg($bl_cfg, 'wlan_kopplung', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.WLAN_KOPPLUNG')) ?></label></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('FELD.WLAN_ZUORDNUNG')) ?></label>
+<input data-role="none" type="text" name="wlan_zuordnung" value="<?= bl_e(bl_eingabe('settings', 'wlan_zuordnung', bl_cfg($bl_cfg, 'wlan_zuordnung', ''))) ?>"<?= bl_markierung('wlan_zuordnung') ?> placeholder="Anna_Handy=Anna, Bernd=Bernd">
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.WLAN_ZUORDNUNG_HILFE')) ?></p></div>
 
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
@@ -1121,6 +1234,13 @@ if (class_exists('LBWeb', false)) {
 <h2><?= bl_t('TEXT.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= bl_t('TEXT.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= bl_t('TEXT.SICH_WARNUNG') ?></div>
+<?php /* X-3 (Verbesserungsbau 30.09.2026): der GESPEICHERTE Stand, geprueft
+         wie beim Zurueckspielen. Gelb - die Sicherung wird trotzdem geliefert. */
+list($bl_sc, $bl_st, ) = bl_config_read();
+$bl_sich_warn = bl_rueckspiel_altwerte($bl_sc, $bl_st);
+if ($bl_sich_warn) { ?>
+<div class="sm-warnung" id="bl-sich-altwerte"><?= bl_e(sprintf(bl_t('TEXT.SICH_ALTWERTE'), implode(', ', $bl_sich_warn))) ?></div>
+<?php } ?>
 <div class="sm-knopfreihe">
   <!-- ZWEI GETRENNTE Formulare. Das Sichern schickt einen Download und ruft
        exit auf; das Zurueckspielen braucht enctype="multipart/form-data".
@@ -1155,12 +1275,12 @@ if (class_exists('LBWeb', false)) {
   <?php echo bl_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-mqtt">
 <div class="sm-feld">
-<label style="font-weight:400;"><input data-role="none" type="checkbox" name="mqtt" value="1"<?= bl_cfg($bl_cfg, 'mqtt', '1') === '1' ? ' checked' : '' ?>> <b><?= bl_e(bl_t('FELD.MQTT')) ?></b></label>
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="mqtt" value="1"<?= bl_eingabe_an('mqtt', 'mqtt', bl_cfg($bl_cfg, 'mqtt', '1') === '1') ? ' checked' : '' ?>> <b><?= bl_e(bl_t('FELD.MQTT')) ?></b></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.MQTT_HILFE')) ?></p>
 </div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.THEMENPRAEFIX')) ?></label>
-<input data-role="none" type="text" name="themenpraefix" value="<?= bl_e($bl_praefix) ?>">
+<input data-role="none" type="text" name="themenpraefix" value="<?= bl_e(bl_eingabe('mqtt', 'themenpraefix', $bl_praefix)) ?>"<?= bl_markierung('themenpraefix') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.PRAEFIX_HILFE')) ?></p>
 </div>
 <div class="sm-knopfreihe">
@@ -1539,11 +1659,31 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
                                    'NAME' => 'BLE-Scanner NG'));
 }
 ?>
-<?php if ($bl_log !== '') { ?>
-<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOG_DATEI')) ?>: <span class="sm-mono"><?= bl_e($bl_log) ?></span>
-&middot; <?= bl_e(bl_t('TEXT.LOG_NEUESTE')) ?>
-&middot; <?= (int) round(((int) @filesize($bl_log)) / 1024) ?> kB</p>
-<div class="sm-log"><?php foreach (bl_log_ende($bl_log, 300) as $z) { echo bl_e($z) . "\n"; } ?></div>
+<?php /* Start- und Dienstprotokoll getrennt und benannt (Verbesserungsbau
+         30.09.2026, a2). Bis 1.3.21 stand hier nur die juengste Datei, ohne
+         Namen - je nach Zeitpunkt das eine oder das andere Protokoll. */ ?>
+<?php if ($bl_logs) {
+    // Namen und Erklaerung ausgeschrieben, damit die Pruefung der
+    // Sprachschluessel sie findet.
+    $bl_lnamen = array('dienst' => bl_t('TEXT.LOG_NAME_DIENST'), 'start' => bl_t('TEXT.LOG_NAME_START'));
+    $bl_lwer = array('dienst' => bl_t('TEXT.LOG_WER_DIENST'), 'start' => bl_t('TEXT.LOG_WER_START'),
+                     'weitere' => bl_t('TEXT.LOG_WER_WEITERE')); ?>
+<?php foreach ($bl_logs as $bl_l) {
+    $bl_lname = isset($bl_lnamen[$bl_l['art']]) ? $bl_lnamen[$bl_l['art']] : basename($bl_l['datei']);
+    $bl_lzeit = @filemtime($bl_l['datei']); ?>
+<h3<?= $bl_l['art'] !== 'weitere' ? ' id="bl-log-' . bl_e($bl_l['art']) . '"' : '' ?>><?= bl_e($bl_lname) ?></h3>
+<p class="sm-hilfe"><?= bl_e($bl_lwer[$bl_l['art']]) ?></p>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOG_DATEI')) ?>: <span class="sm-mono"><?= bl_e($bl_l['datei']) ?></span>
+&middot; <?= (int) round(((int) @filesize($bl_l['datei'])) / 1024) ?> kB
+&middot; <?= bl_e(bl_t('TEXT.LOG_STAND')) ?> <?= $bl_lzeit ? bl_e(date('d.m.Y H:i:s', (int) $bl_lzeit)) : '&ndash;' ?>
+&middot; <?= bl_e(bl_t('TEXT.LOG_NEUESTE')) ?></p>
+<?php $bl_lzeilen = bl_log_ende($bl_l['datei'], $bl_l['art'] === 'dienst' ? 300 : 100); ?>
+<?php if ($bl_lzeilen) { ?>
+<div class="sm-log"><?php foreach ($bl_lzeilen as $z) { echo bl_e($z) . "\n"; } ?></div>
+<?php } else { ?>
+<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.LOG_DATEI_LEER')) ?></div>
+<?php } ?>
+<?php } ?>
 <?php } else { ?>
 <div class="sm-hinweis"><?= bl_e(bl_t('TEXT.LOG_LEER')) ?></div>
 <?php } ?>

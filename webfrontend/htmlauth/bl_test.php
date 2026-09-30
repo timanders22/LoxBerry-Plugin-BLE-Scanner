@@ -280,19 +280,26 @@ function bl_konfig_lage()
     }
     $da = 0;
     $fehlt = array();
+    $spaeter = array();
     foreach (array_keys(bl_defaults()) as $k) {
         if (preg_match('/^\s*' . preg_quote($k, '/') . '\s*=/m', $roh)) {
             $da++;
+        } elseif (in_array($k, bl_schluessel_spaeter(), true)) {
+            // Seit dem Verbesserungsbau 30.09.2026: ein spaeter dazugekommener
+            // Schluessel steht bis zum naechsten Speichern nicht in der Datei;
+            // es gilt die Werkseinstellung (beide Leser beginnen mit ihr).
+            $spaeter[] = $k;
         } else {
             $fehlt[] = $k;
         }
     }
-    $gesamt = count(bl_defaults());
+    $gesamt = count(bl_defaults()) - count($spaeter);
     if ($fehlt) {
         return array(false, sprintf(bl_t('PRUEF.KONFIG_UNVOLLSTAENDIG'), $da, $gesamt,
                                     implode(', ', $fehlt)));
     }
-    return array(true, sprintf(bl_t('PRUEF.KONFIG_HEIL'), $da, $gesamt));
+    return array(true, sprintf(bl_t('PRUEF.KONFIG_HEIL'), $da, $gesamt)
+                 . ($spaeter ? "\n" . sprintf(bl_t('PRUEF.KONFIG_SPAETER'), implode(', ', $spaeter)) : ''));
 }
 
 /**
@@ -879,6 +886,136 @@ function bl_adapterlage($cfg)
 }
 
 /**
+ * Die Lage von Adapter und bluez fuer den Kasten oben (Verbesserungsbau
+ * 30.09.2026, b1). Dieselben Quellen wie bl_adapterlage(); dazu die
+ * Programmdatei bluetoothd (Paket bluez) und der Zustand von
+ * bluetooth.service - Letzterer nur, wenn Adapter und bluetoothd da sind
+ * (ohne Adapter startet systemd den Dienst ohnehin nicht, und so kostet ein
+ * Seitenaufruf ohne Bluetooth keinen Prozessstart).
+ */
+function bl_bt_fakten($cfg)
+{
+    $f = array('soll' => (string) bl_cfg($cfg, 'adapter', 'hci0'),
+               'sys' => is_dir('/sys/class/bluetooth'), 'adapter' => array(),
+               'hardware' => false, 'sperre' => '', 'module' => array(),
+               'bluetoothd' => '', 'dienst' => '');
+    if ($f['sys']) {
+        foreach ((array) @scandir('/sys/class/bluetooth') as $e) {
+            if (is_string($e) && $e !== '.' && $e !== '..') { $f['adapter'][] = $e; }
+        }
+    } else {
+        $f['hardware'] = bl_bt_hardware();
+        if ($f['hardware']) {
+            list($f['sperre'], $f['module']) = bl_bt_gesperrt();
+        }
+    }
+    // Debian legt bluetoothd je nach Fassung an einen dieser Orte.
+    foreach (array('/usr/libexec/bluetooth/bluetoothd', '/usr/lib/bluetooth/bluetoothd',
+                   '/usr/sbin/bluetoothd') as $d) {
+        if (is_file($d)) {
+            $f['bluetoothd'] = $d;
+            break;
+        }
+    }
+    if ($f['adapter'] && $f['bluetoothd'] !== '') {
+        $f['dienst'] = trim(bl_sh(bl_frist(3, 'systemctl is-active bluetooth') . ' 2>/dev/null'));
+    }
+    return $f;
+}
+
+/**
+ * Was ist zu tun? Rueckgabe: Liste von array('grund' => Satz, 'befehl' => Befehl),
+ * leer, wenn Adapter und bluez in Ordnung sind. Nur aus den Fakten - kein
+ * Zugriff aufs System, damit jeder Zweig ohne Geraet pruefbar ist.
+ * Der Befehl ist genau einer je Grund, zum Abtippen.
+ */
+function bl_bt_abhilfe($f)
+{
+    $aus = array();
+    if (empty($f['sys']) || empty($f['adapter'])) {
+        if (!empty($f['hardware']) && (string) $f['sperre'] !== '') {
+            $aus[] = array('grund' => sprintf(bl_t('TEXT.BT_KASTEN_GESPERRT'), $f['sperre'],
+                                              implode(', ', (array) $f['module'])),
+                           'befehl' => 'sudo modprobe btbcm hci_uart && sudo systemctl start bluetooth');
+        } elseif (!empty($f['hardware'])) {
+            $aus[] = array('grund' => bl_t('TEXT.BT_KASTEN_KEIN_TREIBER'),
+                           'befehl' => 'journalctl -k | grep -i blue');
+        } elseif (!empty($f['sys'])) {
+            $aus[] = array('grund' => bl_t('TEXT.BT_KASTEN_LEER'),
+                           'befehl' => 'sudo systemctl restart bluetooth');
+        } else {
+            $aus[] = array('grund' => bl_t('TEXT.BT_KASTEN_KEIN_GERAET'),
+                           'befehl' => 'ls /sys/class/bluetooth');
+        }
+    }
+    if ((string) $f['bluetoothd'] === '') {
+        $aus[] = array('grund' => bl_t('TEXT.BT_KASTEN_BLUEZ_FEHLT'),
+                       'befehl' => 'sudo apt-get install bluez');
+    } elseif (!empty($f['adapter'])
+              && in_array((string) $f['dienst'], array('inactive', 'failed', 'deactivating'), true)) {
+        $aus[] = array('grund' => sprintf(bl_t('TEXT.BT_KASTEN_DIENST_AUS'), $f['dienst']),
+                       'befehl' => 'sudo systemctl enable --now bluetooth');
+    }
+    return $aus;
+}
+
+/**
+ * Lage der Kopplung mit dem WiFi-Scanner (Verbesserungsbau 30.09.2026,
+ * Anwesenheit-1). Gelesen aus dem Abbild des Dienstes (Schluessel "wlan").
+ * Haken: der WiFi-Scanner meldet sich; Kreuz: er schweigt (es zaehlt nur BLE),
+ * oder Zuordnung bzw. MQTT fehlen; Strich: der Dienst hat keine Aussage.
+ * Rueckgabe: array(zustand, anmerkung).
+ */
+function bl_wlan_lage($cfg, $status, $gilt, $grund)
+{
+    if (bl_cfg($cfg, 'wlan_zuordnung', '') === '') {
+        return array(false, bl_t('PRUEF.WLAN_OHNE_ZUORDNUNG'));
+    }
+    if (bl_cfg($cfg, 'mqtt', '1') !== '1') {
+        return array(false, bl_t('PRUEF.WLAN_OHNE_MQTT'));
+    }
+    if (!$gilt) {
+        return array(null, $grund);
+    }
+    $wl = ($status && isset($status['wlan']) && is_array($status['wlan'])) ? $status['wlan'] : null;
+    if ($wl === null || empty($wl['an'])) {
+        return array(null, bl_t('PRUEF.WLAN_NOCH_NICHT'));
+    }
+    $zeig = function ($w) {
+        return $w === null ? '-' : (string) $w;
+    };
+    $pers = array();
+    foreach ((isset($wl['personen']) && is_array($wl['personen']) ? $wl['personen'] : array()) as $pn => $pw) {
+        if (!is_array($pw)) {
+            continue;
+        }
+        $pers[] = sprintf(bl_t('PRUEF.WLAN_PERSON'), (string) $pn,
+                          isset($pw['wlan_name']) ? (string) $pw['wlan_name'] : '?',
+                          $zeig(isset($pw['ble']) ? $pw['ble'] : null),
+                          $zeig(isset($pw['wlan']) ? $pw['wlan'] : null),
+                          $zeig(isset($pw['gesamt']) ? $pw['gesamt'] : null),
+                          $zeig(isset($pw['quelle']) ? $pw['quelle'] : null));
+    }
+    $liste = $pers ? "\n" . implode("\n", $pers) : '';
+    $alter = isset($wl['alter']) ? (int) $wl['alter'] : -1;
+    $frist = isset($wl['frist']) ? (int) $wl['frist'] : 0;
+    if (!empty($wl['frisch'])) {
+        return array(true, sprintf(bl_t('PRUEF.WLAN_FRISCH'), $alter, $frist) . $liste);
+    }
+    $g = isset($wl['grund']) ? (string) $wl['grund'] : '';
+    if ($g === 'alt') {
+        $warum = sprintf(bl_t('PRUEF.WLAN_GRUND_ALT'), $alter, $frist);
+    } elseif ($g === 'ok') {
+        $warum = sprintf(bl_t('PRUEF.WLAN_GRUND_OK'), isset($wl['ok']) && $wl['ok'] !== '' ? (string) $wl['ok'] : '?');
+    } elseif ($g === 'mqtt') {
+        $warum = bl_t('PRUEF.WLAN_OHNE_MQTT');
+    } else {
+        $warum = bl_t('PRUEF.WLAN_GRUND_NIE');
+    }
+    return array(false, sprintf(bl_t('PRUEF.WLAN_SCHWEIGT'), $warum) . $liste);
+}
+
+/**
  * Die Selbstpruefung.
  *
  * Zustand: true = Haken, false = Kreuz, null = nicht pruefbar (Strich).
@@ -1013,6 +1150,14 @@ function bl_pruefzeilen($cfg, $tags)
         list($abo_pfad, $abo_da) = bl_abo_datei(bl_cfg($cfg, 'themenpraefix', 'blescanner'));
         $zeilen[] = bl_zeile(bl_t('PRUEF.ABO_DATEI'), $p['home'] === '' ? null : $abo_da,
                              $abo_pfad . ($abo_da ? '' : ' - ' . bl_t('PRUEF.ABO_DATEI_NEIN')));
+    }
+
+    // --- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026, ab
+    //     Werk aus): schweigt der WiFi-Scanner, zaehlt nur BLE - und diese
+    //     Zeile sagt es. Ohne Kopplung gibt es die Zeile nicht.
+    if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
+        list($ok, $meldung) = bl_wlan_lage($cfg, $status, $gilt, $grund);
+        $zeilen[] = bl_zeile(bl_t('PRUEF.WLAN'), $ok, $meldung);
     }
 
     // --- HTTP
