@@ -5,16 +5,22 @@
 # entfernt sie beim Deinstallieren wieder (Zeile 1609). Dieses Verzeichnis IST
 # /etc/sudoers.d - am Geraet am 13.09.2026 ueber die Inode-Nummer nachgemessen.
 #
-# EINE Zeile, EIN Pfad, KEINE Argumente.
+# EINE Zeile, EIN Pfad, und das leere Argument "".
 #
-# Der genannte Helfer liegt in /usr/local/sbin (gehoert root, 0755) und wird
-# von postroot.sh geschrieben - NICHT im Plugin-Ordner. Eine Regel auf eine
-# Datei unter bin/ waere ein Weg nach Root, weil dieses Verzeichnis loxberry
-# gehoert und jeder, der dort schreiben darf, sich damit root-Code verschaffen
-# koennte (Regeln/06, "Die sudoers-Vorlage loeschen, wenn sie nicht gebraucht
-# wird"). Deshalb auch keine Argumente: mit Argumenten liesse sich die Wirkung
-# des Aufrufs von aussen steuern.
+# EHRLICH GESAGT (berichtigt in 1.3.20, Entscheidung 2 vom 29.09.2026):
+# loxberry ist ueber /etc/sudoers.d/lbdefaults ohnehin faktisch root - dort
+# darf der Benutzer ohne Kennwort /bin/systemctl, apt-get, dpkg und reboot.
+# Diese Regel begrenzt darueber hinaus nichts. Bis 1.3.19 stand hier, eine
+# Regel auf eine Datei unter bin/ waere "ein Weg nach Root" und die Regel
+# lasse "KEINE Argumente" zu; beides stimmte so nicht. Eine Regel ohne
+# Argumentliste erlaubt nach sudoers(5) jedes Argument - erst das leere
+# Argument "" verlangt einen Aufruf ohne Argumente.
+#
+# Warum der Helfer trotzdem in /usr/local/sbin liegt (root, 0755, von
+# postroot.sh geschrieben) und nicht im Plugin-Ordner: damit sein Inhalt unter
+# der Aufsicht von postroot.sh steht und kein Umbau im Plugin-Ordner ihn
+# versehentlich veraendert. Das schuetzt vor Versehen, nicht vor Missbrauch.
 #
 # Was der Helfer tut, steht vollstaendig in ihm selbst: die Bluetooth-Module
 # laden und bluetooth.service starten. Er aendert keine Datei unter /etc.
-%loxberry ALL = NOPASSWD: /usr/local/sbin/ble_scanner_ng_bluetooth
+%loxberry ALL = NOPASSWD: /usr/local/sbin/ble_scanner_ng_bluetooth ""

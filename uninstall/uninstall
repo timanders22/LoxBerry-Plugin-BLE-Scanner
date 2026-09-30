@@ -307,5 +307,37 @@ if [ -n "$BASE" ] && [ -d "$BASE/data/plugins" ]; then
     # 0.9.20 (Regeln/06) - "uninstall raeumt sie weg".
     rm -f "$BASE/data/plugins/$PDIR.upgrade_laeuft" 2>/dev/null
     rm -f "$BASE/data/plugins/$PDIR.lief_vor_update" 2>/dev/null
+    # ERGAENZT IN 1.3.20 (Pruefung 29.09.2026, B5): der Sollmerker und die
+    # Datei des Waechters (cron/cron.05min) liegen aus demselben Grund neben
+    # dem Datenordner. Blieben sie liegen, hielte ein "0" aus dieser
+    # Installation eine spaetere an.
+    rm -f "$BASE/data/plugins/$PDIR.soll_laufen" 2>/dev/null
+    rm -f "$BASE/data/plugins/$PDIR.waechter" "$BASE/data/plugins/$PDIR.waechter.neu."* 2>/dev/null
+fi
+
+# ---------- .alt, .vorher, .kaputt und Reste abgebrochener Laeufe ----------
+# NEU IN 1.3.20, aus dem gegengemessenen Vorschlag des Installer-Pruefers
+# (Durchgang 29.09.2026, B5; in WSL Fall U1: bis dahin blieben vier Dateien
+# mit der Personenliste liegen). preinstall.sh legt bei einer
+# Neuinstallation .alt ab (Entscheidung 1), preupgrade.sh eine Sicherung aus
+# einem frueheren Lauf nach .vorher, postupgrade.sh eine unvollstaendige
+# Konfiguration nach .kaputt, und ein abgebrochenes preupgrade.sh hinterlaesst
+# .neu/.alt neben Zweitschrift und Sicherung. Alle tragen MAC-Adressen und
+# Namen. Jeder Rest wird einzeln gemeldet.
+if [ -n "$BASE" ] && [ -d "$BASE/data/plugins" ]; then
+    for bl_rest in "$ZWEIT.alt" "$ZWEIT.neu" \
+                   "$BASE/data/plugins/$PDIR.upgrade_sicherung.alt" \
+                   "$BASE/data/plugins/$PDIR.upgrade_sicherung.neu" \
+                   "$BASE/data/plugins/$PDIR.upgrade_sicherung.vorher" \
+                   "$BASE/data/plugins/$PDIR.upgrade_sicherung.kaputt"; do
+        if [ -e "$bl_rest" ] || [ -L "$bl_rest" ]; then
+            rm -rf "$bl_rest" 2>/dev/null
+            if [ -e "$bl_rest" ] || [ -L "$bl_rest" ]; then
+                echo "<WARNING> $bl_rest liess sich nicht entfernen - bitte von Hand."
+            else
+                echo "<OK> Rest einer frueheren Sicherung entfernt ($bl_rest)."
+            fi
+        fi
+    done
 fi
 exit 0

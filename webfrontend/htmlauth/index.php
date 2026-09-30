@@ -31,13 +31,45 @@ if ($bl_home !== '' && file_exists($bl_home . '/libs/phplib/loxberry_system.php'
 $bl_saved   = false;
 $bl_hinweis = '';
 $bl_error   = '';
-$bl_fehler  = array();   // gesammelte Beanstandungen
+$bl_fehler  = array();   // gesammelte Beanstandungen: nicht uebernommen, alter Wert bleibt
+// Eigene Liste fuer das Scheitern eines Vorgangs, der nichts speichert - etwa
+// die Abweisung durch den Wachposten (seit 1.3.20, Pruefung 29.09.2026, O13;
+// Regeln/04 "Ein Knopf, der nichts speichert, meldet sein Scheitern nicht
+// unter der Ueberschrift der Beanstandungsliste").
+$bl_gescheitert = array();
+$bl_such    = null;
+$bl_test_titel = '';
+$bl_test_text  = '';
+$bl_eingetippt = null;   // Tag-Zeilen aus dem Suchlauf, ueber die Umleitung getragen
+$bl_ist_post = (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST');
+
+/* ---------------------------------------------------------------- *
+ * Die Einmalmeldung der vorigen Anfrage - NUR beim GET (seit 1.3.20, O4).
+ * Beim POST sind die Listen zugleich die Sammler der Eingabepruefung;
+ * eine alte Meldung darin verhinderte sonst das naechste Speichern
+ * (Regeln/04, Docker NG).
+ * ---------------------------------------------------------------- */
+if (!$bl_ist_post) {
+    $bl_einmal = bl_einmal_lesen();
+    if ($bl_einmal !== null) {
+        $bl_saved = $bl_einmal['saved'];
+        $bl_hinweis = $bl_einmal['hinweis'];
+        $bl_error = $bl_einmal['error'];
+        $bl_fehler = $bl_einmal['fehler'];
+        $bl_gescheitert = $bl_einmal['gescheitert'];
+        $bl_test_titel = $bl_einmal['test_titel'];
+        $bl_test_text = $bl_einmal['test_text'];
+        $bl_such = $bl_einmal['such'];
+        $bl_eingetippt = $bl_einmal['tags'];
+    }
+}
 
 /* ---------------------------------------------------------------- *
  * Der Wachposten - EIN Posten, vor allen Handlern.
  * Abgewiesen heisst gemeldet, und es wird NICHTS ausgefuehrt: $_POST
  * wird geleert, nur der aktive Reiter bleibt stehen, damit der Bediener
- * nach der Abweisung dort steht, wo er war.
+ * nach der Abweisung dort steht, wo er war. Die Meldung reist seit 1.3.20
+ * ebenfalls ueber die Umleitung.
  * ---------------------------------------------------------------- */
 $bl_wache = bl_wachposten();
 if ($bl_wache !== '') {
@@ -47,12 +79,8 @@ if ($bl_wache !== '') {
     if ($bl_reiter_merk !== null) {
         $_POST['activetab'] = $bl_reiter_merk;
     }
-    $bl_fehler[] = $bl_wache;
+    $bl_gescheitert[] = $bl_wache;
 }
-
-$bl_such    = null;
-$bl_test_titel = '';
-$bl_test_text  = '';
 
 /* ================= Reiter: EINE ausgeschriebene Liste =================
  * Ausgeschrieben, nicht gerechnet: hausstandard_pruefen.py sucht die
@@ -68,57 +96,64 @@ if (isset($_POST['activetab']) && in_array((string) $_POST['activetab'], $bl_rei
 }
 
 list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
-$bl_ist_post = ($_SERVER['REQUEST_METHOD'] === 'POST');
 
 /* ================= Hilfen fuer die Eingabe ================= */
 
-/** Steuerzeichen und Anfuehrungszeichen raus - sonst nichts. */
+/**
+ * Steuerzeichen raus - sonst nichts. Anfuehrungszeichen werden seit 1.3.20
+ * NICHT mehr still entfernt, sondern abgewiesen (bl_text_feld() unten; Pruefung
+ * 29.09.2026, C9: aus "ha\"us" wurde still "haus"). Diese Funktion bleibt fuer
+ * Felder, die ohnehin gegen ein Muster gehalten werden.
+ */
 function bl_saubere_eingabe($s)
 {
-    $s = preg_replace('/[\x00-\x1F\x7F"\']+/u', '', (string) $s);
-    return trim($s);
+    $s = preg_replace('/[\x00-\x1F\x7F]+/u', '', is_string($s) ? $s : '');
+    return trim((string) $s);
 }
 
 /**
- * Eine Zahl pruefen. Was nicht passt, wird BEANSTANDET und der BISHERIGE
- * Wert behalten - nicht die Vorgabe.
- *
- * Bis 1.2.10 gab diese Stelle bei jedem Verstoss die Vorgabe zurueck, ohne
- * ein Wort. Gemessen: intervall=99999 wurde zu 5, abwesenheit_nach="abc" zu
- * 30, aktualisierung=3 zu 60 - und die Oberflaeche meldete "Gespeichert".
+ * Ein Textfeld: enthaelt es ein Anfuehrungszeichen oder Steuerzeichen, wird es
+ * ABGEWIESEN und gemeldet, und der bisherige Wert bleibt (seit 1.3.20, C9).
  */
-function bl_zahl($roh, $bisher, $min, $max, $feld, &$mangel)
+function bl_text_feld($roh, $bisher, $feld, &$mangel)
 {
-    $roh = trim((string) $roh);
-    if ($roh === '' || !is_numeric($roh)) {
-        $mangel[] = sprintf(bl_t('MANGEL.KEINE_ZAHL'), $feld, $roh, $bisher);
+    if (!is_string($roh)) {
+        $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $feld, '', $bisher);
         return (string) $bisher;
     }
-    $n = (int) $roh;
-    if ($n < $min || $n > $max) {
-        $mangel[] = sprintf(bl_t('MANGEL.AUSSERHALB'), $feld, $n, $min, $max, $bisher);
+    if (bl_unzulaessige_zeichen($roh)) {
+        $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $feld, bl_saubere_eingabe($roh), $bisher);
         return (string) $bisher;
     }
-    return (string) $n;
+    return trim($roh);
 }
 
-function bl_komma($roh, $bisher, $min, $max, $feld, &$mangel)
+/**
+ * Eine Zahl pruefen - mit DERSELBEN Regel wie das Zurueckspielen einer
+ * Sicherung (bl_wert_pruefen() und bl_regeln() in bl_lib.php, seit 1.3.20).
+ * Was nicht passt, wird BEANSTANDET und der BISHERIGE Wert behalten - nicht
+ * die Vorgabe.
+ *
+ * Bis 1.2.10 gab diese Stelle bei jedem Verstoss die Vorgabe zurueck, ohne
+ * ein Wort. Bis 1.3.19 pruefte sie mit is_numeric() und schnitt dann mit
+ * (int) ab: aus 10.7 wurde still 10 (Pruefung 29.09.2026, C9/O6). Jetzt gilt
+ * eine ganze Zahl nur in ganzzahliger Schreibweise.
+ */
+function bl_feld_zahl($k, $roh, $bisher, $feld, &$mangel)
 {
-    $roh = str_replace(',', '.', trim((string) $roh));
-    if ($roh === '' || !is_numeric($roh)) {
-        $mangel[] = sprintf(bl_t('MANGEL.KEINE_ZAHL'), $feld, $roh, $bisher);
-        return (string) $bisher;
+    $regeln = bl_regeln();
+    list($ok, $wert, $grund) = bl_wert_pruefen($k, is_string($roh) ? $roh : null);
+    if ($ok) {
+        return $wert;
     }
-    $n = (float) $roh;
-    if ($n < $min || $n > $max) {
-        $mangel[] = sprintf(bl_t('MANGEL.AUSSERHALB'), $feld, $n, $min, $max, $bisher);
-        return (string) $bisher;
+    $r = $regeln[$k];
+    $zeige = is_string($roh) ? bl_saubere_eingabe($roh) : '';
+    if ($grund === 'grenze') {
+        $mangel[] = sprintf(bl_t('MANGEL.AUSSERHALB'), $feld, $zeige, $r[1], $r[2], $bisher);
+    } else {
+        $mangel[] = sprintf(bl_t('MANGEL.KEINE_ZAHL'), $feld, $zeige, $bisher);
     }
-    // %F, nicht %f: %f setzt das Dezimalzeichen der eingestellten Locale -
-    // unter de_DE stuende "2,50" in der Datei, die Python als Zahl liest
-    // (Muster 10 der Nachlese; gemessen mit Windows-PHP 7.4 und 8.4 unter
-    // de-DE, Pruefung-BLE-Scanner-1.3.19, Fall L1).
-    return rtrim(rtrim(sprintf('%.2F', $n), '0'), '.');
+    return (string) $bisher;
 }
 
 /**
@@ -130,7 +165,7 @@ function bl_komma($roh, $bisher, $min, $max, $feld, &$mangel)
  * Bezeichnung eintrug und dann auf "Geräte suchen" drueckte, fand sie
  * danach nicht wieder, ohne jeden Hinweis.
  */
-function bl_tags_aus_post(&$mangel)
+function bl_tags_aus_post(&$mangel, $bestand = array())
 {
     $tags = array();
     $gesehen = array();
@@ -138,43 +173,109 @@ function bl_tags_aus_post(&$mangel)
     $namen = isset($_POST['tag_name'])    && is_array($_POST['tag_name'])    ? $_POST['tag_name']    : array();
     $aktiv = isset($_POST['tag_aktiv'])   && is_array($_POST['tag_aktiv'])   ? $_POST['tag_aktiv']   : array();
     $weg   = isset($_POST['tag_weg'])     && is_array($_POST['tag_weg'])     ? $_POST['tag_weg']     : array();
+    // SEIT 1.3.20 traegt jede bestehende Zeile ihren urspruenglichen Schluessel
+    // (Regeln/04, "Tabellenzeilen mit wechselnder Zahl ... tragen einen
+    // ausgeschriebenen Index und den urspruenglichen Schluessel"). Damit geht
+    // eine abgewiesene Eingabe vom GESPEICHERTEN Datensatz aus: eine vertippte
+    // Adresse loeschte bis 1.3.19 den ganzen Tag samt Name und Zusatzangaben,
+    // ein abgewiesenes abw=9x den gespeicherten Wert - unter der Ueberschrift
+    // "der bisherige Wert bleibt stehen" (Pruefung 29.09.2026, C9/O6).
+    $alt   = isset($_POST['tag_alt'])     && is_array($_POST['tag_alt'])     ? $_POST['tag_alt']     : array();
+    $gespeichert = array();
+    foreach ($bestand as $t) {
+        $gespeichert[$t['kennung']] = $t;
+    }
     $erlaubt = bl_tag_optionen();
 
-    foreach ($kenn as $i => $roh) {
-        $roh = bl_saubere_eingabe($roh);
-        if ($roh === '') {
-            continue;                      // leere Zeile: nichts eingetragen
+    foreach ($kenn as $i => $roh_kennung) {
+        $vorher = null;
+        if (isset($alt[$i]) && is_string($alt[$i]) && isset($gespeichert[$alt[$i]])) {
+            $vorher = $gespeichert[$alt[$i]];
         }
+        $bezeichnung = $vorher !== null ? ($vorher['name'] !== '' ? $vorher['name'] : $vorher['kennung']) : '';
         if (!empty($weg[$i])) {
             continue;                      // ausdruecklich zum Entfernen angehakt
         }
-        list($art, $kennung) = bl_kennung($roh);
+        $roh = is_string($roh_kennung) ? $roh_kennung : '';
+        if (trim($roh) === '') {
+            if ($vorher !== null) {
+                // Eine GELEERTE Adresse loescht nichts; entfernt wird ueber
+                // den Haken "Entfernen" (Regeln/04, leeres Feld loescht nichts).
+                $mangel[] = sprintf(bl_t('MANGEL.KENNUNG_LEER'), $bezeichnung);
+                if (!isset($gesehen[$vorher['kennung']])) {
+                    $gesehen[$vorher['kennung']] = true;
+                    $tags[] = $vorher;
+                }
+            }
+            continue;                      // leere neue Zeile: nichts eingetragen
+        }
+        list($art, $kennung) = bl_unzulaessige_zeichen($roh) ? array('', '') : bl_kennung($roh);
         if ($art === '') {
-            // ABWEISEN und melden, nicht stillschweigend verwerfen. Bis
-            // 1.2.10 verschwand eine unbrauchbare Adresse spurlos, und die
-            // Oberflaeche meldete trotzdem "Gespeichert".
-            $mangel[] = sprintf(bl_t('MANGEL.KENNUNG'), $roh);
+            // ABWEISEN und melden, nicht stillschweigend verwerfen.
+            if ($vorher !== null) {
+                $mangel[] = sprintf(bl_t('MANGEL.KENNUNG_BLEIBT'), bl_saubere_eingabe($roh),
+                                    $vorher['kennung']);
+                if (!isset($gesehen[$vorher['kennung']])) {
+                    $gesehen[$vorher['kennung']] = true;
+                    $tags[] = $vorher;
+                }
+            } else {
+                $mangel[] = sprintf(bl_t('MANGEL.KENNUNG'), bl_saubere_eingabe($roh));
+            }
             continue;
         }
         if (isset($gesehen[$kennung])) {
             $mangel[] = sprintf(bl_t('MANGEL.DOPPELT'), $kennung);
+            if ($vorher !== null && !isset($gesehen[$vorher['kennung']])) {
+                $gesehen[$vorher['kennung']] = true;
+                $tags[] = $vorher;
+            }
             continue;
         }
-        $gesehen[$kennung] = true;
+        $vopt = $vorher !== null ? $vorher['opt'] : array();
+        // Eine neue Zeile mit abgewiesenem Feld wird als GANZE nicht
+        // uebernommen - es gibt keinen bisherigen Wert, der stehen bleiben
+        // koennte, und ein halber Tag waere eine stille Berichtigung.
+        $zeile_ok = true;
+        $name_roh = isset($namen[$i]) ? $namen[$i] : '';
+        if (!is_string($name_roh) || bl_unzulaessige_zeichen($name_roh)) {
+            $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . bl_t('TEXT.SP_BEZEICHNUNG'),
+                                is_string($name_roh) ? bl_saubere_eingabe($name_roh) : '',
+                                $vorher !== null ? $vorher['name'] : '-');
+            $name = $vorher !== null ? $vorher['name'] : null;
+            if ($vorher === null) { $zeile_ok = false; }
+        } else {
+            $name = trim($name_roh);
+        }
         $opt = array();
         foreach ($erlaubt as $k) {
-            $wert = isset($_POST['tag_' . $k][$i]) ? bl_saubere_eingabe($_POST['tag_' . $k][$i]) : '';
+            $wert_roh = isset($_POST['tag_' . $k][$i]) ? $_POST['tag_' . $k][$i] : '';
+            if (!is_string($wert_roh) || bl_unzulaessige_zeichen($wert_roh)) {
+                $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . $k,
+                                    is_string($wert_roh) ? bl_saubere_eingabe($wert_roh) : '',
+                                    isset($vopt[$k]) ? $vopt[$k] : '-');
+                if (isset($vopt[$k])) { $opt[$k] = $vopt[$k]; }
+                if ($vorher === null) { $zeile_ok = false; }
+                continue;
+            }
+            $wert = trim($wert_roh);
             if ($wert !== '') {
                 $opt[$k] = $wert;
             }
         }
         if (isset($opt['abw']) && (!ctype_digit($opt['abw']) || (int) $opt['abw'] < 5 || (int) $opt['abw'] > 3600)) {
-            $mangel[] = sprintf(bl_t('MANGEL.TAG_ABW'), $kennung, $opt['abw']);
+            $mangel[] = sprintf(bl_t('MANGEL.TAG_ABW'), $kennung, $opt['abw'],
+                                isset($vopt['abw']) ? $vopt['abw'] : '-');
             unset($opt['abw']);
+            if (isset($vopt['abw'])) { $opt['abw'] = $vopt['abw']; }
+            if ($vorher === null) { $zeile_ok = false; }
         }
-        if (isset($opt['ref']) && (!is_numeric($opt['ref']) || (int) $opt['ref'] > 0 || (int) $opt['ref'] < -120)) {
-            $mangel[] = sprintf(bl_t('MANGEL.TAG_REF'), $kennung, $opt['ref']);
+        if (isset($opt['ref']) && (!bl_ganzzahl($opt['ref']) || (int) $opt['ref'] > 0 || (int) $opt['ref'] < -120)) {
+            $mangel[] = sprintf(bl_t('MANGEL.TAG_REF'), $kennung, $opt['ref'],
+                                isset($vopt['ref']) ? $vopt['ref'] : '-');
             unset($opt['ref']);
+            if (isset($vopt['ref'])) { $opt['ref'] = $vopt['ref']; }
+            if ($vorher === null) { $zeile_ok = false; }
         }
         // Ein Alias darf nicht heissen wie ein Zweig, den der Themenbaum
         // selbst belegt: "summary" erzeugte "summary/present" und stritte mit
@@ -184,19 +285,26 @@ function bl_tags_aus_post(&$mangel)
             && in_array(strtolower(bl_saeubern($opt['alias'])),
                         bl_reservierte_zweige(), true)) {
             $mangel[] = sprintf(bl_t('MANGEL.ALIAS_RESERVIERT'), $kennung,
-                                $opt['alias'], implode(', ', bl_reservierte_zweige()));
+                                $opt['alias'], implode(', ', bl_reservierte_zweige()),
+                                isset($vopt['alias']) ? $vopt['alias'] : '-');
             unset($opt['alias']);
+            if (isset($vopt['alias'])) { $opt['alias'] = $vopt['alias']; }
+            if ($vorher === null) { $zeile_ok = false; }
         }
         if (isset($opt['batt'])) {
             $opt['batt'] = ($opt['batt'] === '1') ? '1' : '';
             if ($opt['batt'] === '') { unset($opt['batt']); }
         }
+        if (!$zeile_ok) {
+            continue;
+        }
+        $gesehen[$kennung] = true;
         $tags[] = array(
             'art' => $art,
             'kennung' => $kennung,
             'mac' => $art === 'mac' ? $kennung : '',
             'aktiv' => !empty($aktiv[$i]) ? '1' : '0',
-            'name' => bl_saubere_eingabe(isset($namen[$i]) ? $namen[$i] : ''),
+            'name' => $name,
             'opt' => $opt,
         );
     }
@@ -205,8 +313,14 @@ function bl_tags_aus_post(&$mangel)
     $neue = isset($_POST['neu_kennung']) && is_array($_POST['neu_kennung']) ? $_POST['neu_kennung'] : array();
     $neue_namen = isset($_POST['neu_name']) && is_array($_POST['neu_name']) ? $_POST['neu_name'] : array();
     foreach ($neue as $roh => $_an) {
-        list($art, $kennung) = bl_kennung(bl_saubere_eingabe($roh));
+        list($art, $kennung) = bl_kennung(bl_saubere_eingabe((string) $roh));
         if ($art === '' || isset($gesehen[$kennung])) {
+            continue;
+        }
+        $name_roh = isset($neue_namen[$roh]) ? $neue_namen[$roh] : '';
+        if (!is_string($name_roh) || bl_unzulaessige_zeichen($name_roh)) {
+            $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . bl_t('TEXT.SP_BEZEICHNUNG'),
+                                is_string($name_roh) ? bl_saubere_eingabe($name_roh) : '', '-');
             continue;
         }
         $gesehen[$kennung] = true;
@@ -214,7 +328,7 @@ function bl_tags_aus_post(&$mangel)
             'art' => $art, 'kennung' => $kennung,
             'mac' => $art === 'mac' ? $kennung : '',
             'aktiv' => '1',
-            'name' => bl_saubere_eingabe(isset($neue_namen[$roh]) ? $neue_namen[$roh] : ''),
+            'name' => trim($name_roh),
             'opt' => array(),
         );
     }
@@ -270,10 +384,12 @@ if ($bl_ist_post && isset($_POST['verlauf_download'])) {
 
 /* ============ Suchlauf ============ */
 if ($bl_ist_post && isset($_POST['suchen'])) {
-    // Die getippten Zeilen NICHT verlieren.
-    $eingetippt = bl_tags_aus_post($bl_fehler);
+    // Die getippten Zeilen NICHT verlieren - seit 1.3.20 reisen sie mit der
+    // Einmalmeldung ueber die Umleitung.
+    $eingetippt = bl_tags_aus_post($bl_fehler, $bl_tags);
     if ($eingetippt) {
         $bl_tags = $eingetippt;
+        $bl_eingetippt = $eingetippt;
     }
     $skript = $bl_p['bindir'] . '/bl_discover.py';
     if (!is_file($skript)) {
@@ -301,10 +417,10 @@ if ($bl_ist_post && isset($_POST['suchen'])) {
 }
 
 /* ============ Test-Aktionen ============ */
-if ($bl_ist_post && isset($_POST['test'])) {
+if ($bl_ist_post && isset($_POST['test']) && is_string($_POST['test'])) {
     require_once __DIR__ . '/bl_test.php';
-    $zusatz = isset($_POST['testtag']) ? (string) $_POST['testtag'] : '';
-    list($bl_test_titel, $bl_test_text) = bl_test_ausfuehren((string) $_POST['test'], $zusatz);
+    $zusatz = isset($_POST['testtag']) && is_string($_POST['testtag']) ? $_POST['testtag'] : '';
+    list($bl_test_titel, $bl_test_text) = bl_test_ausfuehren($_POST['test'], $zusatz);
     $bl_tab = 'tab-test';
     list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
 }
@@ -315,71 +431,87 @@ if ($bl_ist_post && isset($_POST['test'])) {
 if ($bl_ist_post && isset($_POST['save'])) {
     $neu = $bl_cfg;
 
-    $adapter = bl_saubere_eingabe(isset($_POST['adapter']) ? $_POST['adapter'] : 'hci0');
-    if (preg_match('/^hci[0-9]+$/', $adapter)) {
-        $neu['adapter'] = $adapter;
+    // Muster und Texte seit 1.3.20 gegen die ROHE Eingabe: bis 1.3.19 wurden
+    // Anfuehrungszeichen vorher still entfernt, und aus "hc\"i0" wurde ein
+    // gueltiges hci0 (Pruefung 29.09.2026, C9).
+    $adapter_roh = isset($_POST['adapter']) ? $_POST['adapter'] : 'hci0';
+    list($ok, $w) = bl_wert_pruefen('adapter', $adapter_roh);
+    if ($ok) {
+        $neu['adapter'] = $w;
     } else {
-        $bl_fehler[] = sprintf(bl_t('MANGEL.ADAPTER'), $adapter, $bl_cfg['adapter']);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.ADAPTER'),
+                               is_string($adapter_roh) ? bl_saubere_eingabe($adapter_roh) : '',
+                               $bl_cfg['adapter']);
     }
 
-    $betriebsart = isset($_POST['betriebsart']) ? (string) $_POST['betriebsart'] : '';
+    $betriebsart = isset($_POST['betriebsart']) && is_string($_POST['betriebsart']) ? $_POST['betriebsart'] : '';
     if (in_array($betriebsart, array('signal', 'abfrage'), true)) {
         $neu['betriebsart'] = $betriebsart;
     } else {
-        $bl_fehler[] = sprintf(bl_t('MANGEL.BETRIEBSART'), $betriebsart);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.BETRIEBSART'), bl_saubere_eingabe($betriebsart));
     }
 
     $neu['http_push']   = isset($_POST['http_push']) ? '1' : '0';
-    $neu['loxberry_id'] = bl_saubere_eingabe(isset($_POST['loxberry_id']) ? $_POST['loxberry_id'] : '');
+    $neu['loxberry_id'] = bl_text_feld(isset($_POST['loxberry_id']) ? $_POST['loxberry_id'] : '',
+                                       $bl_cfg['loxberry_id'], bl_t('FELD.LOXBERRY_ID'), $bl_fehler);
 
-    $neu['intervall']          = bl_zahl($_POST['intervall'] ?? '', $bl_cfg['intervall'], 2, 600, bl_t('FELD.INTERVALL'), $bl_fehler);
-    $neu['abwesenheit_nach']   = bl_zahl($_POST['abwesenheit_nach'] ?? '', $bl_cfg['abwesenheit_nach'], 5, 3600, bl_t('FELD.ABWESEND'), $bl_fehler);
-    $neu['aktualisierung']     = bl_zahl($_POST['aktualisierung'] ?? '', $bl_cfg['aktualisierung'], 5, 86400, bl_t('FELD.AKTUALISIERUNG'), $bl_fehler);
-    $neu['rssi_nah']           = bl_zahl($_POST['rssi_nah'] ?? '', $bl_cfg['rssi_nah'], -120, 0, bl_t('FELD.RSSI_NAH'), $bl_fehler);
-    $neu['rssi_mittel']        = bl_zahl($_POST['rssi_mittel'] ?? '', $bl_cfg['rssi_mittel'], -120, 0, bl_t('FELD.RSSI_MITTEL'), $bl_fehler);
-    $neu['rssi_minimum']       = bl_zahl($_POST['rssi_minimum'] ?? '', $bl_cfg['rssi_minimum'], -120, 0, bl_t('FELD.RSSI_MINIMUM'), $bl_fehler);
-    $neu['ankunft_sichtungen'] = bl_zahl($_POST['ankunft_sichtungen'] ?? '', $bl_cfg['ankunft_sichtungen'], 1, 20, bl_t('FELD.ANKUNFT'), $bl_fehler);
+    // Ganze Zahlen: dieselbe Tabelle wie das Zurueckspielen (bl_regeln()).
+    $bl_zahlfelder = array(
+        'intervall' => 'FELD.INTERVALL', 'abwesenheit_nach' => 'FELD.ABWESEND',
+        'aktualisierung' => 'FELD.AKTUALISIERUNG', 'rssi_nah' => 'FELD.RSSI_NAH',
+        'rssi_mittel' => 'FELD.RSSI_MITTEL', 'rssi_minimum' => 'FELD.RSSI_MINIMUM',
+        'ankunft_sichtungen' => 'FELD.ANKUNFT', 'glaettung_fenster' => 'FELD.FENSTER',
+        'hysterese_db' => 'FELD.HYSTERESE', 'wachhund_stille' => 'FELD.STILLE',
+        'discovery_rssi' => 'FELD.DISCOVERY_RSSI', 'log_kappung_kb' => 'FELD.LOGKAPPUNG',
+        'ereignisse_tage' => 'FELD.EREIGNISTAGE', 'raum_hysterese_db' => 'FELD.RAUM_HYST',
+        'raum_ausgleich_db' => 'FELD.RAUM_AUSGLEICH', 'daempfung' => 'FELD.DAEMPFUNG',
+    );
+    foreach ($bl_zahlfelder as $bl_k => $bl_feld) {
+        $neu[$bl_k] = bl_feld_zahl($bl_k, isset($_POST[$bl_k]) ? $_POST[$bl_k] : '',
+                                   $bl_cfg[$bl_k], bl_t($bl_feld), $bl_fehler);
+    }
     $neu['glaettung']          = isset($_POST['glaettung']) ? '1' : '0';
-    $neu['glaettung_fenster']  = bl_zahl($_POST['glaettung_fenster'] ?? '', $bl_cfg['glaettung_fenster'], 1, 30, bl_t('FELD.FENSTER'), $bl_fehler);
-    $neu['hysterese_db']       = bl_zahl($_POST['hysterese_db'] ?? '', $bl_cfg['hysterese_db'], 0, 20, bl_t('FELD.HYSTERESE'), $bl_fehler);
     $neu['wachhund']           = isset($_POST['wachhund']) ? '1' : '0';
-    $neu['wachhund_stille']    = bl_zahl($_POST['wachhund_stille'] ?? '', $bl_cfg['wachhund_stille'], 60, 86400, bl_t('FELD.STILLE'), $bl_fehler);
-    $neu['discovery_rssi']     = bl_zahl($_POST['discovery_rssi'] ?? '', $bl_cfg['discovery_rssi'], -120, 0, bl_t('FELD.DISCOVERY_RSSI'), $bl_fehler);
-    $neu['log_kappung_kb']     = bl_zahl($_POST['log_kappung_kb'] ?? '', $bl_cfg['log_kappung_kb'], 16, 20000, bl_t('FELD.LOGKAPPUNG'), $bl_fehler);
     $neu['ereignisse']         = isset($_POST['ereignisse']) ? '1' : '0';
-    $neu['ereignisse_tage']    = bl_zahl($_POST['ereignisse_tage'] ?? '', $bl_cfg['ereignisse_tage'], 1, 365, bl_t('FELD.EREIGNISTAGE'), $bl_fehler);
     $neu['entfernung']         = isset($_POST['entfernung']) ? '1' : '0';
-    $neu['daempfung']          = bl_komma($_POST['daempfung'] ?? '', $bl_cfg['daempfung'], 1.5, 6.0, bl_t('FELD.DAEMPFUNG'), $bl_fehler);
     $neu['beacon']             = isset($_POST['beacon']) ? '1' : '0';
     $neu['batterie']           = isset($_POST['batterie']) ? '1' : '0';
     $neu['scanner_themen']     = isset($_POST['scanner_themen']) ? '1' : '0';
     $neu['raum']               = isset($_POST['raum']) ? '1' : '0';
-    $neu['raum_hysterese_db']  = bl_zahl($_POST['raum_hysterese_db'] ?? '', $bl_cfg['raum_hysterese_db'], 0, 30, bl_t('FELD.RAUM_HYST'), $bl_fehler);
-    $neu['raum_ausgleich_db']  = bl_zahl($_POST['raum_ausgleich_db'] ?? '', $bl_cfg['raum_ausgleich_db'], -30, 30, bl_t('FELD.RAUM_AUSGLEICH'), $bl_fehler);
 
-    $uhr = bl_saubere_eingabe($_POST['batterie_uhrzeit'] ?? '');
-    if (preg_match('/^([01]?\d|2[0-3]):[0-5]\d$/', $uhr)) {
-        $neu['batterie_uhrzeit'] = $uhr;
+    $uhr_roh = isset($_POST['batterie_uhrzeit']) ? $_POST['batterie_uhrzeit'] : '';
+    list($ok, $w) = bl_wert_pruefen('batterie_uhrzeit', $uhr_roh);
+    if ($ok) {
+        $neu['batterie_uhrzeit'] = $w;
     } else {
-        $bl_fehler[] = sprintf(bl_t('MANGEL.UHRZEIT'), $uhr, $bl_cfg['batterie_uhrzeit']);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.UHRZEIT'),
+                               is_string($uhr_roh) ? bl_saubere_eingabe($uhr_roh) : '',
+                               $bl_cfg['batterie_uhrzeit']);
     }
 
-    $sname = bl_saubere_eingabe($_POST['scanner_name'] ?? '');
-    if ($sname === '' || preg_match('/^[A-Za-z0-9_-]{1,32}$/', $sname)) {
-        $neu['scanner_name'] = $sname;
+    $sname_roh = isset($_POST['scanner_name']) ? $_POST['scanner_name'] : '';
+    list($ok, $w) = bl_wert_pruefen('scanner_name', $sname_roh);
+    if ($ok) {
+        $neu['scanner_name'] = $w;
     } else {
-        $bl_fehler[] = sprintf(bl_t('MANGEL.SCANNERNAME'), $sname);
+        $bl_fehler[] = sprintf(bl_t('MANGEL.SCANNERNAME'),
+                               is_string($sname_roh) ? bl_saubere_eingabe($sname_roh) : '',
+                               $bl_cfg['scanner_name']);
     }
 
     if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
-        // Vertauscht eingegeben. Gedreht wird es - aber es wird auch GESAGT.
-        $tausch = $neu['rssi_nah'];
-        $neu['rssi_nah'] = $neu['rssi_mittel'];
-        $neu['rssi_mittel'] = $tausch;
-        $bl_fehler[] = bl_t('MANGEL.SCHWELLEN_GEDREHT');
+        // Vertauscht eingegeben. BERICHTIGT IN 1.3.20: bis 1.3.19 wurden die
+        // beiden still gedreht und gespeichert - unter der Ueberschrift "der
+        // bisherige Wert bleibt stehen" (Pruefung 29.09.2026, O6). Jetzt
+        // bleiben BEIDE beim bisherigen Wert, und die Ueberschrift stimmt.
+        $bl_fehler[] = sprintf(bl_t('MANGEL.SCHWELLEN_VERTAUSCHT'),
+                               $neu['rssi_mittel'], $neu['rssi_nah'],
+                               $bl_cfg['rssi_nah'], $bl_cfg['rssi_mittel']);
+        $neu['rssi_nah'] = $bl_cfg['rssi_nah'];
+        $neu['rssi_mittel'] = $bl_cfg['rssi_mittel'];
     }
 
-    $tags = bl_tags_aus_post($bl_fehler);
+    $tags = bl_tags_aus_post($bl_fehler, $bl_tags);
 
     if (bl_config_write($neu, $tags)) {
         $bl_saved = true;
@@ -405,23 +537,36 @@ if ($bl_ist_post && isset($_POST['save'])) {
 if ($bl_ist_post && isset($_POST['save_mqtt'])) {
     list($neu, $bestand_tags, ) = bl_config_read();
     $neu['mqtt'] = isset($_POST['mqtt']) ? '1' : '0';
-    $praefix = bl_saubere_eingabe($_POST['themenpraefix'] ?? '');
+    $praefix_roh = isset($_POST['themenpraefix']) ? $_POST['themenpraefix'] : '';
+    $praefix = is_string($praefix_roh) ? trim($praefix_roh) : '';
     if ($praefix === '') {
         $bl_fehler[] = bl_t('MANGEL.PRAEFIX_LEER');
     } elseif (!preg_match('/^[A-Za-z0-9_-]+$/', $praefix)) {
         // ABWEISEN, nicht filtern. Bis 1.2.10 wurde hier hart gefiltert:
         // aus "haus/keller etage" wurde "hauskelleretage", und das landete
-        // danach in jeder angezeigten Adresse und im MQTT-Abo.
-        $bl_fehler[] = sprintf(bl_t('MANGEL.PRAEFIX'), $praefix, $neu['themenpraefix']);
+        // danach in jeder angezeigten Adresse und im MQTT-Abo. Seit 1.3.20
+        // auch Anfuehrungszeichen: gegen die rohe Eingabe geprueft (C9).
+        $bl_fehler[] = sprintf(bl_t('MANGEL.PRAEFIX'), bl_saubere_eingabe($praefix), $neu['themenpraefix']);
     } else {
         $neu['themenpraefix'] = $praefix;
     }
     if (bl_config_write($neu, $bestand_tags)) {
         $bl_saved = true;
         require_once __DIR__ . '/bl_test.php';
+        // Die Abo-Datei des Gateways auf das Praefix bringen (seit 1.3.20,
+        // MQTT 6) - nur wenn sie abweicht.
+        if ($neu['mqtt'] === '1') {
+            list($bl_abo_pfad, $bl_abo_da) = bl_abo_datei($neu['themenpraefix'], true);
+            if (!$bl_abo_da) {
+                $bl_gescheitert[] = sprintf(bl_t('TEXT.ABO_DATEI_FEHLER'), $bl_abo_pfad);
+            }
+        }
         if (bl_dienst_pid() > 0) {
             bl_dienst('restart');
-            $bl_hinweis = bl_t('TEXT.DIENST_NEU_GESTARTET');
+            // Wie im Handler "Einstellungen": die Wirkung fragen, nicht den
+            // Aufruf melden (seit 1.3.20, Pruefung 29.09.2026, C10).
+            $bl_hinweis = bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET')
+                                          : bl_t('TEXT.DIENST_LAEUFT_NICHT');
         } else {
             $bl_hinweis = bl_t('TEXT.DIENST_WAR_AUS');
         }
@@ -430,6 +575,130 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
         $bl_error = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_e($bl_p['config']));
     }
     $bl_tab = 'tab-mqtt';
+}
+
+/* ---------------- Einstellungen sichern ----------------
+ *
+ * BERICHTIGT IN 1.3.20 (Pruefung 29.09.2026, C1/O1). Bis 1.3.19 stand hier
+ * json_encode(bl_cfg()) - bl_cfg() verlangt zwei Argumente, jeder Druck endete
+ * mit "Too few arguments" und HTTP 500, seit 1.3.6 kam nie eine Datei heraus.
+ * Der Kommentar darueber versprach ausserdem ein Aktionstoken, das diese Linie
+ * gar nicht fuehrt. Jetzt: die ganze Konfiguration, Werte UND Tags, mit einem
+ * lesbaren Kopf unter "_" (bl_sicherung_bauen()). Zugangsdaten gibt es in
+ * dieser Linie nicht; die Datei traegt aber MAC-Adressen und die Namen der
+ * ueberwachten Personen - eine Anwesenheitsliste, und der Hinweis am Knopf
+ * sagt das. Ein Download endet ohne Umleitung. */
+if ($bl_ist_post && isset($_POST['bl_sichern'])) {
+    $bl_js = json_encode(bl_sicherung_bauen($bl_cfg, $bl_tags),
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($bl_js !== false) {
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="ble_einstellungen_'
+               . date('Ymd_His') . '.json"');
+        header('Content-Length: ' . strlen($bl_js));
+        echo $bl_js;
+        exit;
+    }
+    $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
+    $bl_tab = 'tab-settings';
+}
+
+/* ---------------- Einstellungen zurueckspielen ----------------
+ *
+ * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
+ * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
+ * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen.
+ *
+ * BERICHTIGT IN 1.3.20 (C2/C3/O2/O13): bis 1.3.19 rief der Zweig
+ * bl_config_write() mit EINEM Argument - "Too few arguments", das
+ * Zurueckspielen wirkte nie. Und haette es gewirkt, haette es jeden Wert
+ * ungeprueft uebernommen und alle Tags geloescht. Jetzt: jeder Wert mit den
+ * Regeln des Formulars, die Tags mit, eine halb gueltige Datei aendert
+ * nichts, danach wird der Dienst nachgezogen und gesagt, was mit ihm geschah.
+ * Die Ablehnungsgruende stehen EINMAL da (bis 1.3.19 zweimal: roh im
+ * Fehlerkasten und maskiert in der Beanstandungsliste). */
+if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
+    $bl_tab = 'tab-settings';
+    if (!isset($_FILES['bl_sicherung']) || !is_array($_FILES['bl_sicherung'])
+        || !isset($_FILES['bl_sicherung']['tmp_name'])
+        || !is_string($_FILES['bl_sicherung']['tmp_name'])
+        || !@is_uploaded_file($_FILES['bl_sicherung']['tmp_name'])) {
+        $bl_error = bl_t('TEXT.SICH_KEINE_DATEI');
+    } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
+        $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
+    } else {
+        list($bl_neu, $bl_gruende, $bl_n, $bl_neu_tags) = bl_sicherung_lesen(
+            (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']));
+        if ($bl_neu === null) {
+            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
+             * nichts. Die Gruende sind in bl_sicherung_lesen() maskiert. */
+            $bl_error = bl_t('TEXT.SICH_ABGELEHNT') . '<ul style="margin:6px 0 0 18px;"><li>'
+                      . implode('</li><li>', $bl_gruende) . '</li></ul>';
+        } elseif (bl_config_write($bl_neu, $bl_neu_tags)) {
+            $bl_saved = true;
+            require_once __DIR__ . '/bl_test.php';
+            $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n, count($bl_neu_tags));
+            if ($bl_neu['mqtt'] === '1') {
+                list($bl_abo_pfad, $bl_abo_da) = bl_abo_datei($bl_neu['themenpraefix'], true);
+                if (!$bl_abo_da) {
+                    $bl_gescheitert[] = sprintf(bl_t('TEXT.ABO_DATEI_FEHLER'), $bl_abo_pfad);
+                }
+            }
+            // Den Dienst nachziehen und sagen, was mit ihm geschah (Regeln/05).
+            if (bl_dienst_pid() > 0) {
+                bl_dienst('restart');
+                $bl_hinweis .= ' ' . (bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET')
+                                                      : bl_t('TEXT.DIENST_LAEUFT_NICHT'));
+            } else {
+                $bl_hinweis .= ' ' . bl_t('TEXT.DIENST_WAR_AUS');
+            }
+            list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
+        } else {
+            $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
+        }
+    }
+}
+
+/* ================= Nach jedem POST: umleiten (seit 1.3.20) =================
+ *
+ * Regeln/04: "Jeder POST-Handler endet mit einer Umleitung; das Ergebnis reist
+ * als Einmalmeldung." Bis 1.3.19 antworteten alle 21 ausloesenden Knoepfe mit
+ * HTTP 200 ohne Location (Pruefung 29.09.2026, O4) - F5 wiederholte die
+ * Handlung, und zweimal "Dienst starten" legte zwei Scanner an (C4). Die
+ * Downloads (Vorlage, Verlauf, Sicherung) haben oben schon geliefert und mit
+ * exit geendet; hier kommt nur an, was eine Meldung hat. Scheitert das
+ * Schreiben der Einmalmeldung, wird wie bisher direkt gerendert - lieber ohne
+ * Umleitung als ohne Meldung. Auch die Abweisung durch den Wachposten reist
+ * hier mit. */
+if ($bl_ist_post) {
+    // Ein gemerkter Stand der Selbstpruefung gilt nach jeder Handlung nicht
+    // mehr - nur der Knopf "Selbstpruefung" selbst legt ihn an (O8).
+    if (!(isset($_POST['test']) && $_POST['test'] === 'selbsttest')) {
+        require_once __DIR__ . '/bl_test.php';
+        bl_pruefzeilen_vergessen();
+    }
+    $bl_einmal_neu = array(
+        'saved' => $bl_saved, 'hinweis' => $bl_hinweis, 'error' => $bl_error,
+        'fehler' => $bl_fehler, 'gescheitert' => $bl_gescheitert,
+        'test_titel' => $bl_test_titel, 'test_text' => $bl_test_text,
+        'such' => is_array($bl_such) ? $bl_such : null,
+        'tags' => is_array($bl_eingetippt) ? $bl_eingetippt : null,
+    );
+    if (bl_einmal_schreiben($bl_einmal_neu)) {
+        header('Location: index.php?form=' . rawurlencode(substr($bl_tab, 4)), true, 303);
+        exit;
+    }
+}
+
+/* Eingetippte Tag-Zeilen aus einem Suchlauf, ueber die Umleitung getragen. */
+if (is_array($bl_eingetippt) && $bl_eingetippt) {
+    $bl_tags = array();
+    foreach ($bl_eingetippt as $bl_t_roh) {
+        list($bl_t_gut, ) = bl_tag_pruefen(is_array($bl_t_roh) ? $bl_t_roh : null);
+        if ($bl_t_gut !== null) {
+            $bl_tags[] = $bl_t_gut;
+        }
+    }
 }
 
 /* ================= Anzeigedaten ================= */
@@ -446,54 +715,9 @@ foreach ($bl_tags as $t) { if ($t['aktiv'] === '1') { $bl_aktiv++; } }
 $bl_zustand = bl_zustaende();
 $bl_themen_tag = array_merge(bl_status_themen(), bl_zusatzthemen($bl_cfg));
 $bl_verlauf = bl_verlauf_lesen(24);
-
-
-/* ---------------- Einstellungen sichern ----------------
- *
- * Ausgegeben wird die VOLLE Konfiguration - samt Aktionstoken. Ohne ihn
- * stuenden nach dem Zurueckspielen alle Felder richtig, und das Plugin
- * kaeme trotzdem nicht an die Anlage; die Datei waere wertlos. Damit
- * traegt sie ein Geheimnis, und der Hinweis am Knopf sagt das. */
-if ($bl_ist_post && isset($_POST['bl_sichern'])) {
-    $bl_js = json_encode(bl_cfg(),
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($bl_js !== false) {
-        header('Content-Type: application/json; charset=utf-8');
-        header('Content-Disposition: attachment; filename="ble_einstellungen_'
-               . date('Ymd_His') . '.json"');
-        echo $bl_js;
-        exit;
-    }
-    $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
-}
-
-/* ---------------- Einstellungen zurueckspielen ----------------
- *
- * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
- * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen. */
-if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
-    if (!isset($_FILES['bl_sicherung']) || !is_array($_FILES['bl_sicherung'])
-        || !isset($_FILES['bl_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['bl_sicherung']['tmp_name'])) {
-        $bl_error = bl_t('TEXT.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
-        $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
-    } else {
-        list($bl_neu, $bl_fehler, $bl_n) = bl_sicherung_lesen(
-            (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']));
-        if ($bl_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. */
-            $bl_error = bl_t('TEXT.SICH_ABGELEHNT') . ' '
-                            . implode(' ', $bl_fehler);
-        } elseif (bl_config_write($bl_neu)) {
-            $bl_saved = true; $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n);
-        } else {
-            $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
-        }
-    }
-}
+// Gilt das Abbild? Ohne laufenden Dienst oder zu alt: keine Aussage (O5).
+list($bl_abbild_gilt, $bl_abbild_grund) = bl_abbild_lage($bl_cfg, $bl_pid);
+$bl_soll = bl_soll_laufen();
 
 
 if (class_exists('LBWeb', false)) {
@@ -603,6 +827,12 @@ if (class_exists('LBWeb', false)) {
 <?php if ($bl_error !== '') { ?>
 <div class="sm-fehler"><b><?= bl_e(bl_t('TEXT.FEHLER')) ?></b> <?= $bl_error ?></div>
 <?php } ?>
+<?php if ($bl_gescheitert) { ?>
+<div class="sm-fehler"><b><?= bl_e(bl_t('TEXT.NICHT_GELUNGEN')) ?></b>
+<ul style="margin:6px 0 0 18px;">
+<?php foreach ($bl_gescheitert as $m) { ?><li><?= bl_e($m) ?></li><?php } ?>
+</ul></div>
+<?php } ?>
 <?php if ($bl_fehler) { ?>
 <div class="sm-warnung"><b><?= bl_e(bl_t('TEXT.BEANSTANDUNGEN')) ?></b>
 <ul style="margin:6px 0 0 18px;">
@@ -612,10 +842,16 @@ if (class_exists('LBWeb', false)) {
 <?php if ($bl_altformat) { ?>
 <div class="sm-hinweis"><?= bl_e(bl_t('TEXT.ALTES_FORMAT')) ?></div>
 <?php } ?>
+<?php /* Kein Dienst: ein Kasten ueber allem, ein Satz, was zu tun ist (seit
+         1.3.20, Pruefung 29.09.2026, O5). Bis 1.3.19 stand nur die rote Kachel
+         da; was zu tun ist, stand hinter dem Knopf "Status". */ ?>
+<?php if (!$bl_pid && $bl_p['home'] !== '') { ?>
+<div class="sm-warnung" id="bl-kein-dienst"><b><?= bl_e(bl_t($bl_soll ? 'TEXT.KEIN_DIENST_SOLL' : 'TEXT.KEIN_DIENST_ANGEHALTEN')) ?></b></div>
+<?php } ?>
 
 <div class="sm-kacheln" id="bl-kacheln">
   <div class="sm-kachel"><b id="bl-k-dienst" class="<?= $bl_pid ? 'sm-an' : 'sm-aus' ?>"><?= $bl_pid ? bl_e(bl_t('TEXT.LAEUFT')) : bl_e(bl_t('TEXT.LAEUFT_NICHT')) ?></b><?= bl_e(bl_t('TEXT.K_DIENST')) ?></div>
-  <div class="sm-kachel"><b id="bl-k-anwesend"><?= $bl_status ? (int) ($bl_status['anwesend'] ?? 0) : 0 ?></b><?= bl_e(bl_t('TEXT.K_ANWESEND')) ?></div>
+  <div class="sm-kachel"><b id="bl-k-anwesend"><?= $bl_abbild_gilt ? (int) ($bl_status['anwesend'] ?? 0) : '&ndash;' ?></b><?= bl_e(bl_t('TEXT.K_ANWESEND')) ?><br><span class="sm-klein" id="bl-k-aussage"><?= $bl_abbild_gilt ? '' : bl_e($bl_abbild_grund) ?></span></div>
   <div class="sm-kachel"><b id="bl-k-tags"><?= (int) $bl_aktiv ?></b><?= bl_e(bl_t('TEXT.K_AKTIVE_TAGS')) ?></div>
   <div class="sm-kachel"><b id="bl-k-stille"><?= $bl_stille < 0 ? '?' : (int) $bl_stille ?></b><?= bl_e(bl_t('TEXT.K_EMPFANG')) ?></div>
   <div class="sm-kachel"><b id="bl-k-alter"><?= $bl_alter < 0 ? '?' : (int) $bl_alter ?></b><?= bl_e(bl_t('TEXT.K_ABBILD')) ?></div>
@@ -639,11 +875,17 @@ if (class_exists('LBWeb', false)) {
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
 
-<h3><?= bl_e(bl_t('TEXT.DIENST_STEUERN')) ?></h3>
+<?php /* EINE Legende oben im Reiter, genau mit den Farben, die hier als Knopf
+         vorkommen: Gruen (Start, Suchen, Sichern) und Orange (Neustart,
+         Anhalten, Speichern, Zurueckspielen). Seit 1.3.20 (Regeln/04; Pruefung
+         29.09.2026, O11) - bis dahin drei Legenden je Reihe, eine davon mit
+         Orange ueber einer Reihe ohne Orange. */ ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= bl_e(bl_t('LEGENDE.LESEN')) ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
 </div>
+
+<h3><?= bl_e(bl_t('TEXT.DIENST_STEUERN')) ?></h3>
 <div class="sm-knopfreihe">
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="test" value="start"><?= bl_e(bl_t('KNOPF.START')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-settings"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button><?php echo bl_fmt(); ?></form>
@@ -668,7 +910,7 @@ if (class_exists('LBWeb', false)) {
     $z = isset($bl_zustand[$tag['kennung']]) ? $bl_zustand[$tag['kennung']] : null;
     $o = $tag['opt']; ?>
 <tr>
-<td><input data-role="none" type="text" name="tag_kennung[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>" style="width:100%;box-sizing:border-box;"></td>
+<td><input data-role="none" type="text" name="tag_kennung[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>" style="width:100%;box-sizing:border-box;"><input data-role="none" type="hidden" name="tag_alt[<?= (int) $i ?>]" value="<?= bl_e($tag['kennung']) ?>"></td>
 <td><input data-role="none" type="text" name="tag_name[<?= (int) $i ?>]" value="<?= bl_e($tag['name']) ?>" style="width:100%;box-sizing:border-box;" placeholder="<?= bl_e(bl_t('TEXT.PH_BEZEICHNUNG')) ?>">
 <details>
 <summary><?= bl_e(bl_t('TEXT.MEHR_EINSTELLUNGEN')) ?></summary>
@@ -683,7 +925,11 @@ if (class_exists('LBWeb', false)) {
 </details></td>
 <td style="text-align:center;"><input data-role="none" type="checkbox" name="tag_aktiv[<?= (int) $i ?>]" value="1"<?= $tag['aktiv'] === '1' ? ' checked' : '' ?>></td>
 <td style="text-align:center;"><input data-role="none" type="checkbox" name="tag_weg[<?= (int) $i ?>]" value="1"></td>
-<td><?php if ($z) {
+<td><?php if ($z && !$bl_abbild_gilt) {
+        // Seit 1.3.20 (O5): ohne laufenden Dienst oder mit altem Abbild
+        // nie "anwesend" und nie gruen - keine Aussage, mit dem Stand.
+        echo '<span class="sm-klein">' . bl_e($bl_abbild_grund) . '</span>';
+    } elseif ($z) {
         echo '<i class="sm-bar sm-l' . (int) $z['stufe'] . '"></i> ';
         echo $z['anwesend'] ? '<span class="sm-an">' . bl_e(bl_t('TEXT.ANWESEND')) . '</span>'
                             : '<span class="sm-aus">' . bl_e(bl_t('TEXT.ABWESEND')) . '</span>';
@@ -747,10 +993,6 @@ if (class_exists('LBWeb', false)) {
 <div class="sm-hinweis"><?= bl_e(bl_t('TEXT.NICHTS_NEUES')) ?> (<?= bl_e($bl_such['quelle']) ?>)</div>
 <?php } ?>
 
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= bl_e(bl_t('LEGENDE.LESEN')) ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
-</div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="suchen" value="1"><?= bl_e(bl_t('KNOPF.SUCHEN')) ?></button>
 </div>
@@ -870,9 +1112,6 @@ if (class_exists('LBWeb', false)) {
 <input data-role="none" type="number" name="raum_ausgleich_db" min="-30" max="30" value="<?= bl_e(bl_cfg($bl_cfg, 'raum_ausgleich_db', '0')) ?>">
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.AUSGLEICH_HILFE')) ?></p></div>
 
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
-</div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
 </div>
@@ -903,6 +1142,9 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Reiter: MQTT ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-mqtt' ? ' sm-active' : '' ?>" id="tab-mqtt">
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
+</div>
 <h2><?= bl_e(bl_t('TEXT.MQTT_UEBERTRAGUNG')) ?></h2>
 <?php if ($bl_autostart === false) { ?>
 <div class="sm-warnung"><b>MQTT:</b> <?= bl_e(bl_t('TEXT.W_AUTOSTART')) ?></div>
@@ -920,9 +1162,6 @@ if (class_exists('LBWeb', false)) {
 <label><?= bl_e(bl_t('FELD.THEMENPRAEFIX')) ?></label>
 <input data-role="none" type="text" name="themenpraefix" value="<?= bl_e($bl_praefix) ?>">
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.PRAEFIX_HILFE')) ?></p>
-</div>
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
 </div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save_mqtt" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
@@ -955,9 +1194,16 @@ if (class_exists('LBWeb', false)) {
 <?php foreach ($bl_themen_tag as $k => $info) { ?>
 <tr><td><span class="sm-mono"><?= bl_e($bl_praefix) ?>/&lt;T&gt;/<?= bl_e($k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td class="<?= bl_retain_fuer($k) ? 'sm-an' : '' ?>"><?= bl_e(bl_retain_text($k)) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
 <?php } ?>
+<?php /* Die Zweige je Person und je Scanner - eigene Zeilen seit 1.3.20
+         (Pruefung 29.09.2026, MQTT 5); die Pruefzeile "Themenliste" haelt sie
+         gegen den Sendecode. */ ?>
+<?php foreach (bl_zweig_themen() as $k => $info) { ?>
+<tr><td><span class="sm-mono"><?= bl_e($bl_praefix . '/' . $k) ?></span></td><td><?= bl_e(bl_t('ART.' . strtoupper($info['art']))) ?></td><td class="<?= bl_retain_fuer($k) ? 'sm-an' : '' ?>"><?= bl_e(bl_retain_text($k)) ?></td><td><?= bl_e(bl_t($info['s'])) ?></td></tr>
+<?php } ?>
 </table>
 </div>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.T_STEHT_FUER')) ?></p>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.PRESENT_NUR_MIT_ONLINE')) ?></p>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RETAIN_ERKLAERUNG')) ?></p>
 
 <?php if ($bl_tags) { ?>
@@ -977,6 +1223,7 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span></div>
 <h2><?= bl_e(bl_t('TEXT.LOX_SCHRITT_FUER_SCHRITT')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOX_EINLEITUNG')) ?></p>
 
@@ -1003,7 +1250,6 @@ if (class_exists('LBWeb', false)) {
 <form method="post" action="index.php">
   <?php echo bl_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
-<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span></div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="download" value="1"><?= bl_e(bl_t('KNOPF.VORLAGE')) ?></button>
 </div>
@@ -1017,6 +1263,9 @@ if (class_exists('LBWeb', false)) {
 <th style="width:210px;"><?= bl_e(bl_t('TEXT.SP_NAMENSVORSCHLAG')) ?></th>
 <th style="width:150px;"><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th><th><?= bl_e(bl_t('TEXT.SP_EINGAENGE')) ?></th></tr>
 <?php
+// Grenze fuer das Alter des Lebenszeichens: server/ts kommt seit 1.3.20
+// hoechstens alle 30 s, bei langem Takt einmal je Durchlauf - viermal das.
+$bl_ts_grenze = 4 * max(30, (int) bl_cfg($bl_cfg, 'intervall', '5'));
 $bl_bausteine = array(
     array('BAUSTEIN.VI', $bl_praefix . '_server_online',   'BAUSTEIN.DIGITAL',       'BAUSTEIN.VOM_GATEWAY'),
     array('BAUSTEIN.VI', $bl_praefix . '_server_ok',       'BAUSTEIN.DIGITAL',       'BAUSTEIN.VOM_GATEWAY'),
@@ -1039,6 +1288,18 @@ $bl_bausteine = array(
     array('BAUSTEIN.UND', 'BAUSTEIN.N_GILT',        '&mdash;',              'BAUSTEIN.E_GILT'),
     array('BAUSTEIN.FORMEL', 'BAUSTEIN.N_WIELANGE', 'BAUSTEIN.P_WIELANGE',  'BAUSTEIN.E_WIELANGE'),
     array('BAUSTEIN.STATUS', 'BAUSTEIN.N_ANWESENHEIT', 'BAUSTEIN.P_STATUS', 'BAUSTEIN.E_STATUS'),
+    // NEU IN 1.3.20, am Ende (Pruefung 29.09.2026, O10 und Frage 6): die
+    // Ausfallerkennung haengt am Letzten Willen server_online (#1) und am
+    // Alter des Lebenszeichens server_ts (#3), nicht mehr an server_ok (#2) -
+    // server/ok ist fluechtig und steht nach einem harten Tod des Dienstes
+    // (kill -9, Speichermangel) in Loxone weiter auf 1. Und die Anwesenheit
+    // eines Tags gilt nur, solange der Dienst online ist (#19).
+    array('BAUSTEIN.FORMEL', 'BAUSTEIN.N_TS_ALTER', 'BAUSTEIN.P_WIELANGE', 'BAUSTEIN.E_TS_ALTER'),
+    array('BAUSTEIN.SCHWELLE', 'BAUSTEIN.N_TS_ZU_ALT',
+          bl_e(sprintf(bl_t('BAUSTEIN.P_TS_ZU_ALT'), $bl_ts_grenze, $bl_ts_grenze - 30)),
+          'BAUSTEIN.E_TS_ZU_ALT'),
+    array('BAUSTEIN.ODER', 'BAUSTEIN.N_DIENST_WEG', '&mdash;', 'BAUSTEIN.E_DIENST_WEG'),
+    array('BAUSTEIN.UND', 'BAUSTEIN.N_DA_ONLINE', 'BAUSTEIN.P_DA_ONLINE', 'BAUSTEIN.E_DA_ONLINE'),
 );
 foreach ($bl_bausteine as $nr => $b) { ?>
 <tr><td><?= $nr + 1 ?></td><td><?= bl_e(bl_t($b[0])) ?></td>
@@ -1052,7 +1313,9 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 <b><?= bl_e(bl_t('BAUSTEIN.ZU13')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU13_TEXT')) ?><br>
 <b><?= bl_e(bl_t('BAUSTEIN.ZU7')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU7_TEXT')) ?><br>
 <b><?= bl_e(bl_t('BAUSTEIN.ZU14')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU14_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU12')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU12_TEXT')) ?>
+<b><?= bl_e(bl_t('BAUSTEIN.ZU12')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU12_TEXT')) ?><br>
+<b><?= bl_e(bl_t('BAUSTEIN.ZU11')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU11_TEXT')) ?><br>
+<b><?= bl_e(bl_t('BAUSTEIN.ZU19')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU19_TEXT')) ?>
 </div>
 
 <!-- ===== Messwerte: eigener Abschnitt, absichtlich NICHT in der Tabelle =====
@@ -1069,7 +1332,7 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 <th style="width:150px;"><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th>
 <th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
 <?php foreach (bl_sensor_katalog() as $bl_sk => $bl_si) { ?>
-<tr><td class="sm-mono"><?= bl_e($bl_praefix . '_&lt;T&gt;_sensor_' . $bl_sk) ?></td>
+<tr><td class="sm-mono"><?= bl_e($bl_praefix) . '_&lt;T&gt;_sensor_' . bl_e($bl_sk) ?></td>
 <td><?= bl_e(bl_t('BAUSTEIN.VI')) ?></td>
 <td class="sm-mono"><?= bl_e($bl_si['min'] . ' … ' . $bl_si['max']
                              . ($bl_si['einheit'] !== '' ? ' ' . $bl_si['einheit'] : '')) ?></td>
@@ -1088,6 +1351,9 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 
 <!-- ================= Reiter: Verlauf ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-verlauf' ? ' sm-active' : '' ?>" id="tab-verlauf">
+<?php if ($bl_verlauf['vorhanden']) { ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span></div>
+<?php } ?>
 <h2><?= bl_e(bl_t('TEXT.VERLAUF_UEBERSCHRIFT')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.VERLAUF_EINLEITUNG')) ?></p>
 <?php if (!$bl_verlauf['vorhanden']) { ?>
@@ -1123,7 +1389,6 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 <form method="post" action="index.php">
   <?php echo bl_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-verlauf">
-<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span></div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="verlauf_download" value="1"><?= bl_e(bl_t('KNOPF.VERLAUF_CSV')) ?></button>
 </div>
@@ -1133,18 +1398,53 @@ foreach ($bl_bausteine as $nr => $b) { ?>
 
 <!-- ================= Reiter: Test ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
+<?php /* EINE Legende oben im Reiter (Regeln/04; seit 1.3.20 oben, O11). */ ?>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-lesen"></i> <?= bl_e(bl_t('LEGENDE.LESEN')) ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
+</div>
 <h2><?= bl_e(bl_t('TEXT.SELBSTPRUEFUNG')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.SELBSTPRUEFUNG_HILFE')) ?></p>
 <?php
 require_once __DIR__ . '/bl_test.php';
-$bl_zeilen = bl_pruefzeilen($bl_cfg, $bl_tags);
+/* SEIT 1.3.20 (Pruefung 29.09.2026, O8; Regeln/04 "Was im Reiter Test steht,
+ * laeuft bei JEDEM Seitenaufruf"): die Selbstpruefung laeuft nur, wenn der
+ * Reiter Test serverseitig der offene ist, sonst wird ein hoechstens 60 s
+ * alter Zwischenstand gezeigt. Bis 1.3.19 lief sie bei jedem Seitenaufbau -
+ * bis zu 14 Prozessstarts, und ein haengender D-Bus hielt jede Seite, auch
+ * "Speichern", 60 s fest. Jeder Aufruf darin hat jetzt eine kurze Frist. */
+$bl_zeilen = null;
+$bl_zeilen_alter = -1;
+if ($bl_tab === 'tab-test') {
+    // Ein Stand aus dem Knopf "Selbstpruefung" (hoechstens 60 s alt) wird
+    // nicht gleich noch einmal gerechnet; jeder andere POST verwirft ihn.
+    // "jetzt pruefen" (neu=1) rechnet immer.
+    list($bl_zeilen, $bl_zeilen_alter) = isset($_GET['neu']) ? array(null, -1)
+                                                              : bl_pruefzeilen_gemerkt(60);
+    if (!is_array($bl_zeilen)) {
+        $bl_zeilen = bl_pruefzeilen($bl_cfg, $bl_tags);
+        bl_pruefzeilen_merken($bl_zeilen);
+        $bl_zeilen_alter = 0;
+    }
+} else {
+    list($bl_zeilen, $bl_zeilen_alter) = bl_pruefzeilen_gemerkt(60);
+}
 $bl_ok = $bl_rot = $bl_offen = 0;
-foreach ($bl_zeilen as $z) {
-    if ($z['zustand'] === true) { $bl_ok++; }
-    elseif ($z['zustand'] === false) { $bl_rot++; }
-    else { $bl_offen++; }
+if (is_array($bl_zeilen)) {
+    foreach ($bl_zeilen as $z) {
+        if ($z['zustand'] === true) { $bl_ok++; }
+        elseif ($z['zustand'] === false) { $bl_rot++; }
+        else { $bl_offen++; }
+    }
 }
 ?>
+<?php if (!is_array($bl_zeilen)) { ?>
+<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.PRUEFUNG_BEIM_OEFFNEN')) ?> <a href="index.php?form=test&amp;neu=1"><?= bl_e(bl_t('TEXT.PRUEFUNG_JETZT')) ?></a></div>
+<?php } else { ?>
+<?php if ($bl_zeilen_alter > 0) { ?>
+<p class="sm-hilfe"><?= bl_e(sprintf(bl_t('TEXT.PRUEFUNG_STAND'), $bl_zeilen_alter)) ?> <a href="index.php?form=test&amp;neu=1"><?= bl_e(bl_t('TEXT.PRUEFUNG_JETZT')) ?></a></p>
+<?php } ?>
 <div class="sm-breit">
 <table class="sm-tbl">
 <tr><th style="width:44px;"></th><th style="width:44%;"><?= bl_e(bl_t('TEXT.SP_PRUEFUNG')) ?></th><th><?= bl_e(bl_t('TEXT.SP_ANMERKUNG')) ?></th></tr>
@@ -1159,12 +1459,7 @@ foreach ($bl_zeilen as $z) {
 </table>
 </div>
 <p class="sm-hilfe"><?= sprintf(bl_e(bl_t('TEXT.BILANZ')), $bl_ok, $bl_rot, $bl_offen) ?></p>
-
-<div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= bl_e(bl_t('LEGENDE.LESEN')) ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
-</div>
+<?php } ?>
 
 <h3><?= bl_e(bl_t('TEXT.G_ANSEHEN')) ?></h3>
 <div class="sm-knopfreihe">
@@ -1179,17 +1474,20 @@ foreach ($bl_zeilen as $z) {
 <h3><?= bl_e(bl_t('TEXT.G_TECHNIK')) ?></h3>
 <div class="sm-knopfreihe">
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="bluetooth"><?= bl_e(bl_t('KNOPF.BLUETOOTH')) ?></button><?php echo bl_fmt(); ?></form>
-<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="btein"><?= bl_e(bl_t('KNOPF.BTEIN')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="konfig"><?= bl_e(bl_t('KNOPF.KONFIG')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="umgebung"><?= bl_e(bl_t('KNOPF.UMGEBUNG')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-technik" type="submit" name="test" value="mqttinfo"><?= bl_e(bl_t('KNOPF.MQTTINFO')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
 
+<?php /* "Bluetooth einschalten" schaltet - es steht seit 1.3.20 unter der
+         Ueberschrift der schaltenden Knoepfe, nicht mehr in einer Reihe mit
+         den lesenden (Regeln/04; Pruefung 29.09.2026, O11). */ ?>
 <h3><?= bl_e(bl_t('TEXT.G_AKTION')) ?></h3>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.AKTION_SOFORT')) ?></p>
 <div class="sm-knopfreihe">
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="restart"><?= bl_e(bl_t('KNOPF.RESTART')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="stop"><?= bl_e(bl_t('KNOPF.STOP')) ?></button><?php echo bl_fmt(); ?></form>
+<form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="btein"><?= bl_e(bl_t('KNOPF.BTEIN')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="probewert"><?= bl_e(bl_t('KNOPF.PROBEWERT')) ?></button><?php echo bl_fmt(); ?></form>
 <form method="post" action="index.php"><input data-role="none" type="hidden" name="activetab" value="tab-test"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="test" value="batterie"><?= bl_e(bl_t('KNOPF.BATTERIE')) ?></button><?php echo bl_fmt(); ?></form>
 </div>
@@ -1305,7 +1603,12 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
                         var e = document.getElementById(id);
                         if (e) { e.textContent = wert; }
                     };
-                    setze('bl-k-anwesend', s.anwesend != null ? s.anwesend : 0);
+                    // Seit 1.3.20 (O5): ohne Dienst oder mit altem Abbild
+                    // keine Zahl, sondern ein Strich und der Grund.
+                    setze('bl-k-anwesend', d.gilt ? (s.anwesend != null ? s.anwesend : 0) : '–');
+                    setze('bl-k-aussage', d.gilt ? '' : (d.grund || ''));
+                    var kasten = document.getElementById('bl-kein-dienst');
+                    if (kasten) { kasten.style.display = d.pid > 0 ? 'none' : ''; }
                     setze('bl-k-tags', s.aktiv != null ? s.aktiv : 0);
                     setze('bl-k-stille', d.stille < 0 ? '?' : d.stille);
                     setze('bl-k-alter', d.alter < 0 ? '?' : d.alter);

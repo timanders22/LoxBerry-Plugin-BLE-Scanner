@@ -78,8 +78,16 @@ function bl_json_aus($text)
     return null;
 }
 
-/** Python-Aufruf zusammenbauen. */
-function bl_python($skript, $argumente = '')
+/**
+ * Python-Aufruf zusammenbauen.
+ *
+ * Frist seit 1.3.20: 3 s statt 60 s (Pruefung 29.09.2026, O8; Regeln/04
+ * "Zeitueberschreitung drei Sekunden"). Ein haengender D-Bus-Aufruf im
+ * eingebundenen Dienstmodul hielt vorher jede Seite 60 s fest. Die
+ * Python-Selbstpruefung bekommt eine eigene, gemessene Frist (siehe
+ * bl_pruefzeilen()).
+ */
+function bl_python($skript, $argumente = '', $frist = 3)
 {
     $p = bl_paths();
     $datei = $p['bindir'] . '/' . $skript;
@@ -88,7 +96,7 @@ function bl_python($skript, $argumente = '')
     }
     $out = array();
     $code = 0;
-    @exec(bl_frist(60, 'python3 ' . escapeshellarg($datei) . ' ' . $argumente)
+    @exec(bl_frist($frist, 'python3 ' . escapeshellarg($datei) . ' ' . $argumente)
           . ' 2>&1', $out, $code);
     $text = implode("\n", $out);
     if ($code === 124 || $code === 137) {
@@ -104,6 +112,187 @@ function bl_python($skript, $argumente = '')
 function bl_zeile($text, $zustand, $anmerkung = '')
 {
     return array('text' => $text, 'zustand' => $zustand, 'anmerkung' => $anmerkung);
+}
+
+/* Zwischenstand der Selbstpruefung (seit 1.3.20, O8): data/<ordner>/pruefzeilen.json,
+ * 0600 - die Anmerkungen nennen Pfade und die Namen von Tags. */
+function bl_pruefzeilen_datei()
+{
+    return bl_paths()['datadir'] . '/pruefzeilen.json';
+}
+
+function bl_pruefzeilen_merken($zeilen)
+{
+    if (bl_paths()['home'] === '' || !is_dir(bl_paths()['datadir'])) {
+        return false;
+    }
+    $js = json_encode(array('zeit' => time(), 'zeilen' => $zeilen),
+                      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return $js !== false && bl_datei_schreiben(bl_pruefzeilen_datei(), $js, 0600);
+}
+
+/** Rueckgabe: array(Zeilen|null, Alter in s). */
+function bl_pruefzeilen_gemerkt($hoechstens)
+{
+    $f = bl_pruefzeilen_datei();
+    if (!is_file($f)) {
+        return array(null, -1);
+    }
+    $d = json_decode((string) @file_get_contents($f), true);
+    if (!is_array($d) || !isset($d['zeit'], $d['zeilen']) || !is_array($d['zeilen'])) {
+        return array(null, -1);
+    }
+    $alter = time() - (int) $d['zeit'];
+    if ($alter < 0 || $alter > $hoechstens) {
+        return array(null, -1);
+    }
+    $aus = array();
+    foreach ($d['zeilen'] as $z) {
+        if (is_array($z) && isset($z['text']) && array_key_exists('zustand', $z)) {
+            $aus[] = bl_zeile((string) $z['text'], $z['zustand'],
+                              isset($z['anmerkung']) ? (string) $z['anmerkung'] : '');
+        }
+    }
+    return array($aus, $alter);
+}
+
+function bl_pruefzeilen_vergessen()
+{
+    $f = bl_pruefzeilen_datei();
+    if (is_file($f)) {
+        @unlink($f);
+    }
+}
+
+/**
+ * Passen Reiterleiste, Bereiche und Positivliste zusammen? (seit 1.3.20,
+ * Pflichtzeile nach Regeln/04; Pruefung 29.09.2026, O7)
+ *
+ * Gezaehlt in der eigenen Datei: die ausgeschriebene Liste $bl_reiter, die
+ * Ziele der Reiterleiste (data-ziel) und die ids der Bereiche (sm-seite). Bis
+ * 1.3.19 sicherte ein Kommentar in index.php diese Pruefzeile zu - es gab sie
+ * nicht (Eichung des Pruefers: tab-log aus der Liste genommen, die Zahl der
+ * roten Zeilen blieb gleich).
+ * Rueckgabe: array(zustand, anmerkung).
+ */
+function bl_reiter_lage()
+{
+    $quelle = (string) @file_get_contents(__DIR__ . '/index.php');
+    if ($quelle === '') {
+        return array(null, bl_t('PRUEF.REITER_UNLESBAR'));
+    }
+    $liste = array();
+    if (preg_match('/\$bl_reiter\s*=\s*array\(([^)]*)\)/', $quelle, $m)) {
+        preg_match_all("/'(tab-[a-z]+)'/", $m[1], $t);
+        $liste = $t[1];
+    }
+    preg_match_all('/data-ziel="(tab-[a-z]+)"/', $quelle, $t);
+    $leiste = $t[1];
+    preg_match_all('/class="sm-seite[^"]*"\s+id="(tab-[a-z]+)"/', $quelle, $t);
+    $bereiche = $t[1];
+    if (!$liste || !$leiste || !$bereiche) {
+        return array(false, sprintf(bl_t('PRUEF.REITER_ZAHLEN'), count($liste),
+                                    count($leiste), count($bereiche)));
+    }
+    $a = $liste; sort($a);
+    $b = $leiste; sort($b);
+    $c = $bereiche; sort($c);
+    $gleich = ($a === $b && $b === $c);
+    $anm = sprintf(bl_t('PRUEF.REITER_ZAHLEN'), count($liste), count($leiste), count($bereiche));
+    if (!$gleich) {
+        $alle = array_unique(array_merge($liste, $leiste, $bereiche));
+        $fehlt = array();
+        foreach ($alle as $r) {
+            if (!in_array($r, $liste, true) || !in_array($r, $leiste, true)
+                || !in_array($r, $bereiche, true)) {
+                $fehlt[] = $r;
+            }
+        }
+        $anm .= "\n" . sprintf(bl_t('PRUEF.REITER_ABWEICHUNG'), implode(', ', $fehlt));
+    }
+    return array($gleich, $anm);
+}
+
+/**
+ * Setzt der Server sm-active? (seit 1.3.20, Pflichtzeile nach Regeln/04, O7)
+ * Gezaehlt je Reiter in der eigenen Datei: der Verweis der Leiste UND der
+ * Bereich tragen die serverseitige Bedingung auf $bl_tab mit ihrem eigenen
+ * Namen. Fehlt sie, ist die Seite ohne JavaScript leer oder springt zurueck.
+ */
+function bl_aktiv_lage()
+{
+    $quelle = (string) @file_get_contents(__DIR__ . '/index.php');
+    if ($quelle === '') {
+        return array(null, bl_t('PRUEF.REITER_UNLESBAR'));
+    }
+    preg_match_all('/class="sm-seite<\?= \$bl_tab === \'(tab-[a-z]+)\' \? \' sm-active\' : \'\' \?>" id="(tab-[a-z]+)"/',
+                   $quelle, $s, PREG_SET_ORDER);
+    preg_match_all('/class="sm-tab<\?= \$bl_tab === \'(tab-[a-z]+)\' \? \' sm-active\' : \'\' \?>" data-ziel="(tab-[a-z]+)"/',
+                   $quelle, $l, PREG_SET_ORDER);
+    preg_match_all('/class="sm-seite\b/', $quelle, $alle_s);
+    preg_match_all('/class="sm-tab\b/', $quelle, $alle_l);
+    $gut = 0;
+    $schlecht = array();
+    foreach (array_merge($s, $l) as $e) {
+        if ($e[1] === $e[2]) {
+            $gut++;
+        } else {
+            $schlecht[] = $e[2];
+        }
+    }
+    $soll = count($alle_s[0]) + count($alle_l[0]);
+    if ($soll === 0) {
+        return array(false, sprintf(bl_t('PRUEF.AKTIV_ZAHLEN'), 0, 0));
+    }
+    $anm = sprintf(bl_t('PRUEF.AKTIV_ZAHLEN'), $gut, $soll);
+    if ($schlecht) {
+        $anm .= ' ' . implode(', ', $schlecht);
+    }
+    return array($gut === $soll && !$schlecht, $anm);
+}
+
+/**
+ * Ist die Konfiguration heil? (seit 1.3.20, Pflichtzeile nach Regeln/04, O7)
+ *
+ * Dieselben Fragen wie bl_cfg_traegt_inhalt() in preupgrade.sh/postinstall.sh
+ * - Abschnittskopf [CONFIG], mindestens eine Zeile schluessel=wert, ein
+ * Zeilenumbruch als letztes Byte - und dazu die Zahl der Schluessel aus den
+ * Vorgaben. Bis 1.3.19 nannte bei fehlender oder auf 60 Byte abgeschnittener
+ * Datei keine Zeile die Konfiguration (Eichung des Pruefers, konfig_lage.txt).
+ * Rueckgabe: array(zustand, anmerkung).
+ */
+function bl_konfig_lage()
+{
+    $f = bl_paths()['config'];
+    clearstatcache(true, $f);
+    if (!is_file($f)) {
+        return array(false, sprintf(bl_t('PRUEF.KONFIG_FEHLT'), $f));
+    }
+    $roh = (string) @file_get_contents($f);
+    if ($roh === '') {
+        return array(false, sprintf(bl_t('PRUEF.KONFIG_LEER'), $f));
+    }
+    $kopf = (bool) preg_match('/^\s*\[CONFIG\]\s*$/m', $roh);
+    $zeile = (bool) preg_match('/^\s*[A-Za-z_][A-Za-z0-9_.]*\s*=/m', $roh);
+    $ende = substr($roh, -1) === "\n";
+    if (!$kopf || !$zeile || !$ende) {
+        return array(false, sprintf(bl_t('PRUEF.KONFIG_KAPUTT'), strlen($roh)));
+    }
+    $da = 0;
+    $fehlt = array();
+    foreach (array_keys(bl_defaults()) as $k) {
+        if (preg_match('/^\s*' . preg_quote($k, '/') . '\s*=/m', $roh)) {
+            $da++;
+        } else {
+            $fehlt[] = $k;
+        }
+    }
+    $gesamt = count(bl_defaults());
+    if ($fehlt) {
+        return array(false, sprintf(bl_t('PRUEF.KONFIG_UNVOLLSTAENDIG'), $da, $gesamt,
+                                    implode(', ', $fehlt)));
+    }
+    return array(true, sprintf(bl_t('PRUEF.KONFIG_HEIL'), $da, $gesamt));
 }
 
 /**
@@ -283,10 +472,18 @@ function bl_themen_vergleich($cfg)
     foreach (bl_allgemeine_themen() as $k => $_i) {
         $erwartet[] = $k;
     }
+    // Die Zweige je Person und je Scanner haben seit 1.3.20 eigene Zeilen in
+    // der Thementabelle (bl_zweig_themen()) und werden wie jede andere Zeile
+    // gegen den Sendecode gehalten - in der Form, die bl_gesendete_themen()
+    // liefert ("person//present"). Bis 1.3.19 nahm diese Pruefung beide
+    // Zweige ausdruecklich aus (Pruefung 29.09.2026, MQTT 5).
+    foreach (bl_zweig_themen() as $k => $_i) {
+        $erwartet[] = bl_zweig_normal($k);
+    }
     // Themen, die der Sendecode nur unter Bedingungen kennt: bei
-    // eingeschalteter Einstellung, je Person, je Scanner, oder - bei den
-    // Messwerten - erst, wenn ein Tag sie einmal gesendet hat. Sie duerfen
-    // deshalb HEUTE in der Vorlage fehlen.
+    // eingeschalteter Einstellung oder - bei den Messwerten - erst, wenn ein
+    // Tag sie einmal gesendet hat. Sie duerfen deshalb HEUTE in der Vorlage
+    // fehlen.
     //
     // BERICHTIGT IN 1.3.14. Bis 1.3.13 hiess "bedingt" schlicht
     // "ignorieren" - und genau das hat den groessten Mangel dieser Linie
@@ -302,7 +499,7 @@ function bl_themen_vergleich($cfg)
     // bl_zusatzthemen_alle(), also unabhaengig von jeder Einstellung? Wenn
     // nicht, ist es kein bedingtes Thema, sondern ein vergessenes.
     $bedingt = array('distance', 'battery', 'battery_ts', 'raum', 'raum_seit',
-                     'sensor/', 'person/', 'scanner/');
+                     'sensor/');
     $ueberhaupt = array_keys(bl_zusatzthemen_alle());
     $fehlt = array();
     foreach ($erwartet as $k) {
@@ -327,12 +524,7 @@ function bl_themen_vergleich($cfg)
             $unbekannt[] = $k;
             continue;
         }
-        // Es ist bedingt - aber steht es irgendwo? 'person/' und 'scanner/'
-        // sind eigene Zweige und werden nicht je Tag angelegt; fuer sie
-        // gilt die Frage nicht.
-        if (strpos($k, 'person/') === 0 || strpos($k, 'scanner/') === 0) {
-            continue;
-        }
+        // Es ist bedingt - aber steht es irgendwo?
         $gedeckt = false;
         foreach ($ueberhaupt as $e) {
             if ($e === $k || strpos($e, rtrim($k, '/') . '/') === 0
@@ -527,7 +719,7 @@ function bl_vorlage_pruefen($cfg, $tags)
 /** Sprachdateien: deckungsgleich? */
 function bl_sprachen_vergleich()
 {
-    $abschnitte = array('REITER', 'TEXT', 'LEGENDE', 'THEMA', 'TEST', 'VORLAGE', 'BAUSTEIN');
+    $abschnitte = array('REITER', 'TEXT', 'LEGENDE', 'THEMA', 'TEST', 'VORLAGE', 'BAUSTEIN', 'KURZ');
     $fehlend = array();
     foreach ($abschnitte as $a) {
         $s = bl_sprachschluessel($a);
@@ -579,10 +771,11 @@ function bl_token_lage()
 /**
  * Der Helfer, der Bluetooth einschaltet - EIN Pfad, an einer Stelle.
  *
- * Er liegt bewusst NICHT im Plugin-Ordner: postroot.sh schreibt ihn nach
+ * Er liegt NICHT im Plugin-Ordner: postroot.sh schreibt ihn nach
  * /usr/local/sbin (root, 0755), und /etc/sudoers.d/ble_scanner_ng nennt genau
- * diesen Pfad ohne Argumente. Eine sudo-Regel auf eine Datei unter bin/ waere
- * ein Weg nach Root, weil dieses Verzeichnis loxberry gehoert.
+ * diesen Pfad mit dem leeren Argument "". Das schuetzt vor Versehen, nicht vor
+ * Missbrauch: loxberry ist ueber lbdefaults ohnehin faktisch root, diese Regel
+ * begrenzt nichts (berichtigt in 1.3.20, Entscheidung 2 vom 29.09.2026).
  */
 function bl_bt_helfer()
 {
@@ -673,7 +866,7 @@ function bl_adapterlage($cfg)
     }
     // systemctl is-active braucht kein sudo - am Geraet gemessen 13.09.2026:
     // das Wort "inactive" und Rueckgabewert 3 ohne erhoehte Rechte.
-    $aktiv = trim(bl_sh('systemctl is-active bluetooth 2>/dev/null'));
+    $aktiv = trim(bl_sh(bl_frist(3, 'systemctl is-active bluetooth') . ' 2>/dev/null'));
     if (!in_array($soll, $vorhanden, true)) {
         return array(false, sprintf(bl_t('PRUEF.ADAPTER_ANDERER'),
                                     implode(', ', $vorhanden), $soll));
@@ -701,13 +894,21 @@ function bl_pruefzeilen($cfg, $tags)
 
     // --- Dienst
     $zeilen[] = bl_zeile(bl_t('PRUEF.DIENST'), $pid > 0,
-                         $pid > 0 ? 'PID ' . $pid : bl_t('PRUEF.DIENST_NEIN'));
+                         $pid > 0 ? 'PID ' . $pid : bl_t('PRUEF.DIENST_NEIN')
+                         . (bl_soll_laufen() ? '' : ' ' . bl_t('PRUEF.DIENST_ANGEHALTEN')));
+
+    // SEIT 1.3.20 (Pruefung 29.09.2026, O5): ohne laufenden Dienst oder mit
+    // einem Abbild, das aelter ist als dreimal der Takt, ist jede Zeile, die
+    // aus dem Abbild liest, "keine Aussage" - ein Strich mit Grund, nie ein
+    // Haken. Bis 1.3.19 standen hier bei totem Dienst drei gruene Haken.
+    list($gilt, $grund) = bl_abbild_lage($cfg, $pid);
 
     $alter = bl_status_alter();
     $zeilen[] = bl_zeile(bl_t('PRUEF.ABBILD'),
-                         $alter >= 0 ? ($alter <= 120) : null,
+                         $alter < 0 ? null : ($gilt ? true : ($pid > 0 ? false : null)),
                          $alter < 0 ? bl_t('PRUEF.ABBILD_KEINS')
-                                    : sprintf(bl_t('PRUEF.ABBILD_ALTER'), $alter));
+                                    : sprintf(bl_t('PRUEF.ABBILD_ALTER'), $alter)
+                                      . ($gilt ? '' : ' - ' . $grund));
 
     // Die Frage, die bis 1.2.10 nicht beantwortet werden konnte: hoert der
     // Adapter ueberhaupt noch etwas? Die Zustandsdatei allein taugt dafuer
@@ -715,11 +916,14 @@ function bl_pruefzeilen($cfg, $tags)
     $stille = bl_stille();
     $grenze = max(60, (int) bl_cfg($cfg, 'wachhund_stille', '300'));
     $zeilen[] = bl_zeile(bl_t('PRUEF.EMPFANG'),
-                         $stille < 0 ? null : ($stille <= $grenze),
-                         $stille < 0 ? bl_t('PRUEF.EMPFANG_UNBEKANNT')
-                                     : sprintf(bl_t('PRUEF.EMPFANG_VOR'), $stille));
+                         (!$gilt || $stille < 0) ? null : ($stille <= $grenze),
+                         !$gilt ? $grund
+                                : ($stille < 0 ? bl_t('PRUEF.EMPFANG_UNBEKANNT')
+                                               : sprintf(bl_t('PRUEF.EMPFANG_VOR'), $stille)));
 
-    if ($status && isset($status['adapter_ok'])) {
+    if (!$gilt) {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.ADAPTER_OK'), null, $grund);
+    } elseif ($status && isset($status['adapter_ok'])) {
         // Der Grund steht im Abbild (seit 1.3.12), damit hier nicht nur ein
         // Kreuz ohne Erklaerung stehen muss.
         $grund = isset($status['stoerung']) ? (string) $status['stoerung'] : '';
@@ -733,15 +937,24 @@ function bl_pruefzeilen($cfg, $tags)
     // --- Betriebsart
     if ($status && !empty($status['betriebsart'])) {
         $zeilen[] = bl_zeile(bl_t('PRUEF.BETRIEBSART'),
-                             $status['betriebsart'] === bl_cfg($cfg, 'betriebsart', 'signal'),
-                             sprintf(bl_t('PRUEF.BETRIEBSART_IST'),
-                                     $status['betriebsart'],
-                                     bl_cfg($cfg, 'betriebsart', 'signal')));
+                             $gilt ? ($status['betriebsart'] === bl_cfg($cfg, 'betriebsart', 'signal')) : null,
+                             $gilt ? sprintf(bl_t('PRUEF.BETRIEBSART_IST'),
+                                             $status['betriebsart'],
+                                             bl_cfg($cfg, 'betriebsart', 'signal'))
+                                   : $grund);
     }
 
     // --- Die Frage, die alles andere erledigt, steht VOR den Modulen.
     list($ok, $meldung) = bl_adapterlage($cfg);
     $zeilen[] = bl_zeile(bl_t('PRUEF.ADAPTER_DA'), $ok, $meldung);
+
+    // --- Pflichtzeilen der eigenen Oberflaeche (seit 1.3.20, Regeln/04; O7)
+    list($ok, $meldung) = bl_reiter_lage();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.REITER'), $ok, $meldung);
+    list($ok, $meldung) = bl_aktiv_lage();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.AKTIV'), $ok, $meldung);
+    list($ok, $meldung) = bl_konfig_lage();
+    $zeilen[] = bl_zeile(bl_t('PRUEF.KONFIG_HEIL_FRAGE'), $ok, $meldung);
 
     // Ein Formular ohne Token ist ein Knopf ohne Wirkung - und zwar still.
     list($bl_tf_zahl, $bl_tf_ohne) = bl_token_lage();
@@ -752,11 +965,11 @@ function bl_pruefzeilen($cfg, $tags)
             : sprintf(bl_t('PRUEF.TOKEN_BILANZ'), $bl_tf_zahl,
                       $bl_tf_zahl - $bl_tf_ohne, $bl_tf_ohne));
 
-    // --- Werkzeuge und Module
+    // --- Werkzeuge und Module (je Aufruf 3 s Frist, seit 1.3.20 - O8)
     foreach (array('dbus', 'gi', 'paho.mqtt.client') as $m) {
-        $r = bl_sh('python3 -c ' . escapeshellarg('import ' . $m));
+        $r = bl_sh(bl_frist(3, 'python3 -c ' . escapeshellarg('import ' . $m)));
         $zeilen[] = bl_zeile(sprintf(bl_t('PRUEF.MODUL'), $m), trim($r) === '',
-                             trim($r) === '' ? '' : bl_t('PRUEF.MODUL_FEHLT'));
+                             trim($r) === '' ? '' : bl_t('PRUEF.MODUL_FEHLT') . ' ' . bl_kuerzen(trim($r), 120));
     }
     $bt = trim(bl_sh('command -v bluetoothctl'));
     $zeilen[] = bl_zeile(bl_t('PRUEF.BLUETOOTHCTL'), $bt !== '', $bt);
@@ -767,7 +980,9 @@ function bl_pruefzeilen($cfg, $tags)
 
     // Wechselnde Adressen: der haeufigste Anwenderfehler dieser Plugin-Art.
     $wechselnd = array();
-    if ($status) {
+    if ($status && !$gilt) {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.ADRESSTYP'), null, $grund);
+    } elseif ($status) {
         foreach (bl_zustaende() as $k => $z) {
             if ($z['adresstyp'] === 'wechselnd') {
                 $wechselnd[] = $z['name'] !== '' ? $z['name'] : $k;
@@ -788,11 +1003,16 @@ function bl_pruefzeilen($cfg, $tags)
                              $auto === null ? bl_t('PRUEF.AUTOSTART_UNBEKANNT') : '');
         if ($status) {
             $zeilen[] = bl_zeile(bl_t('PRUEF.MQTT_VERBUNDEN'),
-                                 ((int) ($status['mqtt_verbunden'] ?? 0)) === 1,
-                                 sprintf(bl_t('PRUEF.MQTT_ZAHLEN'),
-                                         (int) ($status['mqtt_gesendet'] ?? 0),
-                                         (int) ($status['mqtt_verluste'] ?? 0)));
+                                 $gilt ? (((int) ($status['mqtt_verbunden'] ?? 0)) === 1) : null,
+                                 $gilt ? sprintf(bl_t('PRUEF.MQTT_ZAHLEN'),
+                                                 (int) ($status['mqtt_gesendet'] ?? 0),
+                                                 (int) ($status['mqtt_verluste'] ?? 0))
+                                       : $grund);
         }
+        // Die Abo-Datei des Gateways (seit 1.3.20, MQTT 6).
+        list($abo_pfad, $abo_da) = bl_abo_datei(bl_cfg($cfg, 'themenpraefix', 'blescanner'));
+        $zeilen[] = bl_zeile(bl_t('PRUEF.ABO_DATEI'), $p['home'] === '' ? null : $abo_da,
+                             $abo_pfad . ($abo_da ? '' : ' - ' . bl_t('PRUEF.ABO_DATEI_NEIN')));
     }
 
     // --- HTTP
@@ -802,9 +1022,10 @@ function bl_pruefzeilen($cfg, $tags)
                              $ms ? $ms[0]['name'] . ' (' . $ms[0]['adresse'] . ')' : '');
         if ($status) {
             $offen = (int) ($status['push_offen'] ?? 0);
-            $zeilen[] = bl_zeile(bl_t('PRUEF.PUSH_OFFEN'), $offen === 0,
-                                 sprintf(bl_t('PRUEF.PUSH_ZAHLEN'), $offen,
-                                         (int) ($status['push_fehler'] ?? 0)));
+            $zeilen[] = bl_zeile(bl_t('PRUEF.PUSH_OFFEN'), $gilt ? ($offen === 0) : null,
+                                 $gilt ? sprintf(bl_t('PRUEF.PUSH_ZAHLEN'), $offen,
+                                                 (int) ($status['push_fehler'] ?? 0))
+                                       : $grund);
         }
     }
 
@@ -841,7 +1062,7 @@ function bl_pruefzeilen($cfg, $tags)
         $zeilen[] = bl_zeile(bl_t('PRUEF.FASSUNG'), null,
                              sprintf(bl_t('PRUEF.FASSUNG_KEINE'), $fassung));
     } else {
-        $status_f = $status ? (string) ($status['version'] ?? '') : '';
+        $status_f = ($status && $gilt) ? (string) ($status['version'] ?? '') : '';
         $zeilen[] = bl_zeile(bl_t('PRUEF.FASSUNG'),
                              $status_f === '' ? null : ($status_f === $ausdatei),
                              sprintf(bl_t('PRUEF.FASSUNG_IST'), $ausdatei,
@@ -849,7 +1070,10 @@ function bl_pruefzeilen($cfg, $tags)
     }
 
     // --- Python-Selbstpruefung
-    list($ok, $ausgabe) = bl_python('bl_selbsttest.py', '--json');
+    // Eigene Frist: sie laedt das Dienstmodul und laeuft ihre Faelle durch;
+    // in WSL gemessen (siehe Baubericht 1.3.20) unter 3 s. Haengt sie, weil
+    // ein D-Bus-Aufruf nicht zurueckkommt, endet sie nach 10 s statt 60 s.
+    list($ok, $ausgabe) = bl_python('bl_selbsttest.py', '--json', 10);
     $j = bl_json_aus($ausgabe);
     if (is_array($j) && isset($j['ok'])) {
         $zeilen[] = bl_zeile(bl_t('PRUEF.PYTHON_SELBSTTEST'),
@@ -888,6 +1112,9 @@ function bl_test_ausfuehren($was, $zusatz = '')
 
         case 'selbsttest':
             $zeilen = bl_pruefzeilen($cfg, $tags);
+            // Der Reiter zeigt nach der Umleitung diesen Stand, statt ihn
+            // gleich noch einmal zu rechnen (seit 1.3.20, O8).
+            bl_pruefzeilen_merken($zeilen);
             $t = '';
             $ok = $rot = $offen = 0;
             foreach ($zeilen as $z) {
@@ -944,6 +1171,10 @@ function bl_test_ausfuehren($was, $zusatz = '')
                 return array(bl_t('TEST.T_SICHTBAR'), bl_t('TEST.KEIN_ABBILD'));
             }
             $t = sprintf(bl_t('TEST.STAND_VOR'), bl_status_alter()) . "\n\n";
+            list($gilt, $grund) = bl_abbild_lage($cfg, bl_dienst_pid());
+            if (!$gilt) {
+                $t .= $grund . "\n\n";   // seit 1.3.20 (O5): keine Aussage ueber jetzt
+            }
             $t .= sprintf("%-19s %6s %6s  %-11s %-22s %s\n", 'MAC', 'RSSI', 'Ø',
                           bl_t('TEST.SP_ADRESSE'), bl_t('TEST.SP_NAME'), bl_t('TEST.SP_ZULETZT'));
             $t .= str_repeat('-', 84) . "\n";
@@ -966,7 +1197,10 @@ function bl_test_ausfuehren($was, $zusatz = '')
             if (!$tags) {
                 return array(bl_t('TEST.T_TAGS'), bl_t('TEST.KEIN_TAG'));
             }
-            $t = sprintf("%-24s %-20s %-6s %5s %6s %5s %s\n",
+            // Ohne laufenden Dienst oder mit altem Abbild: keine Aussage (O5).
+            list($gilt, $grund) = bl_abbild_lage($cfg, bl_dienst_pid());
+            $t = $gilt ? '' : $grund . "\n\n";
+            $t .= sprintf("%-24s %-20s %-6s %5s %6s %5s %s\n",
                 bl_t('TEST.SP_KENNUNG'), bl_t('TEST.SP_NAME'), bl_t('TEST.SP_AKTIV'),
                 bl_t('TEST.SP_DA'), 'RSSI', bl_t('TEST.SP_STUFE'), bl_t('TEST.SP_ZULETZT'));
             $t .= str_repeat('-', 92) . "\n";
@@ -977,9 +1211,9 @@ function bl_test_ausfuehren($was, $zusatz = '')
                     bl_kuerzen($tag['kennung'], 24),
                     bl_kuerzen($tag['name'], 20),
                     $tag['aktiv'] === '1' ? bl_t('TEXT.JA') : bl_t('TEXT.NEIN'),
-                    $z ? ($z['anwesend'] ? bl_t('TEXT.JA') : bl_t('TEXT.NEIN')) : '?',
-                    $z && $z['rssi'] !== null ? $z['rssi'] : '-',
-                    $z ? $z['stufe'] : '-',
+                    ($z && $gilt) ? ($z['anwesend'] ? bl_t('TEXT.JA') : bl_t('TEXT.NEIN')) : '?',
+                    ($z && $gilt && $z['rssi'] !== null) ? $z['rssi'] : '-',
+                    ($z && $gilt) ? $z['stufe'] : '-',
                     $z && !empty($z['zuletzt']) ? date('d.m. H:i:s', (int) $z['zuletzt']) : '-');
             }
             if (!$s) {

@@ -1,11 +1,76 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.19
+Version 1.3.20
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.20 — der Dienst kommt nach dem Systemstart wieder, und ein Wächter hält ihn am Leben
+
+Durchgang vom 29./30.09.2026 mit vier Prüfern (Code, Oberfläche, Installer,
+MQTT). Befunde mit Datei:Zeile:
+`Pruefung-Durchgang-2026-09-29/BLE-Scanner_BEFUNDE_UND_VERBESSERUNGEN.md`.
+
+**Warum am LoxBerry kein Dienst lief (im Systemprotokoll gemessen).** Beim
+Systemstart schrieb `daemon` als root „Starte …“ in die Protokolldatei. Fehlte
+sie, weil die Logwartung sie abgeräumt hatte, legte root sie neu an – und der
+Dienst, der als `loxberry` startet, durfte nicht hineinschreiben: „Permission
+denied“, kein Dienst bis zum nächsten Systemstart. Jetzt legt `daemon` die
+Datei als `loxberry` an, und der Dienst schreibt sein Protokoll selbst.
+
+**Wächter.** `cron/cron.05min` prüft Prozess und Alter der Zustandsdatei und
+startet den Dienst neu, solange der Sollmerker neben dem Datenordner
+„ein“ sagt – gebremst, mit Neustartgrenze. „Angehalten“ über die Oberfläche
+bleibt angehalten, auch über Updates und Neustarts.
+
+**Dienst**
+
+* Ein zweiter Start läuft gegen eine Sperre; zweimal „Dienst starten“ ergibt
+  einen Dienst.
+* Nach einem Neustart von `bluetoothd` verbindet sich der Dienst neu
+  (NameOwnerChanged). Bis 1.3.19 blieb er danach blind, bis der Prozess neu
+  startete – ausgerechnet der Rat im eigenen Protokoll löste das aus.
+* Das Protokoll schreibt der Dienst selbst; nach einer Kappung gehen keine
+  Zeilen mehr in eine gelöschte Datei. Gleiche Fehlermeldungen höchstens
+  stündlich.
+
+**Sichern und Zurückspielen funktionieren zum ersten Mal.** Beide Knöpfe
+endeten seit 1.3.6 in einem PHP-Fehler (falsche Zahl von Argumenten). Die
+Sicherung enthält jetzt auch die Tags; beim Zurückspielen wird jeder Wert wie
+im Formular geprüft, danach der Dienst nachgezogen.
+
+**MQTT**
+
+* Ein entfernter oder abgehakter Tag behält im Broker nicht mehr `present=1`:
+  beim Start räumt der Dienst jeden Zweig ab, der nicht mehr aktiv ist.
+* `raum` und `name` ohne Aussage gehen als `-` hinaus, nicht als Altwert.
+* `server/ts` höchstens alle 30 s, `last_seen_ts` und `server/letzte_sichtung`
+  nur beim Wechsel und höchstens alle 60 s – statt zwölfmal je Minute.
+* Das Plugin führt `mqtt_subscriptions.cfg` selbst; die Themenliste nennt
+  auch die Zweige `person/` und `scanner/`.
+* `present` gilt in Loxone nur zusammen mit `server/online` (Letzter Wille).
+  Die Hilfe und die Baustein-Liste sagen das jetzt, und die Ausfallerkennung
+  hängt an `server/online` und am Alter von `server/ts`, nicht an `server/ok`.
+
+**Oberfläche**
+
+* Jedes Absenden endet mit einer Umleitung; F5 startet keinen zweiten Dienst.
+* Läuft kein Dienst, sagt ein Kasten oben, was zu tun ist, und Kacheln, Live-
+  Ansicht und Reiter Test zeigen „keine Aussage“ statt alter grüner Werte.
+* Eingaben werden abgewiesen statt still gekürzt; eine vertippte Adresse
+  löscht keinen Tag mehr.
+* Die Selbstprüfung läuft nur im Reiter Test, nicht bei jedem Seitenaufruf.
+
+**Installation**
+
+* Eine Neuinstallation spielt keine alten Einstellungen mehr ein
+  (`preinstall.sh`, `.alt`); die Upgrade-Marke gilt ohne Altersgrenze.
+* Eine abgeschnittene Konfiguration überschreibt beim Update nicht mehr die
+  heile Zweitschrift; eine alte Upgrade-Sicherung wird nicht eingespielt.
+* Die sudoers-Kommentare sagen ehrlich, dass `loxberry` über `lbdefaults`
+  ohnehin weitreichende Rechte hat; die Regel lässt kein Argument mehr zu.
 
 ## Neu in 1.3.19 — der Broker wird aufgeräumt, und ein Archiv lässt die Anlage in Ruhe
 
@@ -713,21 +778,27 @@ unterscheidet jetzt drei Fälle statt einem:
 ### Neu: der Knopf „Bluetooth einschalten" im Reiter *Test*
 
 Weil genau zwei Befehle fehlen, gibt es sie jetzt auf Knopfdruck. Der Weg dahin
-folgt dem Hausmuster für Rechte (Regeln/06), und zwar genau deshalb, weil der
-naheliegende Weg ein Loch wäre:
+folgt dem Hausmuster für Rechte (Regeln/06). Ehrlich gesagt (berichtigt in
+1.3.20): `loxberry` ist über `/etc/sudoers.d/lbdefaults` ohnehin faktisch root —
+dort darf der Benutzer ohne Kennwort `systemctl`, `apt-get`, `dpkg` und
+`reboot`. Die Regel dieses Plugins begrenzt darüber hinaus nichts; der Aufbau
+unten schützt vor Versehen, nicht vor Missbrauch:
 
 * `postroot.sh` — das **einzige** Skript dieses Plugins, das als root läuft —
   schreibt einen Helfer nach `/usr/local/sbin/ble_scanner_ng_bluetooth`,
   `root:root`, `0755`.
-* `sudoers/sudoers` nennt **genau diesen einen Pfad, ohne Argumente**. LoxBerry
+* `sudoers/sudoers` nennt **genau diesen einen Pfad mit dem leeren Argument
+  `""`** — erst damit ist nur der Aufruf ohne Argumente erlaubt; eine Regel ohne
+  Argumentliste ließe nach `sudoers(5)` jedes Argument zu. LoxBerry
   legt die Datei beim Installieren nach `<home>/system/sudoers/ble_scanner_ng`
   ab — dasselbe Verzeichnis wie `/etc/sudoers.d`, am Gerät über die
   Inode-Nummer nachgemessen — und entfernt sie beim Deinstallieren wieder.
-* **Warum nicht einfach ein Skript in `bin/`?** Weil `bin/` `loxberry` gehört.
-  Eine sudo-Regel auf eine Datei in einem Verzeichnis, in das derselbe Benutzer
-  schreiben darf, ist ein Weg nach Root. Regeln/06 sagt das ausdrücklich; die
-  Selbstprüfung hält es fest („die sudo-Regel zeigt nicht in den
-  Plugin-Ordner", „… nennt keine Argumente") und wurde beidseitig geeicht.
+* **Warum nicht einfach ein Skript in `bin/`?** Damit der Inhalt des Helfers
+  unter der Aufsicht von `postroot.sh` steht und kein Umbau im Plugin-Ordner
+  ihn versehentlich verändert. Ein Weg nach Root, den es sonst nicht gäbe, wäre
+  es nicht — den hat `loxberry` über `lbdefaults` ohnehin. Die Selbstprüfung
+  hält die Gestalt fest („die sudo-Regel zeigt nicht in den Plugin-Ordner",
+  „… nennt keine Argumente").
 * Der Helfer ändert **keine Datei unter `/etc`**. Er lädt `hci_uart` (und
   versucht `btusb` für einen eingesteckten Adapter), wartet bis
   `/sys/class/bluetooth` da ist und startet dann `bluetooth.service` — vorher
@@ -1038,8 +1109,8 @@ mit leerer Nutzlast gelöscht.
   Mensch, und `person/<Name>/present` ist das ODER darüber.
 * **Mehrere Scanner**: eigener Themenzweig je Scanner und Raumzuordnung mit
   Hysterese und Ausgleichswert.
-* **Herzschlag**: `server/ts` kommt in jedem Durchlauf, `server/ok` und
-  `server/adapter_ok` sagen, ob der Dienst wirklich arbeitet. Ohne einen
+* **Herzschlag**: `server/ts` kommt höchstens alle 30 s (seit 1.3.20),
+  `server/ok` und `server/adapter_ok` sagen, ob der Dienst wirklich arbeitet. Ohne einen
   solchen Zeitstempel sieht ein toter Dienst in Loxone genauso aus wie ein
   ruhiges Haus.
 

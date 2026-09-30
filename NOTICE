@@ -115,8 +115,11 @@ Aenderungen gegenueber dem Original (Apache License 2.0, Abschnitt 4 b)
          BlueZ-Fassung und an einer herstellerspezifischen Erweiterung des
          Chips; ob es sich mit einer parallelen StartDiscovery vertraegt, ist
          offen. Alle drei Punkte sind zu messen, bevor gebaut wird.
-       * systemctl restart bluetooth im Wachhund. Das braeuchte eine
-         sudo-Regel, also eine systemweite Rechteaenderung durch ein Plugin.
+       * systemctl restart bluetooth im Wachhund. Der Befehl startet
+         bluetoothd fuer alle Programme neu; das entscheidet der Anwender.
+         (Berichtigt in 1.3.20: hier stand, er braeuchte "eine sudo-Regel,
+         also eine systemweite Rechteaenderung" - loxberry darf systemctl
+         ueber lbdefaults ohnehin.)
        * Entschluesselung originaler Xiaomi-Mi-Beacon-Pakete.
 
 1.3.13 Xiaomi-/Mijia-Sensoren werden gelesen (MiBeacon, ServiceData

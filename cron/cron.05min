@@ -1,0 +1,247 @@
+#!/bin/sh
+#
+# BLE-Scanner NG - Waechter, alle fuenf Minuten. NEU IN 1.3.20.
+#
+# Bis 1.3.19 gab es keinen. Starb der Dienst - an einer unerwarteten Ausnahme,
+# an einem Neustart von bluetoothd, oder weil er beim Systemstart gar nicht
+# anlief (am Geraet am 28.09.2026 im Journal: "Permission denied" auf die
+# Protokolldatei) -, lief er bis zum naechsten Neustart des LoxBerry nicht
+# wieder an. In Loxone sieht das aus wie ein ruhiges Haus: die retained
+# Zustaende stehen weiter im Broker (Pruefung 29.09.2026, C8 und B1).
+#
+# Bauart Chromecast4lox 1.3.13 (cron.05min), mit drei Zusaetzen aus der
+# Bauliste: Sollmerker, Alter des Abbilds, Neustartgrenze.
+#
+# Was dieser Waechter tut, der Reihe nach:
+#   1. Sollmerker "0" (im Reiter Einstellungen angehalten): nichts.
+#   2. Laeuft eine Aktualisierung (Marke hoechstens eine Stunde alt): nichts.
+#   3. Kein Dienstprozess: nachstarten.
+#   4. Ein Dienstprozess, dessen Abbild (Feld "zeit" der Zustandsdatei) aelter
+#      ist als fuenfmal der Takt, mindestens 180 s: beenden und nachstarten.
+#      Fail safe: kein Abbild, kein lesbares Feld, keine Uhr, kein lesbarer
+#      Takt oder ein Prozess, der juenger ist als die Grenze - dann wird
+#      NICHT eingegriffen (Regeln/03, "Kein Abbild ... nicht neu starten").
+#   5. Neustartgrenze: hoechstens drei Nachstarts je Stunde. Danach setzt er
+#      nicht nach, sondern meldet es - hoechstens einmal je Stunde.
+#
+# Die Platzhalter werden bei der Installation ersetzt. Sie stehen deshalb NUR
+# in den Zuweisungen und nicht im Kommentar. NICHT vom eigenen Ablageort eine
+# feste Zahl Ebenen aufwaerts rechnen: LoxBerry legt diese Datei unter
+# <Wurzel>/system/cron/cron.05min/<plugin> ab.
+DIENST="REPLACELBPBINDIR/ble_scanner_ng.py"
+CFG="REPLACELBPCONFIGDIR/ble_scanner_ng.cfg"
+LOGDIR="REPLACELBPLOGDIR"
+LOG="REPLACELBPLOGDIR/ble_scanner_ng.log"
+STARTLOG="REPLACELBPLOGDIR/ble_scanner_ng_start.log"
+DATADIR="REPLACELBPDATADIR"
+PIDDATEI="REPLACELBPDATADIR/dienst.pid"
+ORDNER="REPLACELBPPLUGINDIR"
+# Marke, Sollmerker und Waechterzustand liegen NEBEN dem Datenordner: darin
+# raeumte sie der Installer bei jedem Upgrade mit ab (preupgrade.sh).
+MARKE="$DATADIR.upgrade_laeuft"
+SOLL="$DATADIR.soll_laufen"
+ZUSTAND="$DATADIR.waechter"
+
+# Die Zustandsdatei liegt auf der Ramdisk, ihr Name traegt den Ordnernamen -
+# dieselbe Regel wie _RAM in bl_common.py und bl_ram_name() in bl_lib.php.
+RAM=$(printf '%s' "$ORDNER" | tr -c 'A-Za-z0-9_-' '_')
+[ -n "$RAM" ] || RAM=ble_scanner_ng
+if [ -d /run/shm ]; then SHM=/run/shm; else SHM=/tmp; fi
+ABBILD="$SHM/${RAM}_status.json"
+
+# Meldungen gehen an den Systemlogger und in die Protokolldatei des Plugins -
+# dort nur an eine VORHANDENE Datei (dieselbe Regel wie in daemon/daemon: wer
+# sie anlegt, entscheidet ueber ihren Eigentuemer).
+melde() {
+    command -v logger >/dev/null 2>&1 && logger -t ble_scanner_ng "BLE-Scanner NG, Waechter: $1"
+    if [ -f "$LOG" ]; then
+        echo "$(date '+%Y-%m-%d %H:%M:%S') WARNING waechter: $1" >> "$LOG" 2>/dev/null
+    fi
+    return 0
+}
+
+# Eine gleiche Meldung hoechstens einmal je Stunde (Regeln/03: ein Cron, der
+# alle fuenf Minuten dasselbe schreibt, wird nicht mehr gelesen). Der Stand
+# steht in der Waechterdatei; fehlt die Protokolldatei, wird wieder gemeldet.
+melde_gebremst() {
+    bl_jetzt=$(date +%s 2>/dev/null)
+    case "$bl_jetzt" in ''|*[!0-9]*) melde "$1"; return 0 ;; esac
+    bl_kurz=$(printf '%s' "$1" | cksum | cut -d' ' -f1)
+    bl_vorher=$(sed -n "s/^meldung=$bl_kurz \([0-9][0-9]*\)$/\1/p" "$ZUSTAND" 2>/dev/null | tail -1)
+    if [ -n "$bl_vorher" ] && [ -f "$LOG" ] && [ $((bl_jetzt - bl_vorher)) -lt 3600 ]; then
+        return 0
+    fi
+    melde "$1"
+    zustand_setzen "meldung" "$bl_kurz $bl_jetzt"
+}
+
+# Waechterdatei: Zeilen "schluessel=wert". Geschrieben wird daneben und dann
+# umbenannt; scheitert das, verliert der Waechter nur sein Gedaechtnis.
+zustand_setzen() {
+    bl_neu="$ZUSTAND.neu.$$"
+    { grep -v "^$1=" "$ZUSTAND" 2>/dev/null; echo "$1=$2"; } > "$bl_neu" 2>/dev/null \
+        && mv -f "$bl_neu" "$ZUSTAND" 2>/dev/null
+    rm -f "$bl_neu" 2>/dev/null
+    return 0
+}
+
+# 1. Angehalten?
+if [ "$(cat "$SOLL" 2>/dev/null)" = "0" ]; then
+    exit 0
+fi
+
+# 2. Aktualisierung? Dieselbe Rechnung wie in daemon/daemon (Startsperre):
+#    hoechstens eine Stunde alt, bis fuenf Minuten aus der Zukunft; ohne
+#    lesbare Uhr gilt die Marke (ein Schutz faellt geschlossen aus).
+if [ -f "$MARKE" ]; then
+    SEIT=$(cat "$MARKE" 2>/dev/null)
+    JETZT=$(date +%s 2>/dev/null)
+    case "$JETZT" in ''|*[!0-9]*) exit 0 ;; esac
+    case "$SEIT" in
+        ''|*[!0-9]*) ;;
+        *)
+            ALTER=$((JETZT - SEIT))
+            if [ "$ALTER" -ge -300 ] && [ "$ALTER" -lt 3600 ]; then
+                exit 0
+            fi
+            ;;
+    esac
+fi
+
+# Prozesse des Dienstes, argumentweise (dieselbe Funktion wie in daemon/daemon,
+# preupgrade.sh, postinstall.sh, postupgrade.sh und uninstall): GENAU zwei
+# Argumente, ein python-Interpreter und der volle Dienstpfad, Benutzer $2.
+bl_dienste_finden() {
+    for bl_d in /proc/[0-9]*; do
+        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
+        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
+        bl_n=0
+        bl_treffer=0
+        while IFS= read -r bl_arg; do
+            bl_n=$((bl_n + 1))
+            if [ "$bl_n" = 1 ]; then
+                case "${bl_arg##*/}" in
+                    python|python3|python3.*) ;;
+                    *) break ;;
+                esac
+            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
+                bl_treffer=1
+            fi
+        done <<BL_ARGUMENTE
+$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
+BL_ARGUMENTE
+        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
+            echo "${bl_d#/proc/}"
+        fi
+    done
+}
+
+if [ ! -x "$DIENST" ]; then
+    melde_gebremst "der Dienst $DIENST fehlt oder ist nicht ausfuehrbar - es wird nicht nachgestartet."
+    exit 1
+fi
+
+BL_UID=$(id -u loxberry 2>/dev/null)
+[ -n "$BL_UID" ] || BL_UID=$(id -u 2>/dev/null)
+LAEUFT=$(bl_dienste_finden "$DIENST" "$BL_UID")
+GRUND=""
+
+if [ -n "$LAEUFT" ]; then
+    # 4. Arbeitet er noch? Das Feld "zeit" steht als ERSTES im Abbild
+    #    (zustand_schreiben() in ble_scanner_ng.py); ein Feld "zeit" weiter
+    #    hinten (Testwerte) wird damit nicht verwechselt.
+    TAKT=$(sed -n 's/^[[:space:]]*intervall[[:space:]]*=[[:space:]]*\([0-9][0-9]*\)[[:space:]]*$/\1/p' "$CFG" 2>/dev/null | tail -1)
+    ZEIT=$(sed -n 's/^{"zeit": *\([0-9][0-9]*\),.*/\1/p' "$ABBILD" 2>/dev/null | head -1)
+    JETZT=$(date +%s 2>/dev/null)
+    case "$TAKT" in ''|*[!0-9]*) TAKT="" ;; esac
+    case "$ZEIT" in ''|*[!0-9]*) ZEIT="" ;; esac
+    case "$JETZT" in ''|*[!0-9]*) JETZT="" ;; esac
+    if [ -z "$TAKT" ] || [ -z "$ZEIT" ] || [ -z "$JETZT" ]; then
+        # Nicht beurteilbar: nicht eingreifen.
+        exit 0
+    fi
+    # Waehrend einer BlueZ-Stoerung schreibt der Dienst das Abbild nur alle
+    # 30 s (verbinden_mit_geduld); der Takt zaehlt deshalb mindestens so.
+    [ "$TAKT" -lt 30 ] && TAKT=30
+    GRENZE=$((5 * TAKT))
+    [ "$GRENZE" -lt 180 ] && GRENZE=180
+    ALTER=$((JETZT - ZEIT))
+    [ "$ALTER" -le "$GRENZE" ] && exit 0
+    # Ein Prozess, der juenger ist als die Grenze, hat sein Abbild womoeglich
+    # noch nicht geschrieben - das Abbild ist dann das eines Vorgaengers.
+    JUENGSTER=""
+    for bl_p in $LAEUFT; do
+        bl_e=$(ps -o etimes= -p "$bl_p" 2>/dev/null | tr -d ' ')
+        case "$bl_e" in ''|*[!0-9]*) exit 0 ;; esac
+        if [ -z "$JUENGSTER" ] || [ "$bl_e" -lt "$JUENGSTER" ]; then JUENGSTER=$bl_e; fi
+    done
+    [ -n "$JUENGSTER" ] && [ "$JUENGSTER" -le "$GRENZE" ] && exit 0
+    GRUND="das Abbild ist $ALTER s alt (Grenze $GRENZE s)"
+else
+    GRUND="es lief kein Dienst"
+fi
+
+# 5. Neustartgrenze: hoechstens drei Nachstarts in der letzten Stunde.
+JETZT=$(date +%s 2>/dev/null)
+case "$JETZT" in ''|*[!0-9]*) melde_gebremst "ohne lesbare Uhr wird nicht nachgestartet ($GRUND)."; exit 1 ;; esac
+LISTE=""
+ZAHL=0
+for bl_t in $(sed -n 's/^neustarts=//p' "$ZUSTAND" 2>/dev/null | tail -1); do
+    case "$bl_t" in ''|*[!0-9]*) continue ;; esac
+    if [ $((JETZT - bl_t)) -lt 3600 ]; then
+        LISTE="$LISTE $bl_t"
+        ZAHL=$((ZAHL + 1))
+    fi
+done
+if [ "$ZAHL" -ge 3 ]; then
+    melde_gebremst "$GRUND - aber in der letzten Stunde wurde schon dreimal nachgestartet. Es wird nicht weiter nachgesetzt; die Ursache steht im Reiter Logdateien."
+    exit 1
+fi
+
+if [ -n "$LAEUFT" ]; then
+    kill $LAEUFT 2>/dev/null
+    bl_i=0
+    while [ $bl_i -lt 20 ] && [ -n "$(bl_dienste_finden "$DIENST" "$BL_UID")" ]; do
+        sleep 0.5
+        bl_i=$((bl_i + 1))
+    done
+    REST=$(bl_dienste_finden "$DIENST" "$BL_UID")
+    [ -n "$REST" ] && kill -9 $REST 2>/dev/null && sleep 1
+fi
+
+zustand_setzen "neustarts" "$(echo "$LISTE $JETZT" | sed 's/^ *//')"
+
+# Nachstarten. NICHT ueber "su loxberry -c" - der Cron ruft diese Datei
+# bereits als loxberry auf, und su verlangt dann ein Kennwort (Regeln/03, am
+# Geraet gemessen 06.09.2026). Der Benutzer wird gemessen, nicht angenommen.
+mkdir -p "$DATADIR" "$LOGDIR" 2>/dev/null
+WER=$(id -un 2>/dev/null)
+if [ "$WER" = "loxberry" ]; then
+    [ -e "$STARTLOG" ] || : > "$STARTLOG"
+    [ -e "$LOG" ] || : > "$LOG"
+    nohup "$DIENST" >> "$STARTLOG" 2>&1 &
+    echo $! > "$PIDDATEI"
+elif [ "$(id -u 2>/dev/null)" = "0" ]; then
+    chown loxberry:loxberry "$DATADIR" "$LOGDIR" 2>/dev/null
+    for bl_f in "$LOG" "$STARTLOG"; do
+        [ -e "$bl_f" ] || su loxberry -c "touch '$bl_f'" >/dev/null 2>&1
+        [ -e "$bl_f" ] && chown loxberry:loxberry "$bl_f" 2>/dev/null
+    done
+    su loxberry -c "nohup '$DIENST' >> '$STARTLOG' 2>&1 & echo \$! > '$PIDDATEI'" >/dev/null 2>&1
+    chown loxberry:loxberry "$PIDDATEI" 2>/dev/null
+else
+    melde_gebremst "der Waechter laeuft als '$WER' - weder loxberry noch root. Es wird nicht nachgestartet."
+    exit 1
+fi
+
+# Die WIRKUNG messen, nicht den Rueckgabewert von nohup (der ist immer 0).
+sleep 3
+NEU=$(cat "$PIDDATEI" 2>/dev/null)
+case "$NEU" in ''|*[!0-9]*) NEU="" ;; esac
+if [ -n "$NEU" ] && kill -0 "$NEU" 2>/dev/null \
+   && bl_dienste_finden "$DIENST" "$BL_UID" | grep -qx "$NEU"; then
+    melde "$GRUND - der Dienst wurde nachgestartet (PID $NEU)."
+    exit 0
+fi
+melde "$GRUND - der Dienst liess sich nicht nachstarten. Siehe $STARTLOG und $LOG."
+exit 1

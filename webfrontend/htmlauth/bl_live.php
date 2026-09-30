@@ -22,13 +22,22 @@ header('Cache-Control: no-store');
 
 $bl_p = bl_paths();
 $bl_status = bl_status();
+$bl_pid = bl_dienst_pid();
+list($bl_cfg, , ) = bl_config_read();
+// Seit 1.3.20 (Pruefung 29.09.2026, O5): ohne laufenden Dienst oder mit einem
+// Abbild, das aelter ist als dreimal der Takt, sagt die Live-Ansicht "keine
+// Aussage" - bis 1.3.19 erneuerte sie alle 3 s "2 anwesend" aus einer
+// liegengebliebenen Datei.
+list($bl_gilt, $bl_grund) = bl_abbild_lage($bl_cfg, $bl_pid);
 
 $antwort = array(
     'zeit'     => time(),
     'vorhanden' => $bl_status ? 1 : 0,
-    'pid'      => bl_dienst_pid(),
+    'pid'      => $bl_pid,
     'alter'    => bl_status_alter(),
     'stille'   => bl_stille(),
+    'gilt'     => $bl_gilt ? 1 : 0,
+    'grund'    => $bl_grund,
     'status'   => $bl_status,
 );
 

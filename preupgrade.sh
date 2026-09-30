@@ -5,16 +5,20 @@ COMMAND=$0    # Zero argument is shell command
 PTEMPDIR=$1   # First argument is temp folder during install
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
-# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
-# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
-LBHOMEDIR="${LBHOMEDIR:-$5}"
-LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
-# sudo -n -u loxberry setzt die Umgebung zurueck - ohne diesen
-# Rueckfall zeigte $LBPDATA ins Nichts und der Pfad auf /<ordner>.
-LBPDATA="${LBPDATA:-$5/data/plugins}"
+# EINE Wurzel (seit 1.3.20, Regeln/06; Pruefung 29.09.2026, B8). Bis 1.3.19
+# galt die LB-Umgebung vor dem fuenften Argument, und NETZ_BASE weiter unten
+# nahm $5 zuerst - zwei Wurzeln in einem Skript. Am Geraet sind beide gleich;
+# ein Pruefstand am Geraet (/etc/environment setzt LB*) griff damit aber die
+# Anlage an (in WSL gemessen, Fall W1: Anlagen-Dienst angehalten und neu
+# gestartet, fassung.txt der Anlage umgeschrieben). Jetzt: $5 zuerst, sonst
+# LBHOMEDIR, und alle Pfade daraus.
+BASE="${5:-$LBHOMEDIR}"
+LBHOMEDIR="$BASE"
+LBPCONFIG="$BASE/config/plugins"
+LBPDATA="$BASE/data/plugins"
 # Seit 1.3.17: der volle Dienstpfad wird gebraucht, weil der Dienst
 # argumentweise gesucht wird (argv[1] ist GENAU dieser Pfad).
-LBPBIN="${LBPBIN:-$5/bin/plugins}"
+LBPBIN="$BASE/bin/plugins"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
@@ -182,17 +186,18 @@ if [ -n "$BL_UEBRIG" ]; then
     echo "<WARNING> Der Dienst laesst sich nicht beenden (PID$BL_UEBRIG)."
 fi
 
+# SEIT 1.3.20 entscheidet postupgrade.sh nach dem SOLLMERKER
+# ($PDATA.soll_laufen, "0" = im Reiter Einstellungen angehalten), nicht mehr
+# danach, ob der Dienst gerade lief (Pruefung 29.09.2026, B1). Bis 1.3.19 legte
+# dieses Skript dafuer "lief_vor_update" ab: ein abgestuerzter Dienst blieb
+# danach ueber jedes Update hinweg aus - so am Geraet am 26.09.2026 ("Es lief
+# kein BLE-Scanner NG", danach "wurde nicht gestartet"). Ein Rest der alten
+# Fassung wird weggeraeumt.
+rm -f "$MERK_LIEF" 2>/dev/null
 if [ "$BL_GEFUNDEN" != 0 ]; then
     rm -f "$PIDDATEI"
-    # Merker fuer postupgrade.sh: der Dienst LIEF und gehoert danach wieder
-    # gestartet. Ohne diesen Merker wuerde ein bewusst angehaltener Dienst
-    # nach jedem Update ungefragt wieder anlaufen.
-    date +%s > "$MERK_LIEF" 2>/dev/null
-    chown loxberry:loxberry "$MERK_LIEF" 2>/dev/null
-    chmod 0644 "$MERK_LIEF" 2>/dev/null
 else
     echo "<INFO> Es lief kein BLE-Scanner NG."
-    rm -f "$MERK_LIEF" 2>/dev/null
 fi
 
 # --- Traegt eine Datei INHALT? ----------------------------------------------
@@ -257,6 +262,28 @@ NEU="$SICHER.neu"
 # in "$SICHER.neu" bauen -> Rueckgabewert UND Inhalt pruefen -> die alte nach
 # "$SICHER.alt" schieben -> die neue an ihren Platz -> die alte wegraeumen.
 # Scheitert irgendetwas davon, bleibt die alte Sicherung unangetastet.
+#
+# ERGAENZT IN 1.3.20 (Entscheidung 1 vom 29.09.2026, letzter Satz; Pruefung
+# B3): eine Sicherung, die hier schon LIEGT, stammt aus einem FRUEHEREN Lauf
+# (abgebrochenes Update, gescheitertes Zurueckspielen). Bis 1.3.19 spielte
+# postupgrade.sh sie zurueck, wenn die neue Sicherung scheiterte - in WSL
+# gemessen (Fall E8): eine Konfiguration vom 01.08. ersetzte die laufende, und
+# das Protokoll meldete "Aktualisierung abgeschlossen". Jetzt wird sie VOR dem
+# Neubau aus dem Rueckspielweg genommen: nach "$SICHER.vorher" - nicht
+# geloescht, sie faellt erst, wenn die neue steht. Scheitert die neue, bleibt
+# sie dort liegen und wird genannt; zurueckgespielt wird sie nie. Die
+# Deinstallation raeumt sie ab.
+VORHER="$SICHER.vorher"
+if [ -d "$SICHER" ]; then
+    rm -rf "${VORHER:?}" 2>/dev/null
+    if mv "$SICHER" "$VORHER" 2>/dev/null; then
+        echo "<INFO> Eine Sicherung aus einem frueheren Lauf lag noch da; sie wird nicht"
+        echo "<INFO> zurueckgespielt und liegt bis zum Ende dieses Laufs unter $VORHER."
+    else
+        echo "<WARNING> Die Sicherung aus einem frueheren Lauf ($SICHER) liess sich nicht"
+        echo "<WARNING> beiseitelegen - postupgrade.sh spielt sie womoeglich zurueck."
+    fi
+fi
 echo "<INFO> Creating backup folder for upgrading $SICHER"
 rm -rf "$NEU" 2>/dev/null
 mkdir -p "$NEU"
@@ -307,6 +334,8 @@ if [ "$SICHER_OK" = 1 ]; then
         rm -rf "$SICHER.alt" 2>/dev/null
         chmod 0700 "$SICHER" 2>/dev/null
         echo "<OK> Konfiguration gesichert (Rechte 0700)."
+        # Die neue steht - jetzt erst faellt die aus dem frueheren Lauf.
+        rm -rf "${VORHER:?}" 2>/dev/null
     else
         if [ -d "$SICHER.alt" ]; then mv "$SICHER.alt" "$SICHER" 2>/dev/null; fi
         rm -rf "$NEU" 2>/dev/null
@@ -315,8 +344,9 @@ if [ "$SICHER_OK" = 1 ]; then
     fi
 else
     rm -rf "$NEU" 2>/dev/null
-    if [ -d "$SICHER" ]; then
-        echo "<WARNING> Die bisherige Sicherung unter $SICHER bleibt unangetastet."
+    if [ -d "$VORHER" ]; then
+        echo "<WARNING> Die Sicherung aus einem frueheren Lauf wird NICHT zurueckgespielt;"
+        echo "<WARNING> sie liegt unter $VORHER (die Deinstallation raeumt sie ab)."
     fi
 fi
 
@@ -324,7 +354,7 @@ fi
 # Zweitschrift NEBEN den Konfigurationsordner, zusaetzlich zur bisherigen
 # Sicherung. Grund: der Installer kopiert config/* aus dem Archiv ueber
 # config/plugins/<ordner> und ueberschreibt dabei die Datei des Nutzers.
-NETZ_BASE="${5:-$LBHOMEDIR}"
+NETZ_BASE="$BASE"
 NETZ_PDIR="${3:-ble_scanner_ng}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 NETZ_QUELLE="$NETZ_CFG/ble_scanner_ng.cfg"

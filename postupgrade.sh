@@ -5,14 +5,14 @@ COMMAND=$0    # Zero argument is shell command
 PTEMPDIR=$1   # First argument is temp folder during install
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
-# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset).
-# Das fuenfte Argument ist das Wurzelverzeichnis und traegt immer.
-LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
-LBPLOG="${LBPLOG:-$5/log/plugins}"
-LBPBIN="${LBPBIN:-$5/bin/plugins}"
-# sudo -n -u loxberry setzt die Umgebung zurueck - ohne diesen
-# Rueckfall zeigte $LBPDATA ins Nichts und der Pfad auf /<ordner>.
-LBPDATA="${LBPDATA:-$5/data/plugins}"
+# EINE Wurzel (seit 1.3.20, Regeln/06; Pruefung 29.09.2026, B8): $5 zuerst,
+# sonst LBHOMEDIR, und alle Pfade daraus. Bis 1.3.19 galt die LB-Umgebung vor
+# dem fuenften Argument - ein Pruefstand am Geraet griff so die Anlage an.
+BASE="${5:-$LBHOMEDIR}"
+LBPCONFIG="$BASE/config/plugins"
+LBPLOG="$BASE/log/plugins"
+LBPBIN="$BASE/bin/plugins"
+LBPDATA="$BASE/data/plugins"
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
 
@@ -38,54 +38,24 @@ PBIN=$LBPBIN/$PDIR
 
 SICHER="$PDATA.upgrade_sicherung"
 
-# Die beiden Merker liegen NEBEN dem Datenordner - sonst raeumt der Installer
-# sie zwischen preupgrade.sh und hier ab, und dieses Skript startet einen
-# Dienst, der lief, nie wieder. Begruendung und Messung: preupgrade.sh.
+# Die Merker liegen NEBEN dem Datenordner - sonst raeumt der Installer sie
+# zwischen preupgrade.sh und hier ab. Begruendung und Messung: preupgrade.sh.
 # Berichtigt in 1.3.14.
 MERK_UPGRADE="$PDATA.upgrade_laeuft"
+# "lief_vor_update" legt seit 1.3.20 niemand mehr an; ein Rest wird unten
+# weggeraeumt. Entschieden wird nach dem Sollmerker (siehe unten).
 MERK_LIEF="$PDATA.lief_vor_update"
+MERK_SOLL="$PDATA.soll_laufen"
 
-# Gilt eine Stunde, damit ein Rest eines abgebrochenen Upgrades nicht spaeter
-# einen Dienst hochfaehrt, den niemand angehalten hat.
+# --- Traegt eine Konfiguration INHALT? --------------------------------------
 #
-# ABSICHTLICH ANDERSHERUM ALS IN postinstall.sh: dort entscheidet dieselbe
-# Frage ueber die Marke "upgrade_laeuft" und faellt ohne lesbare Uhr
-# GESCHLOSSEN aus (die Marke gilt, es wird nicht gestartet). Hier geht es um
-# "lief_vor_update", und "geschlossen" heisst genau umgekehrt: ohne lesbare Uhr
-# wird NICHT gestartet. Beides ist dieselbe Richtung - im Zweifel laeuft kein
-# Dienst an, den niemand angefordert hat. Deshalb bleibt es hier beim
-# Rueckgabewert 1.
-merker_frisch() {
-    [ -f "$1" ] || return 1
-    _dann=$(cat "$1" 2>/dev/null)
-    case "$_dann" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    # Die Uhr wird als Zahl geprueft, bevor gerechnet wird (seit 1.3.19,
-    # Muster 8): ein "date", das nichts ausgibt, hinterliess bis 1.3.18 eine
-    # leere Zeichenkette in der Rechnung. Ohne lesbare Uhr: nicht starten
-    # (siehe oben). Und 300 s Vorlauf: ein Merker bis fuenf Minuten in der
-    # Zukunft gilt (Fall M3).
-    _jetzt=$(date +%s 2>/dev/null) || return 1
-    case "$_jetzt" in
-        ''|*[!0-9]*) return 1 ;;
-    esac
-    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge -300 ]
-}
-
-# --- Traegt der Verlauf INHALT? ---------------------------------------------
-#
-# NEU IN 1.3.18. Die GROESSE beantwortet die Frage nicht: ein abgeschnittener
-# Verlauf ist nicht leer und galt deshalb als vorhanden. Gefragt wird nach
-# dem, was bl_verlauf_lesen() (bl_lib.php:1467 ff.) liest: die Kopfzeile,
-# mindestens eine Datenzeile mit einer Unixzeit als erstem Feld, und ein
-# Zeilenumbruch als letztes Byte - der Dienst haengt jede Zeile mit "\n" an
-# (ble_scanner_ng.py:1043). Im Zweifel faellt die Pruefung GESCHLOSSEN aus:
-# die Rettung wird geholt und nicht weggeraeumt.
-bl_verlauf_traegt_inhalt() {
+# NEU HIER IN 1.3.20 (Pruefung 29.09.2026, B2) - wortgleich mit preupgrade.sh
+# und postinstall.sh; ein /bin/sh-Hakenskript kann keine gemeinsame Datei
+# einbinden. Wer eine anfasst, fasst alle drei an.
+bl_cfg_traegt_inhalt() {
     [ -s "$1" ] || return 1
-    grep -q '^zeit;zweig;name;ereignis;rssi' "$1" 2>/dev/null || return 1
-    grep -q '^[0-9][0-9]*;' "$1" 2>/dev/null || return 1
+    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
+    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
     [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
     return 0
 }
@@ -96,22 +66,22 @@ bl_verlauf_traegt_inhalt() {
 # und ueberschreibt dabei die Datei des Nutzers. Hier wird sie zurueckgeholt.
 #
 # BERICHTIGT IN 1.3.18 - drei Fehler in diesem Block, alle derselben Bauart:
-# es wird weggeraeumt, bevor feststeht, dass das Neue steht.
+# es wird weggeraeumt, bevor feststeht, dass das Neue steht (Faelle c2, d3,
+# d4 in Pruefung-BLE-Scanner-1.3.18). Weggeraeumt wird seither erst, wenn die
+# Wirkung nachgewiesen ist.
 #
-# 1. "[ ! -s "$PDATA/verlauf.csv" ]" fragte nur nach der Groesse. Ein
-#    abgeschnittener Verlauf galt als vorhanden, die heile Rettung wurde NICHT
-#    geholt - und die Zeile darunter loeschte sie. In WSL gemessen
-#    (18.09.2026, Pruefung-BLE-Scanner-1.3.18, Fall c2): das Merkwort des
-#    Verlaufs war danach nirgends mehr im Baum.
-# 2. "rm -f "$SICHER/verlauf.csv"" fiel UNBEDINGT - auch wenn das cp drei
-#    Zeilen darueber scheiterte (Rueckgabewert nach 2>/dev/null nie gelesen).
-#    Gemessen (Fall d4, Datenordner nicht beschreibbar): Wochen an Verlauf
-#    weg, ohne eine Zeile im Protokoll.
-# 3. "rm -rf "$SICHER"" fiel ebenfalls unbedingt, auch wenn das Zurueckspielen
-#    scheiterte. Gemessen (Fall d3, "ulimit -f 0"): Sicherung geloescht,
-#    Konfiguration nicht wiederhergestellt - Totalverlust.
-#
-# Weggeraeumt wird jetzt erst, wenn die Wirkung nachgewiesen ist.
+# BERICHTIGT IN 1.3.20, zwei weitere Luecken (Pruefung 29.09.2026):
+# B7  Lief in der Upgrade-Luecke ein Dienst (aus der Oberflaeche gestartet),
+#     schrieb er einen neuen Verlauf, und bis 1.3.19 wurde die Rettung dann
+#     STILL verworfen - Wochen an Verlauf weg, ohne eine Zeile im Protokoll
+#     (in WSL nachgestellt, Fall E6d). Jetzt wird zusammengefuehrt: die
+#     Rettung, dahinter die Zeilen aus der Luecke; scheitert das, bleibt die
+#     Rettung liegen und wird genannt.
+# B2  Die gesicherte Konfiguration wurde ohne Inhaltspruefung
+#     zurueckgespielt - eine abgeschnittene ueberschrieb die eben aus der
+#     heilen Zweitschrift geholte, und das Protokoll meldete zweimal Erfolg
+#     (Fall E4). Jetzt wird sie vorher geprueft; eine kaputte geht nach
+#     "$SICHER.kaputt" (0600), mit einer <WARNING>.
 if [ -d "$SICHER" ]; then
     ALLES_ZURUECK=1
     # ZUERST der Verlauf: er gehoert unter data/, nicht nach config/. Die
@@ -120,10 +90,31 @@ if [ -d "$SICHER" ]; then
     # der Installer bei jedem Update ab (plugininstall.pl :886 -> :1631).
     if [ -f "$SICHER/verlauf.csv" ]; then
         mkdir -p "$PDATA" 2>/dev/null
-        if bl_verlauf_traegt_inhalt "$PDATA/verlauf.csv"; then
-            # Der eigene Verlauf steht und traegt Inhalt - die Rettung wird
-            # nicht gebraucht.
-            rm -f "$SICHER/verlauf.csv" 2>/dev/null
+        if [ -s "$PDATA/verlauf.csv" ]; then
+            # Ein Dienst in der Luecke hat geschrieben: zusammenfuehren. Die
+            # Rettung wird OHNE Inhaltspruefung genommen - sie ist der
+            # Bestand; angehaengt werden die Datenzeilen aus der Luecke, die
+            # darin noch nicht stehen.
+            MISCH="$PDATA/verlauf.csv.misch.$$"
+            LUECKE=$(grep -c '^[0-9][0-9]*;' "$PDATA/verlauf.csv" 2>/dev/null)
+            case "$LUECKE" in ''|*[!0-9]*) LUECKE=0 ;; esac
+            if { cat "$SICHER/verlauf.csv" \
+                 && { [ "$(tail -c 1 "$SICHER/verlauf.csv" | wc -l | tr -d ' ')" = 1 ] || echo; } \
+                 && { grep '^[0-9][0-9]*;' "$PDATA/verlauf.csv" | grep -vxF -f "$SICHER/verlauf.csv"; true; }; } \
+                   > "$MISCH" 2>/dev/null \
+               && cmp -s -n "$(wc -c < "$SICHER/verlauf.csv" | tr -d ' ')" "$SICHER/verlauf.csv" "$MISCH" \
+               && chmod 0640 "$MISCH" 2>/dev/null \
+               && mv -f "$MISCH" "$PDATA/verlauf.csv" 2>/dev/null; then
+                echo "<OK> verlauf.csv ueber das Update gerettet; $LUECKE Zeile(n), die ein Dienst"
+                echo "<OK> waehrend des Updates schrieb, stehen dahinter."
+                rm -f "$SICHER/verlauf.csv" 2>/dev/null
+            else
+                rm -f "$MISCH" 2>/dev/null
+                ALLES_ZURUECK=0
+                echo "<WARNING> verlauf.csv liess sich nicht mit den $LUECKE Zeile(n) aus der"
+                echo "<WARNING> Update-Luecke zusammenfuehren. Die Rettung bleibt unter"
+                echo "<WARNING> $SICHER/verlauf.csv liegen; nichts wurde geloescht."
+            fi
         elif cp -p "$SICHER/verlauf.csv" "$PDATA/verlauf.csv" 2>/dev/null \
              && cmp -s "$SICHER/verlauf.csv" "$PDATA/verlauf.csv"; then
             echo "<OK> verlauf.csv ueber das Update gerettet."
@@ -133,10 +124,34 @@ if [ -d "$SICHER" ]; then
             echo "<WARNING> verlauf.csv liess sich nicht zurueckspielen. Die Rettung"
             echo "<WARNING> bleibt unter $SICHER/verlauf.csv liegen."
         fi
+        # 0640 nach dem Zurueckspielen (seit 1.3.20, B10): am Geraet stand
+        # verlauf.csv auf 0664, und "cp -p" trug den Modus ueber jedes Update.
+        # Darin stehen Namen und Ankunftszeiten der Hausbewohner.
+        [ -f "$PDATA/verlauf.csv" ] && chmod 0640 "$PDATA/verlauf.csv" 2>/dev/null
+    fi
+    # Die gesicherte Konfiguration VOR dem Zurueckspielen pruefen (B2).
+    KAPUTT="$SICHER.kaputt"
+    if [ -f "$SICHER/ble_scanner_ng.cfg" ] && ! bl_cfg_traegt_inhalt "$SICHER/ble_scanner_ng.cfg"; then
+        rm -f "$KAPUTT" 2>/dev/null
+        if mv "$SICHER/ble_scanner_ng.cfg" "$KAPUTT" 2>/dev/null; then
+            chmod 0600 "$KAPUTT" 2>/dev/null
+            if cmp -s "$PCONFIG/ble_scanner_ng.cfg" "$LBPCONFIG/$PDIR.backup.ble_scanner_ng.cfg"; then
+                BL_JETZT="die aus der Zweitschrift wiederhergestellte"
+            else
+                BL_JETZT="die mitgelieferte Vorgabe - die Tags stehen in der beiseitegelegten Datei"
+            fi
+            echo "<WARNING> Die gesicherte Konfiguration ist unvollstaendig ($(wc -c < "$KAPUTT" | tr -d ' ') Byte) und wird NICHT zurueckgespielt. Sie liegt unter $KAPUTT (0600); es gilt $BL_JETZT."
+        else
+            ALLES_ZURUECK=0
+            echo "<WARNING> Die gesicherte Konfiguration ist unvollstaendig und liess sich nicht beiseitelegen - sie wird NICHT zurueckgespielt und bleibt unter $SICHER liegen."
+        fi
     fi
     echo "<INFO> Restoring config files $SICHER/ -> $PCONFIG/"
     mkdir -p "$PCONFIG"
-    if cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null; then
+    if [ -f "$SICHER/ble_scanner_ng.cfg" ] && ! bl_cfg_traegt_inhalt "$SICHER/ble_scanner_ng.cfg"; then
+        # Nur, wenn das Beiseitelegen oben scheiterte: dann nichts kopieren.
+        FEHLT="(Konfiguration unvollstaendig, nicht zurueckgespielt)"
+    elif cp -a "$SICHER/." "$PCONFIG/" 2>/dev/null; then
         # Die WIRKUNG pruefen, nicht den Rueckgabewert (CLAUDE.md 2).
         # verlauf.csv bleibt aussen vor: es gehoert unter data/.
         FEHLT=$( { cd "$SICHER" && find . -type f ! -name verlauf.csv | while IFS= read -r f; do
@@ -156,13 +171,12 @@ if [ -d "$SICHER" ]; then
         echo "<WARNING> (nicht angekommen: $FEHLT)."
     fi
     if [ "$ALLES_ZURUECK" = 1 ]; then
-        rm -rf "$SICHER" 2>/dev/null
+        rm -rf "${SICHER:?}" 2>/dev/null
     else
         echo "<WARNING> Die Sicherung bleibt unter $SICHER liegen und wird beim"
-        echo "<WARNING> naechsten Update erst ersetzt, wenn eine neue steht."
+        echo "<WARNING> naechsten Update beiseitegelegt, nicht zurueckgespielt."
     fi
 fi
-
 # Eigentuemer richtigstellen. Das Update laeuft als root; alles, was dabei
 # entsteht, gehoerte danach root - und die Oberflaeche laeuft als loxberry
 # und koennte die Konfiguration nicht mehr schreiben. Bis 1.1.0 fehlte das
@@ -233,9 +247,13 @@ dienst_pid() {
 
 dienst_starten() {
     mkdir -p "$PLOG" "$PDATA" 2>/dev/null
-    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng.log" 2>&1 &
+    # Nur in die Startdatei (seit 1.3.20, C5) - das Protokoll oeffnet der
+    # Dienst selbst.
+    [ -e "$PLOG/ble_scanner_ng_start.log" ] || : > "$PLOG/ble_scanner_ng_start.log"
+    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng_start.log" 2>&1 &
     echo $! > "$PDATA/dienst.pid"
-    sleep 2
+    # Drei Sekunden (Regeln/03).
+    sleep 3
     # Geprueft wird die WIRKUNG, nicht der Rueckgabewert von nohup - der ist
     # immer 0.
     if P=$(dienst_pid); then
@@ -270,22 +288,24 @@ fi
 # Broker stand dann server/online=0, die Tag-Themen behielten aber ihren
 # zurueckbehaltenen Wert - in Loxone sah das aus wie "alle noch da".
 #
-# Gestartet wird nur, wenn er VORHER lief (Merker aus preupgrade.sh) - sonst
-# liefe ein bewusst angehaltener Dienst nach jedem Update wieder an.
-# Den Merker aus preupgrade.sh wegraeumen - postinstall.sh hat ihn gelesen.
+# BERICHTIGT IN 1.3.20 (Pruefung 29.09.2026, B1; Hausstandard Regeln/03):
+# gestartet wird, wenn der Dienst laufen SOLL - nicht nur, wenn er vor dem
+# Update gerade lief. Bis 1.3.19 blieb ein abgestuerzter Dienst ueber jedes
+# Update hinweg aus ("Der Dienst lief vor dem Update nicht und wurde nicht
+# gestartet" - so am Geraet am 26.09.2026). Der Sollmerker
+# ($PDATA.soll_laufen) steht auf "0" nur, wenn im Reiter Einstellungen "Dienst
+# anhalten" gedrueckt wurde; ohne ihn gilt "eingeschaltet".
+# Die Marke aus preupgrade.sh wegraeumen - postinstall.sh hat sie gelesen -
+# und einen Rest der alten Merker-Bauart ebenso.
 rm -f "$MERK_UPGRADE" 2>/dev/null
+rm -f "$MERK_LIEF" 2>/dev/null
 
-if merker_frisch "$MERK_LIEF"; then
-    rm -f "$MERK_LIEF"
-    if P=$(dienst_pid); then
-        echo "<OK> Der Dienst laeuft bereits (PID $P)."
-    else
-        dienst_starten
-    fi
+if [ "$(cat "$MERK_SOLL" 2>/dev/null)" = "0" ]; then
+    echo "<INFO> Der Dienst ist im Reiter Einstellungen angehalten und wurde nicht gestartet."
+elif P=$(dienst_pid); then
+    echo "<OK> Der Dienst laeuft bereits (PID $P)."
 else
-    # Auch einen abgelaufenen Rest wegraeumen, sonst liegt er fuer immer.
-    rm -f "$MERK_LIEF" 2>/dev/null
-    echo "<INFO> Der Dienst lief vor dem Update nicht und wurde nicht gestartet."
+    dienst_starten
 fi
 
 # --- Zugriff auf org.bluez und die Module pruefen ---------------------------
@@ -346,7 +366,13 @@ done
 # Nach INHALT: steht nach dem Zurueckspielen eine Tag-Zeile in der
 # Konfiguration, ist nichts weiter zu tun; sonst (Rueckholung gescheitert oder
 # nie eingerichtet) die Anleitung der Ersteinrichtung.
-if grep -q '^tag[0-9][0-9]*=' "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null; then
+# ERGAENZT IN 1.3.20 (B2): zuerst, ob die Datei ueberhaupt Inhalt traegt - eine
+# mitten in einer Tag-Zeile abgeschnittene hat auch eine Tag-Zeile, und bis
+# 1.3.19 stand dann "Aktualisierung abgeschlossen" im Protokoll (Fall E4).
+if ! bl_cfg_traegt_inhalt "$PCONFIG/ble_scanner_ng.cfg"; then
+    echo "<WARNING> Die Konfiguration $PCONFIG/ble_scanner_ng.cfg traegt keinen lesbaren"
+    echo "<WARNING> Inhalt. Reiter Test, Zeile 'Ist die Konfiguration heil?', nennt den Grund."
+elif grep -q '^tag[0-9][0-9]*=' "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null; then
     echo "<OK> Aktualisierung abgeschlossen - die Einstellungen sind uebernommen, es ist nichts weiter zu tun."
 else
     echo "<INFO> Naechster Schritt: Reiter Einstellungen -> Geraete suchen,"

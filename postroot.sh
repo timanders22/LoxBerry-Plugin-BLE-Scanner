@@ -12,14 +12,17 @@
 # Bluetooth einschalten kann.
 #
 # WARUM EIN HELFER AUSSERHALB DES PLUGINS, und nicht einfach eine sudo-Regel
-# auf ein Skript in bin/? Weil das ein Weg nach Root waere: bin/ gehoert
-# loxberry, und wer dort schreiben darf, koennte sich mit einer Regel auf eine
-# Datei in diesem Verzeichnis beliebigen root-Code verschaffen. Regeln/06
-# sagt das ausdruecklich ("Die sudoers-Vorlage loeschen, wenn sie nicht
-# gebraucht wird"). Das Haus hat dafuer ein Muster, dem dieses Skript folgt
-# (EVCC, /usr/local/sbin/loxberry-evcc-update): die Datei liegt in einem
-# Verzeichnis, das root gehoert, sie gehoert root, sie ist 0755, und die
-# sudo-Regel nennt genau diesen einen Pfad OHNE Argumente.
+# auf ein Skript in bin/? BERICHTIGT IN 1.3.20 (Entscheidung 2 vom
+# 29.09.2026): bis dahin stand hier, das waere "ein Weg nach Root". Den gibt es
+# ohnehin - loxberry darf ueber /etc/sudoers.d/lbdefaults ohne Kennwort
+# systemctl, apt-get, dpkg und reboot, ist also faktisch root, und die Regel
+# dieses Plugins begrenzt darueber hinaus nichts. Der Helfer liegt trotzdem
+# hier, damit sein Inhalt unter der Aufsicht dieses Skripts steht und kein
+# Umbau im Plugin-Ordner ihn versehentlich veraendert - ein Schutz vor
+# Versehen, nicht vor Missbrauch. Muster: EVCC,
+# /usr/local/sbin/loxberry-evcc-update. Die Datei gehoert root, ist 0755, und
+# die sudo-Regel nennt genau diesen einen Pfad mit dem leeren Argument "" -
+# nur damit darf er ohne Argumente gerufen werden (sudoers(5)).
 
 COMMAND=$0
 PTEMPDIR=$1
@@ -54,9 +57,10 @@ cat > "$HELFER.neu" <<'ENDE'
 # BLE-Scanner NG - eingebautes Bluetooth einschalten.
 #
 # Abgelegt von postroot.sh des Plugins, Eigentuemer root. Aufgerufen wird es
-# ueber /etc/sudoers.d/ble_scanner_ng (%loxberry, OHNE Argumente) aus dem
-# Reiter Test. Es nimmt keine Argumente an und liest keine Eingabe - alles,
-# was es tut, steht hier.
+# ueber /etc/sudoers.d/ble_scanner_ng (%loxberry, leeres Argument "", also
+# nur ohne Argumente) aus dem Reiter Test. Es nimmt keine Argumente an und
+# liest keine Eingabe - alles, was es tut, steht hier. Die Regel begrenzt
+# nichts: loxberry ist ueber lbdefaults ohnehin faktisch root.
 #
 # WAS ES NICHT TUT: es aendert KEINE Datei unter /etc. Auf einem DietPi sperrt
 # /etc/modprobe.d/dietpi-disable_bluetooth.conf die Bluetooth-Module; das ist

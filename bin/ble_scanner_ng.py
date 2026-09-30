@@ -75,15 +75,15 @@ import logging.handlers  # noqa: E402
 # Nur EIN Schreiber auf die Datei. Bis 1.2.10 leitete daemon/daemon stdout
 # nach derselben Datei um, in die Python zusaetzlich einen FileHandler
 # schrieb - jede Zeile stand doppelt drin, aus zwei Puffern verschraenkt.
-# Jetzt schreibt Python auf stdout, und WER stdout auffaengt, bestimmt der
-# Aufrufer. Nur wenn stdout ins Leere zeigt (kein Startskript), wird selbst
-# eine Datei geoeffnet.
+# Seit 1.3.20 ist der eine Schreiber der Dienst selbst (log_datei_einrichten()
+# unten); die Startwege leiten nur noch in ble_scanner_ng_start.log um.
 
 LOG_DATEI = os.path.join(gem.LOG_DIR, "ble_scanner_ng.log")
 
 
 def _log_einrichten():
-    # Nach STDERR, nicht nach stdout.
+    # Beim EINBINDEN nach STDERR, nicht nach stdout. Im Dienstbetrieb stellt
+    # main() auf die eigene Datei um (log_datei_einrichten(), seit 1.3.20).
     #
     # daemon/daemon und bl_dienst() starten mit ">> $log 2>&1" - im Protokoll
     # landet also beides. Aber stdout ist die Leitung, auf der Werkzeuge ihre
@@ -118,6 +118,83 @@ def _log_einrichten():
 
 _log_einrichten()
 log = logging.getLogger("ble_scanner_ng")
+
+
+class GleicheMeldungBremse(logging.Filter):
+    """Gleiche Meldung ab WARNING hoechstens einmal je Stunde (seit 1.3.20).
+
+    Regeln/03 ("Wer ein Protokoll anzeigt, muss es auch schreiben - gebremst"):
+    bei einem BlueZ-Ausfall schrieben Sicherungsabfrage, Wiederverbindung und
+    verbinden_mit_geduld() ungebremst je 30 s zwei ERROR-Zeilen, rund 5 700 am
+    Tag auf der Ramdisk (Pruefung 29.09.2026, C13). Jetzt steht die erste
+    Zeile da; Wiederholungen derselben Meldung werden gezaehlt und beim
+    naechsten Durchlassen als Zusatz genannt. Fehlt die Protokolldatei
+    (Ramdisk geleert, Logwartung), setzt sich die Bremse zurueck - sonst
+    unterdrueckte sie die erste Zeile der neuen Datei.
+    """
+
+    SPERRE = 3600
+
+    def __init__(self, datei):
+        super().__init__()
+        self.datei = datei
+        self.zuletzt = {}      # Meldung -> (Zeitpunkt, unterdrueckt)
+
+    def filter(self, satz):
+        if satz.levelno < logging.WARNING:
+            return True
+        if self.datei and not os.path.exists(self.datei):
+            self.zuletzt.clear()
+        try:
+            text = satz.getMessage()
+        except Exception:  # noqa: BLE001
+            return True
+        jetzt = time.monotonic()
+        vorher = self.zuletzt.get(text)
+        if vorher is not None and jetzt - vorher[0] < self.SPERRE:
+            self.zuletzt[text] = (vorher[0], vorher[1] + 1)
+            return False
+        if vorher is not None and vorher[1]:
+            satz.msg = "%s (in der Stunde davor %d-mal wiederholt, nicht geschrieben)" % (
+                text, vorher[1])
+            satz.args = None
+        self.zuletzt[text] = (jetzt, 0)
+        return True
+
+
+def log_datei_einrichten():
+    """Im Dienstbetrieb schreibt der Dienst sein Protokoll SELBST (seit 1.3.20).
+
+    Bis 1.3.19 schrieb er nur nach stderr, und die vier Startwege leiteten mit
+    ">> ble_scanner_ng.log" in die Datei um. Die Kappung tauscht die Datei per
+    os.replace aus - danach schrieb der Dienst in einen geloeschten Inode, und
+    jede Zeile ging verloren (in WSL gemessen, Pruefung 29.09.2026, C5: fd 1
+    und 2 auf "(deleted)"). Das ist die dritte Protokollart aus Regeln/03, bei
+    der ein WatchedFileHandler NICHT hilft, solange ihn nur eine
+    Umgebungsvariable einschaltet, die kein Startweg setzt.
+
+    Jetzt, im installierten Zustand: nur der WatchedFileHandler auf die eigene
+    Datei, kein zweiter Kanal (Regeln/03, "Genau ein Prozess schreibt in die
+    Logdatei"). Die Startwege leiten nur noch in ble_scanner_ng_start.log um;
+    dort steht, was vor diesem Aufruf scheitert. Nicht installiert (Pruefstand,
+    ausgepacktes Archiv) bleibt es bei stderr, ausser BLE_LOGDATEI=1.
+    Gerufen wird das nur in main() - bl_selbsttest.py und bl_lesen.py binden
+    dieses Modul ein und duerfen nicht in das Dienstprotokoll schreiben.
+    """
+    wurzel = logging.getLogger()
+    if gem.INSTALLIERT or os.environ.get("BLE_LOGDATEI") == "1":
+        try:
+            os.makedirs(gem.LOG_DIR, exist_ok=True)
+            datei = logging.handlers.WatchedFileHandler(LOG_DATEI)
+            datei.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
+            for h in list(wurzel.handlers):
+                wurzel.removeHandler(h)
+            wurzel.addHandler(datei)
+        except OSError as fehler:
+            log.warning("Protokolldatei %s nicht zu oeffnen (%s) - es bleibt bei stderr.",
+                        LOG_DATEI, fehler)
+    log.addFilter(GleicheMeldungBremse(LOG_DATEI))
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +272,12 @@ def mqtt_zugangsdaten():
 #
 # Rueckgabe {"rc", "geleert", "rest", "grund"}: rc 0 = nichts (mehr)
 # behalten, 1 = nach dem Loeschen stand noch etwas, 2 = nicht zu fragen.
-
-CONNACK_TEXT = {1: "Protokollfassung abgelehnt", 2: "Client-Kennung abgelehnt",
-                3: "Broker nicht verfuegbar", 4: "Benutzername oder Kennwort falsch",
-                5: "nicht berechtigt"}
-
+#
+# Den Grund einer abgewiesenen Anmeldung nennt seit 1.3.20 mqtt_anmeldegrund()
+# oben - EINE Tabelle fuer 1-5 (paho 1.x) und 132-136 (paho 2.x). Bis 1.3.19
+# stand hier eine zweite, die 134 und 135 nicht kannte: unter paho 2.x meldete
+# die Deinstallation bei falschen Zugangsdaten "unbekannter Grund" (Pruefung
+# 29.09.2026, MQTT 7).
 
 def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
     erg = {"rc": 2, "geleert": [], "rest": [], "grund": ""}
@@ -298,8 +376,8 @@ def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
             erg["grund"] = "der Broker {0} hat auf die Verbindung nicht geantwortet".format(wo)
             return erg
         if code["wert"]:
-            erg["grund"] = "der Broker {0} hat die Anmeldung abgewiesen (CONNACK {1}: {2})".format(
-                wo, code["wert"], CONNACK_TEXT.get(code["wert"], "unbekannter Grund"))
+            erg["grund"] = "der Broker {0} hat die Anmeldung abgewiesen (CONNACK {1})".format(
+                wo, mqtt_anmeldegrund(code["wert"]))
             return erg
         grund = abonnieren()
         if grund:
@@ -359,21 +437,38 @@ def mqtt_leeren():
     cfg, _tags, _alt = gem.konfiguration_lesen()
     praefix = (cfg.get("themenpraefix") or "blescanner").strip("/") or "blescanner"
     scanner = (cfg.get("scanner_name") or "").strip() or gem.rechnername()
-    erg = broker_leeren(praefix, lambda rest: gem.stamm_der_linie(rest, scanner) != "")
-    if erg["rc"] == 2:
-        print("<INFO> MQTT: zurueckbehaltene Themen unter {0}/ nicht geleert - {1}. "
-              "Von Hand: mosquitto_pub -r -n -t <thema>".format(praefix, erg["grund"]))
-        return 2
-    if erg["rest"]:
-        print("<WARNING> MQTT: {0} zurueckbehaltene Themen stehen nach dem Loeschen "
-              "noch im Broker: {1}".format(len(erg["rest"]), ", ".join(erg["rest"])))
-        return 1
-    if erg["geleert"]:
-        print("<OK> MQTT: {0} zurueckbehaltene Themen unter {1}/ geloescht und "
-              "nachgelesen.".format(len(erg["geleert"]), praefix))
-    else:
-        print("<OK> MQTT: unter {0}/ stand nichts zurueckbehalten (nachgelesen).".format(praefix))
-    return 0
+    # SEIT 1.3.20 auch das zuletzt benutzte Praefix aus gem.PRAEFIX_DATEI,
+    # wenn es abweicht (Pruefung 29.09.2026, MQTT 8). Das alte Praefix raeumte
+    # bis dahin nur der LAUFENDE Dienst ab; wurde es bei angehaltenem Dienst
+    # geaendert und das Plugin danach deinstalliert, blieben dessen retained
+    # Themen - samt server/online=0 - fuer immer stehen.
+    praefixe = [praefix]
+    try:
+        with open(gem.PRAEFIX_DATEI, "r", encoding="utf-8") as fh:
+            alt = fh.read().strip().strip("/")
+    except OSError:
+        alt = ""
+    if alt and alt != praefix:
+        praefixe.append(alt)
+    rc_gesamt = 0
+    for p in praefixe:
+        erg = broker_leeren(p, lambda rest: gem.stamm_der_linie(rest, scanner) != "")
+        if erg["rc"] == 2:
+            print("<INFO> MQTT: zurueckbehaltene Themen unter {0}/ nicht geleert - {1}. "
+                  "Von Hand: mosquitto_pub -r -n -t <thema>".format(p, erg["grund"]))
+            rc_gesamt = max(rc_gesamt, 2)
+            continue
+        if erg["rest"]:
+            print("<WARNING> MQTT: {0} zurueckbehaltene Themen stehen nach dem Loeschen "
+                  "noch im Broker: {1}".format(len(erg["rest"]), ", ".join(erg["rest"])))
+            rc_gesamt = max(rc_gesamt, 1)
+            continue
+        if erg["geleert"]:
+            print("<OK> MQTT: {0} zurueckbehaltene Themen unter {1}/ geloescht und "
+                  "nachgelesen.".format(len(erg["geleert"]), p))
+        else:
+            print("<OK> MQTT: unter {0}/ stand nichts zurueckbehalten (nachgelesen).".format(p))
+    return rc_gesamt
 
 
 class Mqtt:
@@ -536,14 +631,19 @@ class Mqtt:
         LEERER Nutzlast und retain=True. Ohne das bleibt der letzte Wert
         eines entfernten Tags fuer immer stehen - und in Loxone ist
         "present=1" von einer echten Anwesenheit nicht zu unterscheiden.
+
+        Seit 1.3.20 wird der Rueckgabewert von publish() ausgewertet (Pruefung
+        29.09.2026, MQTT 1): ohne Verbindung liefert paho einen Code ungleich
+        0, und die Loeschung ist verloren. Bis 1.3.19 hiess das trotzdem
+        True, und das Thema fiel aus der Liste der zu loeschenden.
         """
         if not self.client:
             return False
         try:
-            self.client.publish(self.praefix + "/" + unterthema, "", qos=0, retain=True)
-            return True
+            erg = self.client.publish(self.praefix + "/" + unterthema, "", qos=0, retain=True)
         except Exception:  # noqa: BLE001
             return False
+        return getattr(erg, "rc", 0) == 0
 
     def stop(self):
         if not self.client:
@@ -668,7 +768,19 @@ class Dienst:
         self.aufraeumen_faden = None
         self.aufraeumen_zeit = 0.0
         self.aufraeumen_offen = False
+        self.aufraeumen_nochmal = False
         self.altlast_erledigt = False
+        # Themen entfernter/abgehakter Tags beim Start abraeumen (seit 1.3.20).
+        self.entfallen_erledigt = False
+        # Sendetakt der Zeitstempel (seit 1.3.20): Thema -> monotone Zeit der
+        # letzten Sendung, und ob der laufende Durchlauf eine Neumeldung nach
+        # einer Neuverbindung ist.
+        self.gesendet_um = {}
+        self.neumeldung_laeuft = False
+        # BlueZ wurde neu gestartet (NameOwnerChanged, seit 1.3.20) - die
+        # Stellvertreter zeigen auf den alten Besitzer und muessen neu her.
+        self.bluez_neu = threading.Event()
+        self.letzte_neuverbindung = 0.0
         self.bluez = None
         self.laeuft = True
         self.startzeit = time.time()
@@ -702,6 +814,8 @@ class Dienst:
         self.suchfilter = 0
         self.batterie_zuletzt = ""        # Datum des letzten Batterielaufs
         self.batterie_unmoeglich = set()  # Kennungen, die keine Verbindung annehmen
+        self.batterie_erledigt = set()    # Kennungen, die HEUTE schon dran waren (1.3.20)
+        self.batterie_erledigt_am = ""
         self.raumdaten = {}               # Kennung -> {Scanner -> (zeit, rssi)}
         self.testmodus = {}               # Kennung -> Ablaufzeitpunkt
         self.testwerte = []
@@ -733,11 +847,26 @@ class Dienst:
         beim Broker wartet."""
         with self.sperre:
             if self.aufraeumen_faden is not None and self.aufraeumen_faden.is_alive():
+                # Seit 1.3.20 geht ein Anstoss waehrend eines laufenden
+                # Abraeumens nicht verloren: der Faden laeuft danach noch
+                # einmal. Das Abraeumen der entfernten Tags (MQTT 1) macht den
+                # ersten Lauf laenger, und ein Praefixwechsel kurz nach dem
+                # Start blieb sonst liegen (Pruefstand 1.3.19, Fall X2b).
+                self.aufraeumen_nochmal = True
                 return
             self.aufraeumen_zeit = time.time()
             self.aufraeumen_faden = threading.Thread(
-                target=self.mqtt_aufraeumen, name="mqtt-aufraeumen", daemon=True)
+                target=self._aufraeumen_schleife, name="mqtt-aufraeumen", daemon=True)
             self.aufraeumen_faden.start()
+
+    def _aufraeumen_schleife(self):
+        while True:
+            self.mqtt_aufraeumen()
+            with self.sperre:
+                if not self.aufraeumen_nochmal:
+                    return
+                self.aufraeumen_nochmal = False
+                self.aufraeumen_zeit = time.time()
 
     def _altlast_kennung(self, praefix, scanner):
         """Inhalt des Merkers. Traegt Kennung, Praefix, Scanner und die
@@ -808,35 +937,79 @@ class Dienst:
         kennung = self._altlast_kennung(praefix, scanner)
         if self._merker_lesen(gem.ALTLAST_MERKER) == kennung:
             self.altlast_erledigt = True
-        if not self.altlast_erledigt:
-            def fluechtig(rest):
-                stamm = gem.stamm_der_linie(rest, scanner)
-                return stamm != "" and not gem.RETAIN.get(stamm, False)
 
-            def nachsenden(themen):
-                for thema in themen:
-                    rest = thema[len(praefix) + 1:]
-                    wert = self.letzter_stand.get(rest)
-                    if wert not in (None, ""):
-                        self.mqtt.senden(rest, wert)
+        # 3. Zweige, die nicht (mehr) gesendet werden - NEU IN 1.3.20.
+        #    Bis 1.3.19 raeumte nur konfiguration_neu_einlesen() die Themen
+        #    entfernter oder abgehakter Tags ab, also nur bei einer Aenderung
+        #    der Datei zur Laufzeit. Die Oberflaeche startet den Dienst beim
+        #    Speichern aber neu - der neue Prozess kannte die alten Zweige nicht,
+        #    und ein entfernter Tag stand fuer immer mit present=1 im Broker
+        #    (Pruefung 29.09.2026, MQTT 1, Fall E: 5 Themen). Jetzt wird beim
+        #    Start jedes Thema unter <praefix>/ abgeraeumt, das zu dieser Linie
+        #    gehoert (gem.stamm_der_linie), dessen Zweig aber weder ein aktiver
+        #    Tag noch server, summary, person/<aktive Person> oder
+        #    scanner/<dieser Scanner>/<aktiver Tag> ist. Die Themen eines
+        #    anderen Scanners und fremde Themen bleiben stehen.
+        #    Beides - Altwerte (2.) und entfallene Zweige (3.) - geht in EINEN
+        #    Durchgang mit Nachlesen (Bauart broker_leeren()); die
+        #    Wiederholung nach der Loeschung betrifft nur Themen mit
+        #    gueltigem Wert, und entfallene Zweige haben keinen.
+        with self.sperre:
+            zweige = {self._zweig(t) for t in self.tags if t.get("aktiv") == "1"}
+            personen = set()
+            for t in self.tags:
+                pn = (t.get("opt") or {}).get("person", "").strip()
+                if t.get("aktiv") == "1" and pn:
+                    personen.add(gem.thema_saeubern(pn))
+        altlast = not self.altlast_erledigt
+        entfall = not self.entfallen_erledigt
 
-            erg = broker_leeren(praefix, fluechtig, nach_loeschen=nachsenden)
+        def fluechtig(rest):
+            stamm = gem.stamm_der_linie(rest, scanner)
+            return stamm != "" and not gem.RETAIN.get(stamm, False)
+
+        def entfallen(rest):
+            if gem.stamm_der_linie(rest, scanner) == "":
+                return False
+            teile = rest.split("/")
+            if teile[0] in ("server", "summary"):
+                return False
+            if teile[0] == "person":
+                return not (len(teile) > 1 and teile[1] in personen)
+            if teile[0] == "scanner":
+                return not (len(teile) > 2 and teile[2] in zweige)
+            return teile[0] not in zweige
+
+        def auswahl(rest):
+            return (altlast and fluechtig(rest)) or (entfall and entfallen(rest))
+
+        def nachsenden(themen):
+            for thema in themen:
+                rest = thema[len(praefix) + 1:]
+                wert = self.letzter_stand.get(rest)
+                if wert not in (None, ""):
+                    self.mqtt.senden(rest, wert)
+
+        if altlast or entfall:
+            erg = broker_leeren(praefix, auswahl, nach_loeschen=nachsenden)
             if erg["rc"] == 2:
                 offen = True
-                log.warning("MQTT: Altwerte im Broker nicht geprueft (%s) - "
-                            "neuer Versuch in einer Stunde.", erg["grund"])
+                log.warning("MQTT: Altwerte und Themen entfernter Tags im Broker nicht "
+                            "geprueft (%s) - neuer Versuch in einer Stunde.", erg["grund"])
             elif erg["rest"]:
                 offen = True
-                log.warning("MQTT: %d Altwert(e) stehen nach dem Loeschen noch im "
+                log.warning("MQTT: %d Thema/Themen stehen nach dem Loeschen noch im "
                             "Broker (%s) - neuer Versuch in einer Stunde.",
                             len(erg["rest"]), ", ".join(erg["rest"]))
             else:
-                if self._merker_schreiben(gem.ALTLAST_MERKER, kennung):
+                if altlast and self._merker_schreiben(gem.ALTLAST_MERKER, kennung):
                     self.altlast_erledigt = True
+                if entfall:
+                    self.entfallen_erledigt = True
                 if erg["geleert"]:
-                    log.info("MQTT: %d zurueckbehaltene Altwert(e) geloescht und "
-                             "nachgelesen: %s", len(erg["geleert"]),
-                             ", ".join(erg["geleert"]))
+                    log.info("MQTT: %d zurueckbehaltene Altwert(e) bzw. Thema/Themen "
+                             "entfernter oder abgehakter Tags geloescht und nachgelesen: %s",
+                             len(erg["geleert"]), ", ".join(erg["geleert"]))
         self.aufraeumen_offen = offen
 
     # -- Hilfen -------------------------------------------------------------
@@ -1002,13 +1175,39 @@ class Dienst:
 
     # -- Melden -------------------------------------------------------------
 
-    def _senden(self, thema, wert, erzwingen=False):
+    def _senden(self, thema, wert, erzwingen=False, abstand=0, wechsel=False):
+        """Ein Thema senden, wenn es sich geaendert hat oder erzwungen ist.
+
+        Zwei Zusaetze seit 1.3.20:
+
+        * Entscheidung 5 des Hausherrn (29.09.2026): ein retained Zustand ohne
+          Aussage geht als "-" hinaus - nie als leere Nutzlast (die loeschte
+          das Thema im Broker, und das Gateway reichte einen leeren Wert
+          weiter) und nie als stehenbleibender Altwert. Bis 1.3.19 ging
+          <T>/raum nach dem Verstummen eines Tags leer und fluechtig hinaus,
+          und der alte Raumname blieb retained stehen (Pruefung 29.09.2026,
+          MQTT 2). Das gilt fuer jeden retained Stamm, nicht nur raum und
+          name - server/version kann seit C12 ebenfalls leer sein.
+        * Sendetakt: mit abstand > 0 geht das Thema hoechstens alle abstand
+          Sekunden hinaus - ausser bei einem Zustandswechsel (wechsel) und bei
+          der Neumeldung nach einer Neuverbindung. Bis 1.3.19 gingen
+          server/ts, server/letzte_sichtung und <T>/last_seen_ts in JEDEM
+          Durchlauf hinaus: 39 von 57 Nachrichten in 60 s bei einem Tag
+          (Pruefung 29.09.2026, MQTT 4, Fall L).
+        """
         wert = "" if wert is None else str(wert)
+        if wert == "" and gem.retain_fuer(thema, "-"):
+            wert = "-"
         geaendert = self.letzter_stand.get(thema) != wert
-        if not erzwingen and not geaendert:
+        if abstand > 0 and not self.neumeldung_laeuft and not wechsel:
+            zuletzt = self.gesendet_um.get(thema)
+            if zuletzt is not None and time.monotonic() - zuletzt < abstand:
+                return False
+        if not erzwingen and not geaendert and not wechsel:
             return False
         self.letzter_stand[thema] = wert
         self.veroeffentlicht.add(thema)
+        self.gesendet_um[thema] = time.monotonic()
         self.mqtt.senden(thema, wert)
         return geaendert
 
@@ -1022,16 +1221,31 @@ class Dienst:
                     return True
             return False
 
+        # Seit 1.3.20 bleibt ein Thema, dessen Loeschung nicht abging, in der
+        # Liste (Mqtt.loeschen() wertet publish() aus) - bis 1.3.19 fiel es
+        # auch dann heraus, und niemand versuchte es erneut.
         entfernt = 0
+        gescheitert = set()
         for thema in sorted(self.veroeffentlicht):
             if trifft(thema):
-                self.mqtt.loeschen(thema)
+                if self.mqtt.loeschen(thema):
+                    entfernt += 1
+                else:
+                    gescheitert.add(thema)
                 self.letzter_stand.pop(thema, None)
-                entfernt += 1
-        self.veroeffentlicht = {t for t in self.veroeffentlicht if not trifft(t)}
+        self.veroeffentlicht = {t for t in self.veroeffentlicht
+                                if not trifft(t) or t in gescheitert}
         if entfernt:
             log.info("%d zurückbehaltene Themen entfernter Tags gelöscht (%s)",
                      entfernt, ", ".join(sorted(zweige)))
+        if gescheitert:
+            # mqtt_aufraeumen() raeumt sie mit Nachlesen ab - nach der naechsten
+            # Anmeldung oder beim stuendlichen Nachversuch (runde()).
+            self.entfallen_erledigt = False
+            self.aufraeumen_offen = True
+            log.warning("%d Thema/Themen entfernter Tags liessen sich nicht loeschen "
+                        "(keine MQTT-Verbindung?): %s", len(gescheitert),
+                        ", ".join(sorted(gescheitert)))
         return entfernt
 
     def auswerten(self, erzwingen=False):
@@ -1051,6 +1265,7 @@ class Dienst:
         namen_da = []
         uebersicht = []
         personen = {}
+        wechsel_runde = False     # hat in diesem Durchlauf ein Tag gewechselt?
 
         for tag in self.tags:
             kennung = tag["kennung"]
@@ -1109,6 +1324,8 @@ class Dienst:
                 namen_da.append(tag.get("name") or kennung)
 
             geaendert = self._senden("{0}/present".format(zweig), anwesend, erzwingen)
+            if geaendert:
+                wechsel_runde = True
             self._senden("{0}/rssi".format(zweig),
                          roh if roh is not None else -255, erzwingen)
             self._senden("{0}/rssi_avg".format(zweig),
@@ -1120,9 +1337,11 @@ class Dienst:
             # Push-Weg, das Alter ist beim Senden immer null. Und er springt
             # nicht nach zehn Minuten auf -1, wie es last_seen bis 1.2.10 tat,
             # weil die Sichtung dann aus dem Zwischenspeicher fiel.
+            # Seit 1.3.20 beim Wechsel der Anwesenheit sofort, sonst hoechstens
+            # alle 60 s (Pruefung 29.09.2026, MQTT 4).
             self._senden("{0}/last_seen_ts".format(zweig),
                          int(eintrag["zeit"]) if (eintrag and eintrag.get("zeit")) else 0,
-                         erzwingen)
+                         erzwingen, abstand=60, wechsel=geaendert)
             self._senden("{0}/present_since".format(zweig),
                          int(zustand["seit_zeit"]), erzwingen)
             self._senden("{0}/name".format(zweig),
@@ -1190,10 +1409,14 @@ class Dienst:
         # -- Herzschlag. Ohne ihn ist ein toter Dienst nicht von einem ruhigen
         #    Haus zu unterscheiden: es kommt schlicht nichts mehr, und die
         #    letzten Werte stehen retained weiter im Broker.
-        self._senden("server/ts", int(jetzt_w), erzwingen=True)
+        #    Seit 1.3.20 hoechstens alle 30 s (Regeln/07, Einspeisebremse
+        #    0.9.20; Pruefung 29.09.2026, MQTT 4), die letzte Sichtung beim
+        #    Wechsel eines Tags sofort, sonst hoechstens alle 60 s.
+        self._senden("server/ts", int(jetzt_w), erzwingen=True, abstand=30)
         self._senden("server/ok", 1 if self.adapter_ok else 0, erzwingen)
         self._senden("server/adapter_ok", 1 if self.adapter_ok else 0, erzwingen)
-        self._senden("server/letzte_sichtung", int(self.letzte_sichtung_zeit), erzwingen)
+        self._senden("server/letzte_sichtung", int(self.letzte_sichtung_zeit), erzwingen,
+                     abstand=60, wechsel=wechsel_runde)
         self._senden("server/version", gem.VERSION, erzwingen)
         self._senden("server/scanner", self.scanner, erzwingen)
 
@@ -1413,11 +1636,15 @@ class Dienst:
                 if neu:
                     fh.write("zeit;zweig;name;ereignis;rssi\n")
                 fh.write(zeile)
-            if neu:
-                try:
+            # 0640 bei JEDEM Schreiben, nicht nur beim Anlegen (seit 1.3.20,
+            # Pruefung 29.09.2026, B10): am Geraet stand verlauf.csv auf 0664,
+            # und jedes Update trug den Modus weiter - Namen und
+            # Ankunftszeiten der Hausbewohner fuer jeden lokalen Benutzer.
+            try:
+                if (os.stat(gem.VERLAUF_FILE).st_mode & 0o777) != 0o640:
                     os.chmod(gem.VERLAUF_FILE, 0o640)
-                except OSError:
-                    pass
+            except OSError:
+                pass
             self.ereignisse_gesamt += 1
         except OSError as fehler:
             log.warning("Verlauf nicht schreibbar: %s", fehler)
@@ -1450,7 +1677,10 @@ class Dienst:
             return
         try:
             temp = gem.VERLAUF_FILE + ".tmp"
-            with open(temp, "w", encoding="utf-8") as fh:
+            # Rechte vor dem Inhalt, 0640 (seit 1.3.20, B10).
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            os.chmod(temp, 0o640)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(kopf + "\n")
                 fh.write("\n".join(rest) + ("\n" if rest else ""))
             os.replace(temp, gem.VERLAUF_FILE)
@@ -1558,7 +1788,7 @@ class Dienst:
         self.stoerung = str(grund)
         self._senden("server/ok", 0, erzwingen=True)
         self._senden("server/adapter_ok", 0, erzwingen=True)
-        self._senden("server/ts", int(time.time()), erzwingen=True)
+        self._senden("server/ts", int(time.time()), erzwingen=True, abstand=30)
         aktive = sum(1 for t in self.tags if t.get("aktiv") == "1")
         anwesend = sum(1 for z in self.letzte_uebersicht if z.get("anwesend"))
         self.zustand_schreiben(self.letzte_uebersicht, anwesend, aktive,
@@ -1618,6 +1848,7 @@ class Dienst:
             log.info("Kalibrierung für %s, %d Sekunden", kennung, dauer)
         elif art == "batterie":
             self.batterie_zuletzt = ""
+            self.batterie_erledigt = set()
             log.info("Batterielauf von Hand angefordert")
 
     def kalibrierung_pruefen(self):
@@ -1630,6 +1861,54 @@ class Dienst:
             self.kalibrierung["ergebnis"] = int(gem.median(werte)) if werte else None
         log.info("Kalibrierung beendet: %d Messungen, Median %s",
                  len(werte), self.kalibrierung["ergebnis"])
+
+    # -- Neu verbinden (seit 1.3.20) ----------------------------------------
+    #
+    # BlueZ.verbinden() legt die Stellvertreter fuer Adapter und Eigenschaften
+    # einmal an, und dbus-python bindet sie an den EINDEUTIGEN Namen des
+    # damaligen Besitzers von org.bluez. Startet bluetoothd neu (systemctl
+    # restart bluetooth, bluez-Update, Absturz), bekommt org.bluez einen neuen
+    # Besitzer, und dieselben Stellvertreter laufen ins Leere: sucht() lieferte
+    # None, suche_starten() und aus_und_an() scheiterten - dauerhaft, bis der
+    # Prozess neu startete. Der Wachhund schaltete alle 300 s ohne Wirkung den
+    # Adapter aus und an (an einer bluez-Attrappe auf eigenem D-Bus gemessen,
+    # Pruefung 29.09.2026, C6). Jetzt: bei jedem BlueZFehlt aus Wachhund und
+    # Suchstart zuerst neu verbinden, und im Signalbetrieb auf NameOwnerChanged
+    # fuer org.bluez hoeren.
+
+    def bluez_neu_verbinden(self, anlass):
+        """Stellvertreter neu anlegen, Adapter einschalten, Suche starten.
+
+        Hoechstens alle 10 s - ein bluetoothd, der gerade erst hochkommt,
+        fuehrt den Adapter noch nicht; dann versucht es der naechste
+        Durchlauf. Rueckgabe: True, wenn die Suche danach laeuft.
+        """
+        if self.bluez is None:
+            return False
+        jetzt = time.monotonic()
+        if jetzt - self.letzte_neuverbindung < 10:
+            return False
+        self.letzte_neuverbindung = jetzt
+        try:
+            self.bluez.verbinden()
+            self.bluez.einschalten()
+            self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
+        except gem.BlueZFehlt as fehler:
+            log.error("BlueZ ist nach %s nicht wieder zu erreichen: %s", anlass, fehler)
+            return False
+        log.info("Verbindung zu BlueZ neu aufgebaut (%s) - die Suche laeuft wieder.", anlass)
+        self.wachhund_stufe = 0
+        return True
+
+    def _suche_starten(self, anlass):
+        """suche_starten() - scheitert es, einmal neu verbinden und erneut."""
+        try:
+            self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
+            return True
+        except gem.BlueZFehlt as fehler:
+            log.error("%s", fehler)
+        self.letzte_neuverbindung = 0.0
+        return self.bluez_neu_verbinden(anlass)
 
     # -- Wachhund -----------------------------------------------------------
 
@@ -1649,16 +1928,21 @@ class Dienst:
             return
         stille = max(60, self._zahl("wachhund_stille", 300))
 
-        # Stufe 1: hat ein anderes Programm die Suche beendet?
+        # Stufe 0 (seit 1.3.20): laesst sich die Frage gar nicht stellen, zeigen
+        # die Stellvertreter meist auf einen alten Besitzer von org.bluez. Neu
+        # verbinden greift nicht in den Adapter ein - es schaltet ihn nur ein,
+        # falls er aus ist, und startet die Suche, falls sie steht.
         sucht = self.bluez.sucht()
+        if sucht is None:
+            self.bluez_neu_verbinden("die Suche liess sich nicht abfragen")
+            return
+
+        # Stufe 1: hat ein anderes Programm die Suche beendet?
         if sucht is False:
             log.warning("Die Suche steht - sie wird neu gestartet. (Ein anderes "
                         "Programm kann sie beendet haben; BlueZ laesst nur eine "
                         "Suche gleichzeitig zu.)")
-            try:
-                self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
-            except gem.BlueZFehlt as fehler:
-                log.error("%s", fehler)
+            self._suche_starten("die Suche stand")
             return
 
         if self.letzte_sichtung_mono is None:
@@ -1682,12 +1966,9 @@ class Dienst:
         if self.wachhund_stufe == 1:
             log.warning("Seit %d Sekunden kein einziges Advertisement. Die Suche "
                         "wird angehalten und neu gestartet.", int(leer))
-            try:
-                self.bluez.suche_beenden()
-                time.sleep(1.0)
-                self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
-            except gem.BlueZFehlt as fehler:
-                log.error("%s", fehler)
+            self.bluez.suche_beenden()
+            time.sleep(1.0)
+            self._suche_starten("die Suche liess sich nicht neu starten")
             return
 
         log.warning("Seit %d Sekunden kein einziges Advertisement, und der Neustart "
@@ -1699,10 +1980,20 @@ class Dienst:
             self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
         except gem.BlueZFehlt as fehler:
             log.error("%s", fehler)
+            self.letzte_neuverbindung = 0.0
+            if self.bluez_neu_verbinden("der Adapter liess sich nicht neu aufsetzen"):
+                return
+            # BERICHTIGT IN 1.3.20 (Entscheidung 2 vom 29.09.2026, Pruefung C11):
+            # bis 1.3.19 stand hier, der Befehl braeuchte "eine sudo-Regel, also
+            # eine systemweite Rechteaenderung". Das Plugin HAT eine eigene
+            # sudo-Regel (fuer den Helfer "Bluetooth einschalten"), und
+            # loxberry darf systemctl ueber lbdefaults ohnehin. Der Dienst ruft
+            # den Befehl trotzdem nicht selbst: er startet einen Systemdienst,
+            # den auch andere Programme benutzen - das entscheidet der Mensch.
             log.error("Hilft auch das nicht, hilft am Gerät: "
-                      "sudo systemctl restart bluetooth. Dieses Plugin führt den "
-                      "Befehl bewusst nicht selbst aus - er bräuchte eine "
-                      "sudo-Regel, also eine systemweite Rechteänderung.")
+                      "sudo systemctl restart bluetooth. Der Dienst ruft diesen "
+                      "Befehl nicht selbst auf: er startet bluetoothd für alle "
+                      "Programme neu, und das entscheidet der Anwender.")
 
     # -- Batterie -----------------------------------------------------------
 
@@ -1731,44 +2022,54 @@ class Dienst:
         if (jetzt.tm_hour, jetzt.tm_min) < (stunde, minute):
             return
 
+        # SEIT 1.3.20 JE DURCHLAUF NUR EIN TAG (Pruefung 29.09.2026, C14). Bis
+        # 1.3.19 wurden bis zu zehn Tags in einem Zug verbunden, je Tag bis zu
+        # 25 s Connect() (D-Bus-Vorgabe) und 12 s Warten - so lange standen
+        # Auswertung, Herzschlag und Anwesenheit still. Jetzt kommt je
+        # Durchlauf ein Tag dran, mit Zeitgrenze fuer Connect(); die uebrigen
+        # folgen in den naechsten Durchlaeufen desselben Tages.
+        if self.batterie_erledigt and self.batterie_erledigt_am != heute:
+            self.batterie_erledigt = set()
+        self.batterie_erledigt_am = heute
         kandidaten = []
         for tag in self.tags:
             if tag.get("aktiv") != "1":
                 continue
             if str((tag.get("opt") or {}).get("batt", "")) != "1":
                 continue
-            if tag["kennung"] in self.batterie_unmoeglich:
+            if tag["kennung"] in self.batterie_unmoeglich \
+                    or tag["kennung"] in self.batterie_erledigt:
                 continue
             eintrag = self.eintrag_zum_tag(tag)
             if eintrag and eintrag.get("pfad"):
                 kandidaten.append((tag, eintrag["pfad"]))
-        self.batterie_zuletzt = heute
-        if not kandidaten:
+        # Hoechstens zehn Tags je Tag, wie bisher.
+        if not kandidaten or len(self.batterie_erledigt) >= 10:
+            self.batterie_zuletzt = heute
+            self.batterie_erledigt = set()
             return
 
-        log.info("Batterielauf: %d Tag(s). Der Scan steht dabei kurz still.",
-                 len(kandidaten))
+        tag, pfad = kandidaten[0]
+        self.batterie_erledigt.add(tag["kennung"])
+        log.info("Batterielauf: %s (noch %d Tag(s) heute). Der Scan steht dabei kurz "
+                 "still.", tag.get("name") or tag["kennung"], len(kandidaten) - 1)
         try:
             self.bluez.suche_beenden()
             time.sleep(0.5)
-            for tag, pfad in kandidaten[:10]:
-                prozent, meldung = self.bluez.batterie_lesen(pfad)
-                zustand = self._zustand(tag["kennung"])
-                if prozent is not None:
-                    zustand["batterie"] = int(prozent)
-                    zustand["batterie_zeit"] = time.time()
-                    log.info("%s: Batterie %d %%", tag.get("name") or tag["kennung"],
-                             prozent)
-                else:
-                    self.batterie_unmoeglich.add(tag["kennung"])
-                    log.info("%s: kein Batteriestand lesbar - wird nicht erneut "
-                             "versucht. %s", tag.get("name") or tag["kennung"], meldung)
+            prozent, meldung = self.bluez.batterie_lesen(pfad, zeitgrenze=10)
+            zustand = self._zustand(tag["kennung"])
+            if prozent is not None:
+                zustand["batterie"] = int(prozent)
+                zustand["batterie_zeit"] = time.time()
+                log.info("%s: Batterie %d %%", tag.get("name") or tag["kennung"],
+                         prozent)
+            else:
+                self.batterie_unmoeglich.add(tag["kennung"])
+                log.info("%s: kein Batteriestand lesbar - wird nicht erneut "
+                         "versucht. %s", tag.get("name") or tag["kennung"], meldung)
         finally:
-            try:
-                self.suchfilter = self.bluez.suche_starten(self._zahl("discovery_rssi", 0))
-            except gem.BlueZFehlt as fehler:
-                log.error("Suche nach dem Batterielauf nicht wieder gestartet: %s",
-                          fehler)
+            if not self._suche_starten("dem Batterielauf"):
+                log.error("Suche nach dem Batterielauf nicht wieder gestartet.")
 
     # -- Aufraeumen ---------------------------------------------------------
 
@@ -1882,6 +2183,13 @@ class Dienst:
         self.steuerdatei_lesen()
         self.kalibrierung_pruefen()
 
+        # bluetoothd wurde neu gestartet (NameOwnerChanged, seit 1.3.20).
+        # Gelingt die Neuverbindung noch nicht, bleibt die Marke stehen, und
+        # der naechste Durchlauf versucht es erneut.
+        if self.bluez_neu.is_set():
+            if self.bluez_neu_verbinden("einem Neustart von bluetoothd"):
+                self.bluez_neu.clear()
+
         # Nach einer Neuverbindung zum Broker sind dessen retained-Werte
         # womoeglich weg. Dann muss ALLES neu gesendet werden.
         neu_verbunden = self.mqtt.neumeldung.is_set()
@@ -1892,7 +2200,13 @@ class Dienst:
 
         vollmeldung = max(self.intervall, self._zahl("aktualisierung", 60))
         erzwingen = neu_verbunden or (time.time() - self.letzte_vollmeldung) >= vollmeldung
-        self.auswerten(erzwingen=erzwingen)
+        # Nach einer Neuverbindung geht ALLES sofort hinaus, auch was sonst
+        # nur im groben Takt gesendet wird (_senden, abstand).
+        self.neumeldung_laeuft = neu_verbunden
+        try:
+            self.auswerten(erzwingen=erzwingen)
+        finally:
+            self.neumeldung_laeuft = False
         if erzwingen:
             self.letzte_vollmeldung = time.time()
             # Der HTTP-Weg bekommt die Vollmeldung ebenfalls: bis 1.2.10 lief
@@ -1969,11 +2283,15 @@ class Dienst:
             self.praefix = neuer_praefix
             self.veroeffentlicht.clear()
             self.altlast_erledigt = False
+            self.entfallen_erledigt = False
+            self.gesendet_um.clear()
             lief = self.mqtt.client is not None
             if lief:
                 self.mqtt.stop()
                 self.mqtt.client = None
             self.mqtt = self._mqtt_neu()
+            if self.cfg.get("mqtt", "1") == "1":
+                self.abo_datei_nachziehen()
             if lief and altes_mqtt == "1" and self.cfg.get("mqtt", "1") == "1":
                 self.mqtt.start()
         if self.cfg.get("adapter", "hci0") != alter_adapter:
@@ -2057,6 +2375,20 @@ class Dienst:
         self.bluez.bus.add_signal_receiver(
             bei_neuem_geraet, dbus_interface=gem.OBJMGR_IF,
             signal_name="InterfacesAdded")
+
+        def bei_besitzerwechsel(name, alt, neu):
+            # Neu seit 1.3.20: bluetoothd wurde neu gestartet. Das Signal kommt
+            # im D-Bus-Faden; neu verbunden wird im naechsten Durchlauf.
+            if str(name) == gem.BLUEZ and str(neu or ""):
+                log.info("org.bluez hat einen neuen Besitzer (%s -> %s) - bluetoothd "
+                         "wurde neu gestartet; es wird neu verbunden.",
+                         str(alt or "-"), str(neu))
+                self.bluez_neu.set()
+
+        self.bluez.bus.add_signal_receiver(
+            bei_besitzerwechsel, signal_name="NameOwnerChanged",
+            dbus_interface="org.freedesktop.DBus", bus_name="org.freedesktop.DBus",
+            arg0=gem.BLUEZ)
 
         schleife = GLib.MainLoop()
 
@@ -2143,6 +2475,7 @@ class Dienst:
         if self.cfg.get("mqtt", "1") == "1":
             if self._zahl("raum", 0) == 1:
                 self.mqtt.abo_rueckruf = self.raum_abonnieren
+            self.abo_datei_nachziehen()
             self.mqtt.start()
         else:
             log.info("MQTT ist ausgeschaltet")
@@ -2161,11 +2494,22 @@ class Dienst:
                         "Werbepakets - die Glättung wird dadurch gröber.")
         self.abfragebetrieb()
 
+    def abo_datei_nachziehen(self):
+        """mqtt_subscriptions.cfg auf "<praefix>/#" (seit 1.3.20, MQTT 6)."""
+        geschrieben, fehler = gem.abo_datei_nachziehen(self.praefix)
+        if geschrieben:
+            log.info("Gateway-Abo gesetzt: %s/# (%s)", self.praefix, gem.ABO_DATEI)
+        elif fehler:
+            log.warning("Gateway-Abo %s nicht geschrieben: %s", gem.ABO_DATEI, fehler)
+
     def stop(self):
         self.laeuft = False
         if self.bluez:
             self.bluez.suche_beenden()
         self.mqtt.stop()
+
+
+_SPERRE = None
 
 
 def main():
@@ -2193,6 +2537,34 @@ def main():
             "Dienst der Installation starten oder LBHOMEDIR und LBPPLUGINDIR "
             "ausdruecklich setzen.\n")
         sys.exit(1)
+    # Das eigene Protokoll oeffnen (seit 1.3.20, C5) - erst hier, damit die
+    # einbindenden Werkzeuge nicht in das Dienstprotokoll schreiben.
+    log_datei_einrichten()
+    # EIN Dienst (seit 1.3.20, Regeln/03 "Ein Dauerlaeufer nimmt eine
+    # Sperrdatei"; Pruefung 29.09.2026, C4): zweimal "Dienst starten" oder F5
+    # nach dem Absenden legte bis 1.3.19 einen zweiten Scanner daneben - beide
+    # sendeten dieselben Themen, und der Letzte Wille des einen setzte
+    # server/online=0, waehrend der andere lief. Das Handle bleibt bis zum
+    # Prozessende offen (global); faellt es, faellt die Sperre. Python-Dateien
+    # werden seit 3.4 nicht an Kindprozesse vererbt (PEP 446) - der Dienst
+    # startet ohnehin keine.
+    global _SPERRE
+    try:
+        import fcntl
+        os.makedirs(gem.DATA_DIR, exist_ok=True)
+        _SPERRE = open(gem.SPERR_DATEI, "a")
+        fcntl.flock(_SPERRE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except ImportError:
+        _SPERRE = None          # kein fcntl (nicht Linux): ohne Sperre weiter
+    except OSError as fehler:
+        if fehler.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+            msg = ("BLE-Scanner NG laeuft bereits (Sperre %s belegt) - dieser "
+                   "zweite Start endet.") % gem.SPERR_DATEI
+            log.warning("%s", msg)
+            sys.stderr.write(msg + "\n")
+            sys.exit(3)
+        log.warning("Sperrdatei %s nicht zu nehmen (%s) - weiter ohne Sperre.",
+                    gem.SPERR_DATEI, fehler)
     for zeile in gem.alte_ramdisk_namen_uebernehmen():
         log.info("Ramdisk-Datei unter dem alten Namen: %s", zeile)
     dienst = Dienst()

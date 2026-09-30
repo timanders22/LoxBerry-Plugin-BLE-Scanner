@@ -249,6 +249,181 @@ function bl_defaults()
     );
 }
 
+/**
+ * Die Regeln je Einstellung - EINE Tabelle fuer Formular und Zurueckspielen
+ * (seit 1.3.20, Pruefung 29.09.2026, C3/O2).
+ *
+ * Bis 1.3.19 standen die Grenzen nur in den Aufrufen im Speichern-Handler, und
+ * bl_sicherung_lesen() uebernahm jeden Wert ungeprueft: ein Praefix mit "#",
+ * ein leeres Praefix, "intervall=abc" und eine Liste ("Array") waeren beim
+ * Zurueckspielen in die Datei gekommen, obwohl das Formular sie abweist.
+ *
+ * Art: 'zahl' (ganze Zahl, Muster statt (int), min/max), 'komma' (min/max),
+ * 'schalter' ("0"/"1"), 'wahl' (Liste), 'muster' (regulaerer Ausdruck),
+ * 'text' (ohne Steuerzeichen und Anfuehrungszeichen).
+ */
+function bl_regeln()
+{
+    return array(
+        'adapter'            => array('muster', '/^hci[0-9]+$/'),
+        'themenpraefix'      => array('muster', '/^[A-Za-z0-9_-]+$/'),
+        'mqtt'               => array('schalter'),
+        'http_push'          => array('schalter'),
+        'loxberry_id'        => array('text'),
+        'intervall'          => array('zahl', 2, 600),
+        'abwesenheit_nach'   => array('zahl', 5, 3600),
+        'aktualisierung'     => array('zahl', 5, 86400),
+        'rssi_nah'           => array('zahl', -120, 0),
+        'rssi_mittel'        => array('zahl', -120, 0),
+        'rssi_minimum'       => array('zahl', -120, 0),
+        'ankunft_sichtungen' => array('zahl', 1, 20),
+        'glaettung'          => array('schalter'),
+        'glaettung_fenster'  => array('zahl', 1, 30),
+        'hysterese_db'       => array('zahl', 0, 20),
+        'betriebsart'        => array('wahl', array('signal', 'abfrage')),
+        'wachhund'           => array('schalter'),
+        'wachhund_stille'    => array('zahl', 60, 86400),
+        'discovery_rssi'     => array('zahl', -120, 0),
+        'log_kappung_kb'     => array('zahl', 16, 20000),
+        'ereignisse'         => array('schalter'),
+        'ereignisse_tage'    => array('zahl', 1, 365),
+        'scanner_name'       => array('muster', '/^[A-Za-z0-9_-]{0,32}$/'),
+        'scanner_themen'     => array('schalter'),
+        'raum'               => array('schalter'),
+        'raum_hysterese_db'  => array('zahl', 0, 30),
+        'raum_ausgleich_db'  => array('zahl', -30, 30),
+        'entfernung'         => array('schalter'),
+        'daempfung'          => array('komma', 1.5, 6.0),
+        'beacon'             => array('schalter'),
+        'batterie'           => array('schalter'),
+        'batterie_uhrzeit'   => array('muster', '/^([01]?\d|2[0-3]):[0-5]\d$/'),
+    );
+}
+
+/** Enthaelt ein Text Steuerzeichen oder Anfuehrungszeichen? (seit 1.3.20, C9) */
+function bl_unzulaessige_zeichen($s)
+{
+    return (bool) preg_match('/[\x00-\x1F\x7F"\']/', (string) $s);
+}
+
+/** Ist das eine ganze Zahl in Schreibweise, nicht nur nach (int)? */
+function bl_ganzzahl($s)
+{
+    return (bool) preg_match('/^-?[0-9]{1,9}$/', (string) $s);
+}
+
+/**
+ * Einen Wert gegen seine Regel halten. Zuerst is_string - eine Liste aus einer
+ * Sicherungsdatei ist kein Wert (Klasse 12 des Auftrags: sonst entsteht
+ * "Array"). Rueckgabe: array(ok, Wert, Grund).
+ */
+function bl_wert_pruefen($k, $roh)
+{
+    $regeln = bl_regeln();
+    if (!isset($regeln[$k])) {
+        return array(false, '', 'unbekannt');
+    }
+    if (is_int($roh)) {
+        $roh = (string) $roh;
+    }
+    if (!is_string($roh)) {
+        return array(false, '', 'kein_text');
+    }
+    $r = $regeln[$k];
+    $w = trim($roh);
+    switch ($r[0]) {
+        case 'zahl':
+            if (!bl_ganzzahl($w)) {
+                return array(false, '', 'keine_zahl');
+            }
+            if ((int) $w < $r[1] || (int) $w > $r[2]) {
+                return array(false, '', 'grenze');
+            }
+            return array(true, (string) (int) $w, '');
+        case 'komma':
+            $w2 = str_replace(',', '.', $w);
+            if (!preg_match('/^-?[0-9]{1,4}(\.[0-9]{1,4})?$/', $w2)) {
+                return array(false, '', 'keine_zahl');
+            }
+            if ((float) $w2 < $r[1] || (float) $w2 > $r[2]) {
+                return array(false, '', 'grenze');
+            }
+            return array(true, rtrim(rtrim(sprintf('%.2F', (float) $w2), '0'), '.'), '');
+        case 'schalter':
+            return in_array($w, array('0', '1'), true) ? array(true, $w, '')
+                                                        : array(false, '', 'muster');
+        case 'wahl':
+            return in_array($w, $r[1], true) ? array(true, $w, '') : array(false, '', 'muster');
+        case 'muster':
+            return preg_match($r[1], $w) ? array(true, $w, '') : array(false, '', 'muster');
+        case 'text':
+            return bl_unzulaessige_zeichen($roh) ? array(false, '', 'zeichen')
+                                                 : array(true, $w, '');
+    }
+    return array(false, '', 'unbekannt');
+}
+
+/**
+ * Einen Tag aus einer Sicherung pruefen - dieselben Regeln wie die
+ * Tag-Tabelle im Formular (bl_tags_aus_post() in index.php).
+ * Rueckgabe: array(Tag|null, Grund).
+ */
+function bl_tag_pruefen($t)
+{
+    if (!is_array($t)) {
+        return array(null, 'kein Eintrag');
+    }
+    foreach (array('kennung', 'aktiv', 'name') as $f) {
+        if (!isset($t[$f]) || !is_string($t[$f])) {
+            return array(null, $f);
+        }
+    }
+    list($art, $kennung) = bl_kennung($t['kennung']);
+    if ($art === '' || $kennung !== trim($t['kennung'])) {
+        return array(null, 'kennung');
+    }
+    if (!in_array($t['aktiv'], array('0', '1'), true)) {
+        return array(null, 'aktiv');
+    }
+    if (bl_unzulaessige_zeichen($t['name']) || strpos($t['name'], '|') !== false) {
+        return array(null, 'name');
+    }
+    $opt = array();
+    $roh = isset($t['opt']) ? $t['opt'] : array();
+    if (!is_array($roh)) {
+        return array(null, 'opt');
+    }
+    foreach ($roh as $k => $v) {
+        if (!in_array($k, bl_tag_optionen(), true)) {
+            return array(null, 'opt.' . $k);
+        }
+        if (!is_string($v) || bl_unzulaessige_zeichen($v) || preg_match('/[,=|]/', $v)) {
+            return array(null, 'opt.' . $k);
+        }
+        $v = trim($v);
+        if ($v === '') {
+            continue;
+        }
+        if ($k === 'abw' && (!ctype_digit($v) || (int) $v < 5 || (int) $v > 3600)) {
+            return array(null, 'opt.abw');
+        }
+        if ($k === 'ref' && (!bl_ganzzahl($v) || (int) $v > 0 || (int) $v < -120)) {
+            return array(null, 'opt.ref');
+        }
+        if ($k === 'alias' && in_array(strtolower(bl_saeubern($v)), bl_reservierte_zweige(), true)) {
+            return array(null, 'opt.alias');
+        }
+        if ($k === 'batt' && $v !== '1') {
+            return array(null, 'opt.batt');
+        }
+        $opt[$k] = $v;
+    }
+    return array(array('art' => $art, 'kennung' => $kennung,
+                       'mac' => $art === 'mac' ? $kennung : '',
+                       'aktiv' => $t['aktiv'], 'name' => trim($t['name']),
+                       'opt' => $opt), '');
+}
+
 /* ==================================================================
  * Retain je Thema - Hausstandard seit 03.09.2026
  *
@@ -628,8 +803,14 @@ function bl_datei_schreiben($ziel, $inhalt, $rechte = 0640)
         return false;
     }
     @chmod($temp, $rechte);
-    $ok = @fwrite($fh, $inhalt) !== false;
-    @fflush($fh);
+    // BERICHTIGT IN 1.3.20 (Pruefung 29.09.2026, C7; Regeln/03 "Atomares
+    // Schreiben"): bis 1.3.19 galt "!== false" als Erfolg. Eine gekuerzte
+    // Schreibung ist aber genauso kaputt - unter "ulimit -f 2" gemessen: 2048
+    // statt 2387 Byte, 33 von 40 Tags, und die Oberflaeche meldete
+    // "Gespeichert". Jetzt zaehlt nur die volle Laenge, und fflush muss
+    // gelingen, bevor umbenannt wird.
+    $geschrieben = @fwrite($fh, $inhalt);
+    $ok = ($geschrieben === strlen($inhalt)) && (@fflush($fh) !== false);
     @fclose($fh);
     if (!$ok) {
         @unlink($temp);
@@ -965,20 +1146,79 @@ function bl_dienst($aktion)
         if (!is_file($skript)) {
             return 'Dienst nicht gefunden: ' . $skript;
         }
-        $log = $p['logdir'] . '/ble_scanner_ng.log';
+        // NEU IN 1.3.20 (Pruefung 29.09.2026, C4): laeuft schon einer, wird
+        // KEIN zweiter gestartet. Bis 1.3.19 legte ein zweites "Dienst
+        // starten" - oder F5 nach dem ersten - einen zweiten Scanner daneben
+        // (gemessen: zwei Prozesse). Der Dienst nimmt zusaetzlich selbst eine
+        // Sperre und endet als zweiter mit Rueckgabe 3.
+        $laufend = bl_dienst_pids();
+        if ($laufend) {
+            $meldungen[] = sprintf(bl_t('TEST.LAEUFT_SCHON'), implode(', ', $laufend));
+            bl_soll_setzen(true);
+            return implode("\n", $meldungen);
+        }
+        // Seit 1.3.20 nur in die Startdatei: das Protokoll oeffnet der Dienst
+        // selbst (C5). Hier landet, was vor dessen Einrichtung scheitert.
+        $log = $p['logdir'] . '/ble_scanner_ng_start.log';
         @mkdir(dirname($datei), 0775, true);
         @mkdir($p['logdir'], 0775, true);
         // Die Prozessnummer wird von der Shell weggeschrieben, nicht geraten.
         @exec('nohup ' . escapeshellarg($skript) . ' >> ' . escapeshellarg($log)
             . ' 2>&1 & echo $! > ' . escapeshellarg($datei) . '; echo gestartet', $meldungen);
-        for ($i = 0; $i < 12; $i++) {
-            usleep(500000);
-            if (bl_dienst_pid() > 0) {
-                break;
-            }
+        // Drei Sekunden, dann nachsehen, ob er NOCH lebt (Regeln/03 Z. 397:
+        // an Python gemessen; bis 1.3.19 galt er nach 0,5 s als gestartet,
+        // und ein spaeterer Tod blieb unbemerkt).
+        sleep(3);
+        if (bl_dienst_pid() > 0) {
+            // Der Sollmerker faellt erst nach dem gelungenen Start (Regeln/03,
+            // "erst nach erfolgreicher Pruefung gesetzt").
+            bl_soll_setzen(true);
         }
     }
+    if ($aktion === 'stop') {
+        // "Dienst anhalten" gilt bis zum naechsten "Dienst starten" - auch
+        // ueber einen Neustart des LoxBerry und ein Update hinweg (daemon,
+        // Waechter und postupgrade.sh fragen den Sollmerker, seit 1.3.20).
+        bl_soll_setzen(false);
+    }
     return implode("\n", $meldungen);
+}
+
+/**
+ * Der Sollmerker (seit 1.3.20, Bauliste 29.09.2026 C8/B1).
+ *
+ * Er liegt NEBEN dem Datenordner (data/plugins/<ordner>.soll_laufen), weil der
+ * Installer den Ordner bei jedem Upgrade abraeumt. Inhalt "0": angehalten.
+ * Fehlt er, gilt "eingeschaltet" - so verhaelt sich jede bestehende
+ * Installation wie bisher. Gelesen wird er von daemon/daemon, dem Waechter
+ * cron/cron.05min und postupgrade.sh.
+ */
+function bl_soll_datei()
+{
+    $p = bl_paths();
+    return $p['home'] !== '' ? $p['datadir'] . '.soll_laufen' : '';
+}
+
+/** true = der Dienst soll laufen. */
+function bl_soll_laufen()
+{
+    $f = bl_soll_datei();
+    if ($f === '' || !is_file($f)) {
+        return true;
+    }
+    return trim((string) @file_get_contents($f)) !== '0';
+}
+
+function bl_soll_setzen($ein)
+{
+    $f = bl_soll_datei();
+    if ($f === '') {
+        return false;
+    }
+    if ($ein) {
+        return !is_file($f) || @unlink($f);
+    }
+    return bl_datei_schreiben($f, "0\n", 0644);
 }
 
 /** Die Meldung, wenn diese Oberflaeche nicht in der Installation liegt. */
@@ -1686,7 +1926,7 @@ function bl_xml_virtual_in_http($kopf, $cmds)
         $o .= 'MinVal="' . bl_x($min) . '" ';
         $o .= 'MaxVal="' . bl_x($max) . '" ';
         $o .= 'Unit="' . bl_x($unit) . '" ';
-        $o .= 'HintText=""';
+        $o .= 'HintText="' . bl_x(isset($c['hint']) ? $c['hint'] : '') . '"';
         $o .= '/>' . $crlf;
     }
     $o .= '</VirtualInHttp>' . $crlf;
@@ -1700,6 +1940,48 @@ function bl_xml_virtual_in_http($kopf, $cmds)
  * Der Gateway-Name eines Themas entsteht, indem das Gateway '/' und '%'
  * durch '_' ersetzt. Punkte bleiben stehen.
  */
+/** Zeichen zaehlen ohne mbstring (wie bl_kuerzen()). */
+function bl_zeichen($s)
+{
+    $n = @preg_match_all('/./us', (string) $s);
+    return $n === false ? strlen((string) $s) : (int) $n;
+}
+
+/**
+ * Der kurze Kachelname eines Themas (seit 1.3.20, Pruefung 29.09.2026, O12).
+ * Der Comment einer Vorlagenzeile wird in Loxone zum Anzeigenamen
+ * (Regeln/07); bis 1.3.19 war er "Bezeichnung - lange Erklaerung", bis zu 81
+ * Zeichen. Die lange Erklaerung bleibt in der Thementabelle.
+ */
+function bl_kurz($schluessel)
+{
+    $k = 'KURZ.' . strtoupper(str_replace('/', '_', (string) $schluessel));
+    $t = bl_t($k);
+    if ($t === $k) {
+        $teile = explode('/', (string) $schluessel);
+        $t = end($teile);
+    }
+    return $t;
+}
+
+/** Comment der Vorlage: Bezeichnung und Kurzname, hoechstens 40 Zeichen. */
+function bl_kommentar($bez, $kurz)
+{
+    $bez = trim((string) $bez);
+    $kurz = (string) $kurz;
+    if ($bez === '') {
+        return bl_kuerzen($kurz, 40);
+    }
+    $platz = 40 - bl_zeichen($kurz) - 1;
+    if ($platz < 4) {
+        return bl_kuerzen($kurz, 40);
+    }
+    if (bl_zeichen($bez) > $platz) {
+        $bez = bl_kuerzen($bez, $platz - 1) . '…';
+    }
+    return $bez . ' ' . $kurz;
+}
+
 function bl_vorlage($cfg, $tags)
 {
     $praefix = bl_cfg($cfg, 'themenpraefix', 'blescanner');
@@ -1714,10 +1996,13 @@ function bl_vorlage($cfg, $tags)
         }
         $cmds[] = array(
             'title'   => $praefix . '_' . str_replace('/', '_', $thema),
-            'comment' => bl_t($info['s']),
+            'comment' => bl_kommentar('', bl_kurz($thema)),
             'check'   => ' ',
             'min'     => $info['min'], 'max' => $info['max'],
             'einheit' => $info['einheit'],
+            // Frage 6 (Bauliste 29.09.2026): present gilt nur zusammen mit
+            // server/online - der Hinweis steht an beiden Eingaengen.
+            'hint'    => $thema === 'server/online' ? bl_t('VORLAGE.HINT_ONLINE') : '',
         );
     }
 
@@ -1748,10 +2033,11 @@ function bl_vorlage($cfg, $tags)
                 // dieselbe Ersetzung seit jeher.
                 'title'   => $praefix . '_' . $t . '_'
                              . str_replace('/', '_', $schluessel),
-                'comment' => $bez . ' - ' . bl_sensor_text($info),
+                'comment' => bl_kommentar($bez, bl_kurz($schluessel)),
                 'check'   => ' ',
                 'min'     => $info['min'], 'max' => $info['max'],
                 'einheit' => $info['einheit'],
+                'hint'    => $schluessel === 'present' ? bl_t('VORLAGE.HINT_PRESENT') : '',
             );
         }
     }
@@ -1920,24 +2206,110 @@ function bl_abo_text()
  *
  * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
  */
+/**
+ * Die Sicherungsdatei bauen (seit 1.3.20, Pruefung 29.09.2026, C1/O1/O3).
+ *
+ * Bis 1.3.19 rief der Handler bl_cfg() ohne Argumente - "Too few arguments",
+ * HTTP 500, seit 1.3.6 kam nie eine Datei heraus. Und selbst die gedachte
+ * Datei trug nur die 32 Einstellungen, keinen einzigen Tag: ein Umzug brachte
+ * keine MAC, keine Bezeichnung, keine Person mit.
+ *
+ * Jetzt: ein lesbarer Kopf unter "_" (Plugin, Fassung, Zeitpunkt, Hinweis),
+ * alle Schluessel aus den Vorgaben mit ihrem gespeicherten Wert, und die Tags
+ * unter "tags" (Kennung, aktiv, Bezeichnung, Zusatzangaben). Zugangsdaten
+ * fuehrt diese Linie nicht; das Formularmerkwort gehoert nicht hinein.
+ */
+function bl_sicherung_bauen($cfg, $tags)
+{
+    $aus = array(
+        '_' => array(
+            'plugin'   => 'ble_scanner_ng',
+            'fassung'  => bl_fassung(),
+            'erstellt' => date('Y-m-d H:i:s'),
+            'hinweis'  => bl_t('TEXT.SICH_KOPF'),
+        ),
+    );
+    foreach (bl_defaults() as $k => $vorgabe) {
+        $aus[$k] = isset($cfg[$k]) ? (string) $cfg[$k] : (string) $vorgabe;
+    }
+    $aus['tags'] = array();
+    foreach ($tags as $t) {
+        $aus['tags'][] = array(
+            'kennung' => (string) $t['kennung'],
+            'aktiv'   => $t['aktiv'] === '1' ? '1' : '0',
+            'name'    => (string) $t['name'],
+            'opt'     => (object) (isset($t['opt']) && is_array($t['opt']) ? $t['opt'] : array()),
+        );
+    }
+    return $aus;
+}
+
 function bl_sicherung_lesen($roh)
 {
     $mangel = array();
     $daten = json_decode((string) $roh, true);
     if (!is_array($daten)) {
-        return array(null, array(bl_t('TEXT.SICH_KEIN_JSON')), 0);
+        return array(null, array(bl_t('TEXT.SICH_KEIN_JSON')), 0, array());
+    }
+    /* Fremdes wird VOR dem Zusammenfuehren abgelehnt: der Kopf muss dieses
+     * Plugin nennen (seit 1.3.20). */
+    if (!isset($daten['_']) || !is_array($daten['_']) || !isset($daten['_']['plugin'])
+        || $daten['_']['plugin'] !== 'ble_scanner_ng') {
+        return array(null, array(bl_t('TEXT.SICH_KEIN_KOPF')), 0, array());
     }
     $neu = bl_defaults();
     $bekannt = array_keys($neu);
     $anzahl = 0;
     foreach ($daten as $k => $w) {
+        if ($k === '_' || $k === 'tags') {
+            continue;
+        }
         if (!in_array($k, $bekannt, true)) {
             $mangel[] = sprintf(bl_t('TEXT.SICH_FREMD'),
                                  htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
             continue;
         }
-        $neu[$k] = $w;
+        /* Jeder Wert mit denselben Regeln wie das Formular, zuerst is_string
+         * (seit 1.3.20, C3). Bis 1.3.19 hiess es hier nur $neu[$k] = $w. */
+        list($gut, $wert, $grund) = bl_wert_pruefen($k, $w);
+        if (!$gut) {
+            $mangel[] = sprintf(bl_t('TEXT.SICH_WERT'),
+                                htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'),
+                                is_string($w) || is_int($w)
+                                    ? htmlspecialchars(bl_kuerzen((string) $w, 40), ENT_QUOTES, 'UTF-8')
+                                    : gettype($w));
+            continue;
+        }
+        $neu[$k] = $wert;
         $anzahl++;
+    }
+    if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
+        $mangel[] = bl_t('TEXT.SICH_SCHWELLEN');
+    }
+    /* Die Tags (seit 1.3.20, O3): jeder einzeln geprueft, doppelte Kennungen
+     * abgewiesen. Eine Datei OHNE den Schluessel "tags" ist unvollstaendig -
+     * sonst loeschte das Zurueckspielen alle eingetragenen Tags. */
+    $tags = array();
+    if (!array_key_exists('tags', $daten)) {
+        $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
+    } elseif (!is_array($daten['tags'])) {
+        $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
+    } else {
+        $gesehen = array();
+        foreach (array_values($daten['tags']) as $nr => $t) {
+            list($tag, $grund) = bl_tag_pruefen($t);
+            if ($tag === null) {
+                $mangel[] = sprintf(bl_t('TEXT.SICH_TAG'), $nr + 1,
+                                    htmlspecialchars($grund, ENT_QUOTES, 'UTF-8'));
+                continue;
+            }
+            if (isset($gesehen[$tag['kennung']])) {
+                $mangel[] = sprintf(bl_t('MANGEL.DOPPELT'), $tag['kennung']);
+                continue;
+            }
+            $gesehen[$tag['kennung']] = true;
+            $tags[] = $tag;
+        }
     }
     if ($anzahl === 0) {
         $mangel[] = bl_t('TEXT.SICH_LEER');
@@ -1969,9 +2341,150 @@ function bl_sicherung_lesen($roh)
         $mangel[] = sprintf(bl_t('TEXT.SICH_FEHLEND'), count($fehlend),
             htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
     }
-    return array($mangel ? null : $neu, $mangel, $anzahl);
+    return array($mangel ? null : $neu, $mangel, $anzahl, $tags);
 }
 
+
+/**
+ * Die Abo-Datei des MQTT-Gateways (seit 1.3.20, Pruefung 29.09.2026, MQTT 6;
+ * Bauart eb_abo_datei() aus Einspeisebremse 0.9.28).
+ *
+ * config/plugins/<ordner>/mqtt_subscriptions.cfg liest das Gateway V1 selbst
+ * und abonniert jede Zeile. Bis 1.3.19 musste der Anwender <praefix>/# von
+ * Hand eintragen, und nach einem Praefixwechsel stand dort das alte. Geschrieben
+ * wird nur, wenn die Datei abweicht - dieselbe Regel wie
+ * abo_datei_nachziehen() in bl_common.py (der Dienst beim Start).
+ * Rueckgabe: array(Pfad, traegt das Abo).
+ */
+function bl_abo_datei($praefix, $schreiben = false)
+{
+    $p = bl_paths();
+    $pfad = $p['configdir'] . '/mqtt_subscriptions.cfg';
+    $soll = trim((string) $praefix, '/') . '/#';
+    $roh = is_readable($pfad) ? (string) @file_get_contents($pfad) : '';
+    $da = ($roh === $soll . "\n");
+    if ($schreiben && !$da && $soll !== '/#' && $p['home'] !== '' && is_dir($p['configdir'])) {
+        $da = bl_datei_schreiben($pfad, $soll . "\n", 0644);
+    }
+    return array($pfad, $da);
+}
+
+/**
+ * Gilt das Abbild des Dienstes noch? (seit 1.3.20, Pruefung 29.09.2026, O5)
+ *
+ * Bis 1.3.19 zeigte die Oberflaeche aus einer liegengebliebenen Zustandsdatei
+ * "2 anwesend", gruene Tag-Zeilen und drei Haken im Reiter Test - waehrend kein
+ * Dienst lief. Jetzt gilt das Abbild nur, wenn ein Dienst laeuft UND es
+ * hoechstens dreimal so alt ist wie der Takt. Der Takt zaehlt mindestens 30 s:
+ * waehrend einer BlueZ-Stoerung schreibt der Dienst das Abbild nur alle 30 s
+ * (verbinden_mit_geduld() in ble_scanner_ng.py).
+ * Rueckgabe: array(gilt, Satz fuer "keine Aussage (...)").
+ */
+function bl_abbild_lage($cfg, $pid)
+{
+    $s = bl_status();
+    $alter = bl_status_alter();
+    $takt = max(30, (int) bl_cfg($cfg, 'intervall', '5'));
+    $grenze = 3 * $takt;
+    $stand = ($s && isset($s['zeit'])) ? date('H:i', (int) $s['zeit']) : '';
+    if ($pid <= 0) {
+        return array(false, $stand !== '' ? sprintf(bl_t('TEXT.KEINE_AUSSAGE_TOT_STAND'), $stand)
+                                          : bl_t('TEXT.KEINE_AUSSAGE_TOT'));
+    }
+    if ($alter < 0) {
+        return array(false, bl_t('TEXT.KEINE_AUSSAGE_OHNE'));
+    }
+    if ($alter > $grenze) {
+        return array(false, sprintf(bl_t('TEXT.KEINE_AUSSAGE_ALT'), $stand, $alter, $grenze));
+    }
+    return array(true, '');
+}
+
+/**
+ * Die Einmalmeldung (seit 1.3.20, Pruefung 29.09.2026, O4; Bauform
+ * au_einmal_*() aus AudiConnect 0.9.22, Regeln/04 "Jeder POST-Handler endet
+ * mit einer Umleitung" und Nachtrag Raumklima 0.11.8).
+ *
+ * Jeder ausloesende POST endet mit 303; was er zu sagen hat, reist in
+ * data/plugins/<ordner>/einmalmeldung.json (0600). Gelesen wird sie NUR beim
+ * GET, genau einmal, und vor der Anzeige geloescht; aelter als 120 s gilt sie
+ * nicht. Sie traegt fertige Meldungstexte, das Ergebnis eines Suchlaufs und
+ * die eingetippten Tag-Zeilen - keine Zugangsdaten (diese Linie fuehrt keine,
+ * und der Probewert zeigt nur Adresse und Name des Miniservers).
+ */
+function bl_einmal_datei()
+{
+    $p = bl_paths();
+    return $p['datadir'] . '/einmalmeldung.json';
+}
+
+function bl_einmal_schreiben($daten)
+{
+    $p = bl_paths();
+    if (!is_dir($p['datadir']) && !@mkdir($p['datadir'], 0775, true)) {
+        return false;
+    }
+    $daten['zeit'] = time();
+    // Die Ausgabe fremder Programme (bluetoothctl, dmesg, python3) kann
+    // ungueltiges UTF-8 tragen; json_encode lieferte dann false, und die
+    // Seite wurde ohne Umleitung gezeigt (im Pruefstand an test=bluetooth
+    // und test=selbsttest gemessen). Ersetzen statt scheitern - die Flagge
+    // gibt es seit PHP 7.2.
+    $js = json_encode($daten, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+                              | JSON_INVALID_UTF8_SUBSTITUTE);
+    return $js !== false && bl_datei_schreiben(bl_einmal_datei(), $js, 0600);
+}
+
+function bl_einmal_lesen()
+{
+    $f = bl_einmal_datei();
+    if (!is_file($f)) {
+        return null;
+    }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || abs(time() - (int) $d['zeit']) > 120) {
+        return null;
+    }
+    $aus = array();
+    foreach (array('fehler', 'gescheitert') as $k) {
+        $aus[$k] = array();
+        if (isset($d[$k]) && is_array($d[$k])) {
+            foreach ($d[$k] as $m) {
+                if (is_string($m)) { $aus[$k][] = $m; }
+            }
+        }
+    }
+    foreach (array('hinweis', 'error', 'test_titel', 'test_text') as $k) {
+        $aus[$k] = isset($d[$k]) && is_string($d[$k]) ? $d[$k] : '';
+    }
+    $aus['saved'] = !empty($d['saved']);
+    $aus['such'] = isset($d['such']) && is_array($d['such']) ? $d['such'] : null;
+    $aus['tags'] = isset($d['tags']) && is_array($d['tags']) ? $d['tags'] : null;
+    return $aus;
+}
+
+/**
+ * Die Zweige, die NICHT je Tag angelegt werden (seit 1.3.20, Pruefung
+ * 29.09.2026, MQTT 5): person/<P>/... und scanner/<S>/<T>/... Bis 1.3.19
+ * hatten sie keine Zeile in der Thementabelle, und die Pruefzeile nahm sie
+ * ausdruecklich aus - vier gesendete Themen, drei davon retained, ohne Zeile.
+ */
+function bl_zweig_themen()
+{
+    return array(
+        'person/<P>/present'      => array('s' => 'THEMA.P_PRESENT', 'art' => 'digital'),
+        'person/<P>/last_seen_ts' => array('s' => 'THEMA.P_LAST_SEEN_TS', 'art' => 'analog'),
+        'scanner/<S>/<T>/present' => array('s' => 'THEMA.SC_PRESENT', 'art' => 'digital'),
+        'scanner/<S>/<T>/rssi'    => array('s' => 'THEMA.SC_RSSI', 'art' => 'analog'),
+    );
+}
+
+/** "person/<P>/present" -> "person//present" - die Form, die bl_gesendete_themen() liefert. */
+function bl_zweig_normal($k)
+{
+    return preg_replace('/<[A-Z]>/', '', (string) $k);
+}
 
 /* ==================================================================
  * WACHPOSTEN GEGEN FREMDE FORMULARE
@@ -2023,17 +2536,14 @@ function bl_merkwort()
     if (!is_dir($verz)) {
         @mkdir($verz, 0775, true);
     }
-    /* Rechte VOR dem Inhalt: zwischen Anlegen und chmod laege sonst ein
-     * Fenster, in dem das Merkwort fuer alle lesbar ist. */
-    $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, $neu) !== false) {
-        @chmod($tmp, 0600);
-        if (@rename($tmp, $datei)) {
-            @chmod($datei, 0600);
-        } else {
-            @unlink($tmp);
-        }
-    }
+    /* Rechte VOR dem Inhalt (seit 1.3.20 wirklich: bis 1.3.19 kam das chmod
+     * erst nach file_put_contents), Nebendatei mit PID, und Erfolg nur bei
+     * voller Laenge - bl_datei_schreiben() (Pruefung 29.09.2026, C7). Eine
+     * gekuerzte Datei faellt beim naechsten Lesen durch das Muster und wuerde
+     * neu gewuerfelt; jedes offene Formular waere dann ungueltig. */
+    // Scheitert das Ablegen, gilt das neue Wort nur fuer diese Anfrage; die
+    // naechste wuerfelt neu, und der Wachposten weist das Formular dann ab.
+    bl_datei_schreiben($datei, $neu, 0600);
     $wort = $neu;
     return $wort;
 }

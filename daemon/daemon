@@ -14,25 +14,65 @@ pluginbindir=REPLACELBPBINDIR
 logdir=REPLACELBPLOGDIR
 datadir=REPLACELBPDATADIR
 log=$logdir/ble_scanner_ng.log
+# Seit 1.3.20: der Start leitet NUR in diese Datei um. Das eigentliche
+# Protokoll oeffnet der Dienst selbst (WatchedFileHandler, bin/ble_scanner_ng.py);
+# hier landet nur, was vor dessen Einrichtung scheitert (Interpreter, Import).
+# Bis 1.3.19 zeigte die Umleitung auf ble_scanner_ng.log, und nach der ersten
+# Kappung schrieb der Dienst in einen geloeschten Inode (Pruefung 29.09.2026, C5).
+startlog=$logdir/ble_scanner_ng_start.log
 piddatei=$datadir/dienst.pid
 dienst=$pluginbindir/ble_scanner_ng.py
 # Die Marke liegt NEBEN dem Datenordner - darin wuerde sie der Installer
 # zwischen preupgrade.sh und postinstall.sh mit abraeumen (Begruendung und
 # Messung in preupgrade.sh).
 marke=$datadir.upgrade_laeuft
+# Der Sollmerker liegt aus demselben Grund NEBEN dem Datenordner (seit 1.3.20).
+# Inhalt "0": angehalten. Fehlt er oder steht etwas anderes darin, gilt
+# "eingeschaltet" - so verhaelt sich jede bestehende Installation wie bisher.
+sollmerker=$datadir.soll_laufen
 
 # Bis 1.3.17 ging jede Meldung nur an den Systemlogger. Wer nachsehen will,
 # warum nach einem Neustart nichts laeuft, sucht sie dort zwischen allen
 # anderen Diensten; im Reiter Logdateien des Plugins stand nichts. Sie geht
-# jetzt zusaetzlich in die Protokolldatei des Plugins - dieselbe Bauart wie
+# zusaetzlich in die Protokolldatei des Plugins - dieselbe Bauart wie
 # cc_melden() in Chromecast4lox 1.3.11.
+#
+# BERICHTIGT IN 1.3.20 (Hauptbefund G0, am Geraet im Journal vom 28.09.2026):
+# dieses Skript laeuft als root. Fehlte die Protokolldatei - etwa nach der
+# stuendlichen Logwartung -, legte das Anhaengen hier sie als root mit 0644
+# an, und der Dienst, der gleich darauf als loxberry mit ">>" auf dieselbe
+# Datei gestartet wurde, scheiterte mit "Permission denied": es lief kein
+# Dienst. Jetzt wird NUR an eine vorhandene Datei angehaengt; angelegt wird
+# sie weiter unten als loxberry, bevor irgendetwas hineinschreibt.
 melde() {
     [ -x /usr/bin/logger ] && /usr/bin/logger "loxberry-plugin-$pluginname - $1"
-    if [ -d "$logdir" ]; then
+    if [ -f "$log" ]; then
         echo "$(date '+%Y-%m-%d %H:%M:%S') INFO    daemon: $1" >> "$log" 2>/dev/null
     fi
     return 0
 }
+
+# Verzeichnisse und Dateien anlegen UND dem Benutzer geben, der gleich
+# hineinschreibt - VOR jeder Frage unten (seit 1.3.20). Bis 1.3.19 stand das
+# erst hinter der Upgrade-Marke: bei gesetzter Marke endete dieses Skript,
+# bevor es den Protokollordner auf der Ramdisk angelegt hatte (Pruefung
+# 29.09.2026, C8).
+#
+# Bis 1.2.10 lief hier nur ein mkdir als root. Fehlte eines der beiden
+# Verzeichnisse - das Protokollverzeichnis liegt auf einer Ramdisk, ist nach
+# einem Neustart also wirklich weg -, gehoerte es danach root:root, und das
+# unmittelbar folgende "su loxberry" konnte weder das Protokoll noch die
+# PID-Datei schreiben.
+mkdir -p "$logdir" "$datadir" 2>/dev/null
+chown loxberry:loxberry "$logdir" "$datadir" 2>/dev/null
+for bl_datei in "$log" "$startlog"; do
+    if [ ! -e "$bl_datei" ]; then
+        su loxberry -c "touch '$bl_datei'" >/dev/null 2>&1
+    fi
+    # Beides zusammen ist am sichersten: legte su die Datei nicht an (kein
+    # Benutzer, keine Schale), holt chown eine als root entstandene zurueck.
+    [ -e "$bl_datei" ] && chown loxberry:loxberry "$bl_datei" 2>/dev/null
+done
 
 melde "Starte BLE-Scanner NG"
 
@@ -77,13 +117,13 @@ BL_ARGUMENTE
 # an (2 Prozesse statt 1), und waehrend einer Aktualisierung startete sie den
 # Dienst mit der mitgelieferten Vorgabe-Konfiguration (1 Prozess statt 0).
 #
-# EINE DRITTE FRAGE GIBT ES HIER NICHT: diese Linie fuehrt keinen Schalter
-# "eingeschaltet". Der Knopf "Dienst anhalten" im Reiter Test beendet nur den
-# Prozess, er merkt sich nichts - nach dem naechsten Neustart laeuft der Dienst
-# wieder. Einen solchen Schalter einzufuehren waere eine neue Funktion und
-# nicht das Nachziehen eines Befundes (CLAUDE.md 4); die Entscheidung liegt
-# beim Hausherrn. Bis dahin ist das hier ein bekannter, benannter Zustand und
-# keine Luecke, die jemand fuer behoben halten soll.
+# SEIT 1.3.20 GIBT ES EINE DRITTE FRAGE: den Sollmerker (Hausstandard nach
+# Regeln/03, "Ein Dauerlaeufer braucht einen Waechter"; Bauliste des
+# Durchgangs 29.09.2026, C8). "Dienst anhalten" schreibt "0" hinein; "Dienst
+# starten" und die Neuinstallation entfernen ihn, sobald der Dienst laeuft.
+# Ein angehaltener Dienst bleibt damit auch ueber einen Neustart des LoxBerry
+# und ueber ein Update angehalten; bis 1.3.19 lief er nach dem naechsten
+# Neustart wieder an.
 
 # 1. Laeuft gerade eine Aktualisierung? preupgrade.sh legt die Marke neben den
 #    Datenordner, postupgrade.sh entfernt sie. Nur eine Marke, die hoechstens
@@ -125,7 +165,13 @@ if [ "${BL_START_TROTZ_MARKE:-0}" != "1" ] && [ -f "$marke" ]; then
     fi
 fi
 
-# 2. Laeuft schon einer? Argumentweise, nicht ueber die PID-Datei allein - die
+# 2. Ist der Dienst angehalten? Nur ein Sollmerker mit genau "0" haelt ihn an.
+if [ "$(cat "$sollmerker" 2>/dev/null)" = "0" ]; then
+    melde "Start uebersprungen: der Dienst ist im Reiter Einstellungen angehalten (Sollmerker $sollmerker)."
+    exit 0
+fi
+
+# 3. Laeuft schon einer? Argumentweise, nicht ueber die PID-Datei allein - die
 #    loescht purge_installation beim Upgrade zusammen mit dem Datenordner. Ein
 #    Dienst, der das Update ueberlebt hat, ist danach ohne diese Suche
 #    unsichtbar, und der Start legte einen zweiten daneben.
@@ -141,35 +187,27 @@ if [ -n "$bl_laeuft" ]; then
     exit 0
 fi
 
-# Verzeichnisse anlegen UND dem Benutzer geben, der gleich hineinschreibt.
-#
-# Bis 1.2.10 lief hier nur ein mkdir als root. Fehlte eines der beiden
-# Verzeichnisse - das Protokollverzeichnis liegt auf einer Ramdisk, ist nach
-# einem Neustart also wirklich weg -, gehoerte es danach root:root, und das
-# unmittelbar folgende "su loxberry" konnte weder das Protokoll noch die
-# PID-Datei schreiben. Der Dienst startete dann gar nicht, und die ganze
-# Zeile war mit >/dev/null 2>&1 stummgeschaltet: keine einzige Zeile
-# irgendwo, die das erklaert haette.
-mkdir -p "$logdir" "$datadir" 2>/dev/null
-chown loxberry:loxberry "$logdir" "$datadir" 2>/dev/null
-
 # Der Dienst braucht keine Rootrechte: BlueZ erlaubt Mitgliedern der Gruppe
-# bluetooth ueber D-Bus das Suchen. Deshalb als loxberry starten.
+# bluetooth ueber D-Bus das Suchen. Deshalb als loxberry starten. Die
+# Verzeichnisse und beide Protokolldateien gehoeren ihm seit dem Anfang dieses
+# Skripts.
 #
 # echo $! muss INNERHALB der su-Zeichenkette stehen. Stuende es draussen,
 # waere es die Nummer des su-Prozesses, nicht die des Dienstes.
-su loxberry -c "nohup '$dienst' >> '$log' 2>&1 & echo \$! > '$piddatei'"
+su loxberry -c "nohup '$dienst' >> '$startlog' 2>&1 & echo \$! > '$piddatei'"
 start_rc=$?
 
 chown loxberry:loxberry "$piddatei" 2>/dev/null
 
 # Nachsehen, ob es geklappt hat, und es SAGEN. Ein stummer Fehlstart ist der
 # unangenehmste: nach dem Neustart laeuft nichts, und es steht nirgends warum.
-sleep 2
+# Drei Sekunden, nicht zwei (Regeln/03: an Python gemessen reichte eine
+# Sekunde auf dem Pi nicht, bis ein sofort abbrechender Dienst tot war).
+sleep 3
 if [ -s "$piddatei" ] && kill -0 "$(cat "$piddatei")" 2>/dev/null; then
     melde "BLE-Scanner NG laeuft (PID $(cat "$piddatei"))"
 else
-    melde "BLE-Scanner NG konnte nicht gestartet werden (Rueckgabewert $start_rc) - siehe $log"
+    melde "BLE-Scanner NG konnte nicht gestartet werden (Rueckgabewert $start_rc) - siehe $startlog und $log"
 fi
 
 exit 0

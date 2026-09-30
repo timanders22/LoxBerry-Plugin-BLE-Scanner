@@ -374,10 +374,20 @@ def alles_pruefen():
             ergebnisse[900]["ts"] not in (None, "0", ""),
             "gemessen: %s" % ergebnisse[900]["ts"])
 
-    # -- Herzschlag
-    p.merke(G, "server/ts wird in jedem Durchlauf gesendet",
-            gesendet.get("server/ts") not in (None, ""))
+    # -- Herzschlag. Seit 1.3.20 hoechstens alle 30 s (Pruefung 29.09.2026,
+    #    MQTT 4): bis 1.3.19 stand hier "in jedem Durchlauf" - bei einem Takt
+    #    von 5 s zwoelf Nachrichten je Minute nur fuer das Lebenszeichen.
     p.merke(G, "server/ok wird gesendet", gesendet.get("server/ok") is not None)
+    d.gesendet_um.pop("server/ts", None)
+    gesendet.clear()
+    d.auswerten(erzwingen=True)
+    erst = gesendet.get("server/ts")
+    gesendet.clear()
+    d.auswerten(erzwingen=True)
+    gleich_danach = gesendet.get("server/ts")
+    p.merke(G, "server/ts geht hinaus, aber hoechstens alle 30 s",
+            erst not in (None, "") and gleich_danach is None,
+            "erster Durchlauf: %s, gleich danach: %s" % (erst, gleich_danach))
 
     # -- Zusammenfassung zaehlt dieselbe Menge
     gesendet.clear()
@@ -681,9 +691,10 @@ def alles_pruefen():
                 gem.BT_HELFER in inhalt,
                 gem.BT_HELFER if gem.BT_HELFER in inhalt else "fehlt dort")
 
-    # Die sudo-Regel darf NICHT in den Plugin-Ordner zeigen. Regeln/06 nennt
-    # das einen Weg nach Root: bin/ gehoert loxberry, wer dort schreiben darf,
-    # verschafft sich sonst root-Code.
+    # Die sudo-Regel zeigt NICHT in den Plugin-Ordner: der Helfer steht unter
+    # der Aufsicht von postroot.sh. Das schuetzt vor Versehen, nicht vor
+    # Missbrauch - loxberry ist ueber lbdefaults ohnehin faktisch root
+    # (berichtigt in 1.3.20, Entscheidung 2 vom 29.09.2026).
     _sud = os.path.join(_wurzel, "sudoers", "sudoers")
     if os.path.isfile(_sud):
         with open(_sud, "r", encoding="utf-8", errors="replace") as fh:
@@ -696,10 +707,11 @@ def alles_pruefen():
         p.merke(G, "die sudo-Regel zeigt nicht in den Plugin-Ordner",
                 not _schlecht, _schlecht[0] if _schlecht else "zeigt nach "
                 + os.path.dirname(gem.BT_HELFER))
-        # Und keine Argumente: mit Argumenten liesse sich die Wirkung von
-        # aussen steuern.
+        # Und keine Argumente. Seit 1.3.20 steht dafuer das leere Argument ""
+        # hinter dem Pfad: eine Regel OHNE Argumentliste erlaubt nach
+        # sudoers(5) jedes Argument (Pruefung 29.09.2026, C11).
         _mit_arg = [z for z in _zeilen
-                    if z.split("NOPASSWD:")[-1].strip() != gem.BT_HELFER]
+                    if z.split("NOPASSWD:")[-1].strip() != gem.BT_HELFER + ' ""']
         p.merke(G, "die sudo-Regel nennt keine Argumente",
                 not _mit_arg, _mit_arg[0] if _mit_arg else gem.BT_HELFER)
     else:

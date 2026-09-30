@@ -156,6 +156,50 @@ VERLAUF_FILE = os.path.join(DATA_DIR, "verlauf.csv")
 ALTLAST_MERKER = os.path.join(DATA_DIR, "retain_altlast")
 PRAEFIX_DATEI = os.path.join(DATA_DIR, "mqtt_praefix")
 
+# Sperrdatei des Dienstes (seit 1.3.20, Regeln/03 "Ein Dauerlaeufer nimmt eine
+# Sperrdatei"): ein zweiter Dienst geht mit einem Satz und Rueckgabe 3.
+SPERR_DATEI = os.path.join(DATA_DIR, "dienst.lock")
+
+# Die Abo-Datei des MQTT-Gateways (seit 1.3.20, Bauart Einspeisebremse
+# eb_abo_datei()): das Gateway V1 liest config/plugins/<ordner>/
+# mqtt_subscriptions.cfg und abonniert jede Zeile. Bis 1.3.19 musste der
+# Anwender <praefix>/# von Hand eintragen, und nach einem Praefixwechsel stand
+# dort das alte (Pruefung 29.09.2026, MQTT 6).
+ABO_DATEI = os.path.join(CONFIG_DIR, "mqtt_subscriptions.cfg")
+
+
+def abo_datei_nachziehen(praefix):
+    """mqtt_subscriptions.cfg auf "<praefix>/#" bringen - NUR wenn sie abweicht.
+
+    Rueckgabe: (geschrieben, fehlertext). Dieselbe Regel wie
+    bl_abo_datei() in bl_lib.php (die Oberflaeche ruft sie beim Speichern).
+    """
+    soll = str(praefix or "").strip("/") + "/#"
+    if soll == "/#":
+        return False, "kein Praefix"
+    try:
+        with open(ABO_DATEI, "r", encoding="utf-8") as fh:
+            if fh.read() == soll + "\n":
+                return False, ""
+    except OSError:
+        pass
+    if not os.path.isdir(CONFIG_DIR):
+        return False, "Konfigurationsordner fehlt"
+    temp = ABO_DATEI + ".tmp.%d" % os.getpid()
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(soll + "\n")
+        os.chmod(temp, 0o644)
+        os.replace(temp, ABO_DATEI)
+    except OSError as fehler:
+        try:
+            os.unlink(temp)
+        except OSError:
+            pass
+        return False, str(fehler)
+    return True, ""
+
 # Die Ramdisk-Dateien tragen seit 1.3.19 den ORDNERNAMEN. Bis 1.3.18 hiessen
 # sie fest ble_scanner_ng_status.json/_steuer.json - eine Zweitinstallation
 # (Ordner ble_scanner_ng01) schrieb ihr Abbild ueber das der ersten, und ein
@@ -210,9 +254,15 @@ else:
 # "1.3.12" stehen, waehrend die Linie auf 1.3.13 ging - nachgemessen am
 # 13.09.2026 beim Bauen von 1.3.14, da hinkte sie schon zwei Nummern. Der
 # Kommentar darueber hat den Rueckfall vorhergesagt und ihn nicht verhindert,
-# weil er nur eine Bitte ist. Solange fassung_setzen.py diese Stelle nicht
-# kennt, bleibt sie Handarbeit: WER DIE NUMMER ANHEBT, HEBT DIESE ZEILE MIT.
-VERSION_RUECKFALL = "1.3.19"
+# weil er nur eine Bitte ist.
+#
+# UND IN 1.3.20 NOCH EINMAL: "1.3.19" neben plugin.cfg 1.3.20 (Pruefung
+# 29.09.2026, C12; im Pruefbaum ging server/version 1.3.19 retained hinaus).
+# Seither steht hier KEINE Nummer mehr. Fehlen fassung.txt und plugin.cfg,
+# ist die Fassung nicht feststellbar - und genau das wird dann gesagt: leer
+# statt erfunden. Der Dienst sendet server/version dann als "-" (Entscheidung
+# 5), und bl_fassung() in bl_lib.php liefert ebenfalls leer.
+VERSION_RUECKFALL = ""
 
 
 def fassung():
@@ -896,6 +946,12 @@ def log_kappen(pfad, grenze_kb=500, behalten=200):
     log/plugins liegt auf einer Ramdisk; eine unbegrenzt wachsende Datei ist
     dort kein Schoenheitsfehler, sondern trifft irgendwann ALLE Plugins.
     Rueckgabe: True, wenn gekuerzt wurde.
+
+    Getauscht wird per os.replace - das ist nur deshalb unschaedlich, weil der
+    Dienst seit 1.3.20 seine Datei selbst ueber einen WatchedFileHandler
+    schreibt, der vor jeder Zeile den Inode prueft und die neue Datei oeffnet.
+    Bis 1.3.19 schrieb er ueber die Umleitung der Startwege weiter in den
+    alten, geloeschten Inode (Pruefung 29.09.2026, C5).
     """
     try:
         grenze = max(16, int(grenze_kb)) * 1024
@@ -1007,10 +1063,14 @@ def bluez_zugriff_hinweis():
 
 # Der Helfer, der das eingebaute Bluetooth einschaltet - EINE Quelle.
 #
-# Er liegt bewusst AUSSERHALB des Plugin-Ordners: postroot.sh schreibt ihn
-# dorthin (root, 0755), und /etc/sudoers.d/ble_scanner_ng nennt genau diesen
-# Pfad ohne Argumente. Eine sudo-Regel auf eine Datei unter bin/ waere ein Weg
-# nach Root, weil dieses Verzeichnis loxberry gehoert (Regeln/06).
+# Er liegt AUSSERHALB des Plugin-Ordners: postroot.sh schreibt ihn dorthin
+# (root, 0755), und /etc/sudoers.d/ble_scanner_ng nennt genau diesen Pfad mit
+# dem leeren Argument "" (seit 1.3.20: ohne Argumente). Das schuetzt vor
+# Versehen, nicht vor Missbrauch - BERICHTIGT IN 1.3.20 (Entscheidung 2 vom
+# 29.09.2026): loxberry ist ueber /etc/sudoers.d/lbdefaults ohnehin faktisch
+# root (systemctl, apt-get, dpkg ohne Kennwort); diese Regel begrenzt nichts.
+# Bis 1.3.19 stand hier, eine Regel auf bin/ waere "ein Weg nach Root" - als
+# gaebe es ohne sie keinen.
 #
 # Derselbe Pfad steht in drei weiteren Dateien - postroot.sh, sudoers/sudoers
 # und bl_test.php (bl_bt_helfer()). Die Selbstpruefung haelt sie gegeneinander;
@@ -1360,12 +1420,14 @@ class BlueZ:
     def aus_und_an(self):
         """Adapter aus- und wieder einschalten (Wachhund, Stufe 3).
 
-        Das darf der Dienst als Mitglied der Gruppe bluetooth; es ist
+        Das darf der Dienst ueber die D-Bus-Richtlinie von BlueZ; es ist
         dieselbe Eigenschaft, die einschalten() ohnehin setzt. Ein
-        'systemctl restart bluetooth' waere die naechste Stufe, braucht aber
-        eine sudo-Regel - eine systemweite Rechteaenderung durch ein Plugin
-        wird hier bewusst nicht gemacht. Das Protokoll nennt stattdessen den
-        Befehl, der helfen wuerde.
+        'systemctl restart bluetooth' waere die naechste Stufe. Der Dienst
+        ruft ihn nicht selbst auf - er startet bluetoothd fuer alle Programme
+        neu, und das entscheidet der Anwender. Das Protokoll nennt den Befehl.
+        (Berichtigt in 1.3.20: bis dahin hiess es, er braeuchte "eine
+        sudo-Regel, also eine systemweite Rechteaenderung" - loxberry darf
+        systemctl ueber lbdefaults ohnehin, Entscheidung 2 vom 29.09.2026.)
         """
         import dbus
         try:
@@ -1544,7 +1606,11 @@ class BlueZ:
 
         try:
             if not bool(props.Get(DEVICE_IF, "Connected")):
-                geraet.Connect()
+                # Mit Zeitgrenze (seit 1.3.20, Pruefung 29.09.2026, C14): ohne
+                # sie wartet dbus-python die Vorgabe von 25 s, und so lange
+                # steht die Auswertung. Der Wert gilt auch fuer das Warten auf
+                # ServicesResolved unten.
+                geraet.Connect(timeout=zeitgrenze)
                 verbunden_von_uns = True
             ende = time.time() + zeitgrenze
             while time.time() < ende:

@@ -7,13 +7,14 @@ PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 PVERSION=$4   # Forth argument is Plugin version
 #LBHOMEDIR=$5 # Comes from /etc/environment now.
-# Rueckfall, falls sudo die Umgebung ausgeraeumt hat (env_reset) - dieselben
-# Zeilen wie in preupgrade.sh und postupgrade.sh; das fuenfte Argument ist
-# das Wurzelverzeichnis.
-LBPLOG="${LBPLOG:-$5/log/plugins}"
-LBPCONFIG="${LBPCONFIG:-$5/config/plugins}"
-LBPDATA="${LBPDATA:-$5/data/plugins}"
-LBPBIN="${LBPBIN:-$5/bin/plugins}"
+# EINE Wurzel (seit 1.3.20, Regeln/06; Pruefung 29.09.2026, B8) - dieselben
+# Zeilen wie in preupgrade.sh und postupgrade.sh. Bis 1.3.19 galt die
+# LB-Umgebung vor dem fuenften Argument, NETZ_BASE unten aber $5 zuerst.
+BASE="${5:-$LBHOMEDIR}"
+LBPLOG="$BASE/log/plugins"
+LBPCONFIG="$BASE/config/plugins"
+LBPDATA="$BASE/data/plugins"
+LBPBIN="$BASE/bin/plugins"
 
 # --- Ohne brauchbare Wurzel wird nichts angefasst ---------------------------
 #
@@ -41,6 +42,10 @@ PBIN=$LBPBIN/$PDIR
 mkdir -p "$PLOG" "$PDATA" "$PCONFIG"
 touch "$PLOG/$PSHNAME.log"
 chown loxberry:loxberry "$PLOG/$PSHNAME.log"
+# Seit 1.3.20 leiten die Startwege nur noch in diese Datei um (Pruefung
+# 29.09.2026, C5); das Protokoll schreibt der Dienst selbst.
+touch "$PLOG/ble_scanner_ng_start.log"
+chown loxberry:loxberry "$PLOG/ble_scanner_ng_start.log" 2>/dev/null
 
 # --- BLE-Scanner NG ---------------------------------------------------------
 # Ausfuehrbar machen. Ohne das startet der Daemon beim Systemstart nicht.
@@ -102,9 +107,14 @@ dienst_pid() {
 
 dienst_starten() {
     mkdir -p "$PLOG" "$PDATA" 2>/dev/null
-    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng.log" 2>&1 &
+    # Nur in die Startdatei (seit 1.3.20, C5): das Protokoll oeffnet der
+    # Dienst selbst; eine Umleitung in dieselbe Datei schrieb nach der ersten
+    # Kappung in einen geloeschten Inode.
+    nohup "$PBIN/ble_scanner_ng.py" >> "$PLOG/ble_scanner_ng_start.log" 2>&1 &
     echo $! > "$PDATA/dienst.pid"
-    sleep 2
+    # Drei Sekunden (Regeln/03: an Python gemessen, eine reichte auf dem Pi
+    # nicht, bis ein sofort abbrechender Dienst tot war).
+    sleep 3
     # Geprueft wird die WIRKUNG, nicht der Rueckgabewert von nohup - der ist
     # immer 0.
     if P=$(dienst_pid); then
@@ -234,7 +244,7 @@ fi
 # Datei aendert, ohne die Summe hier mitzuziehen, legt den Rettungsweg still
 # lahm - ohne jede Meldung. In 1.3.0 sind Schluessel dazugekommen, die Summe
 # ist entsprechend neu.
-NETZ_BASE="${5:-$LBHOMEDIR}"
+NETZ_BASE="$BASE"
 NETZ_PDIR="${3:-ble_scanner_ng}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 
@@ -323,42 +333,31 @@ netz_zurueck "ble_scanner_ng.cfg" "1310ac7910fdf451128de437f2b5b345e3a225924ba18
 # lief hier als "Neuinstallation" durch. Begruendung und Messung stehen in
 # preupgrade.sh.
 MERK_UPGRADE="$PDATA.upgrade_laeuft"
+MERK_SOLL="$PDATA.soll_laufen"
 
-# Ein liegengebliebener Merker eines abgebrochenen Upgrades darf eine echte
-# Neuinstallation nicht als Upgrade ausweisen - sonst startet den Dienst
-# niemand. Er gilt eine Stunde; ein Upgrade dauert Sekunden bis Minuten.
-merker_frisch() {
-    [ -f "$1" ] || return 1
-    _dann=$(cat "$1" 2>/dev/null)
-    case "$_dann" in
-        ''|*[!0-9]*) return 1 ;;   # leer oder keine Zahl: nicht vertrauen
-    esac
-    # BERICHTIGT IN 1.3.17: ohne lesbare Uhr faellt dieser Schutz GESCHLOSSEN
-    # aus - die Marke gilt, und hier wird nichts gestartet (CLAUDE.md 4).
-    # Bis 1.3.16 stand hier "$(date +%s) || return 1": eine date-Attrappe, die
-    # nichts ausgibt und mit 0 endet (unter Last kann ein fork scheitern),
-    # lieferte eine leere Zeichenkette, die Schale rechnete damit als 0, das
-    # Alter wurde negativ, die Bedingung fiel durch - und postinstall.sh hielt
-    # ein laufendes Upgrade fuer eine Neuinstallation und startete den Dienst
-    # mitten darin. In WSL gemessen (18.09.2026, Fall h1): 1 Prozess statt 0.
-    _jetzt=$(date +%s 2>/dev/null)
-    case "$_jetzt" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
-    # 300 s Vorlauf (seit 1.3.19, Muster 8): eine Marke bis fuenf Minuten in
-    # der Zukunft gilt - die Uhr kann zwischen zwei Aufrufen nachgestellt
-    # werden. Bis 1.3.18 fiel sie dann durch, und der Dienst startete mitten
-    # im Upgrade (Fall M2).
-    [ $((_jetzt - _dann)) -lt 3600 ] && [ $((_jetzt - _dann)) -ge -300 ]
-}
-
-if merker_frisch "$MERK_UPGRADE"; then
+# BERICHTIGT IN 1.3.20 (Entscheidung 1 vom 29.09.2026; Pruefung B6): ob dies
+# ein Upgrade ist, entscheidet allein, ob die Marke DA ist - kein
+# Altersvergleich. Bis 1.3.19 galt sie nur eine Stunde; ein Upgrade mit mehr
+# als einer Stunde zwischen preupgrade.sh und diesem Skript galt als
+# Neuinstallation und startete auch einen bewusst angehaltenen Dienst (in
+# WSL gemessen, Faelle E7/E7B). Eine liegengebliebene Marke eines
+# abgebrochenen Laufs raeumt preinstall.sh nicht weg - sie gehoert zu einem
+# Upgrade, und das Upgrade raeumt sie in postupgrade.sh ab; die Deinstallation
+# ebenso. Die Startsperre in daemon/daemon und im Waechter behaelt ihre
+# Stunde: dort darf eine vergessene Marke den Dienst nicht fuer immer
+# stilllegen.
+if [ -f "$MERK_UPGRADE" ]; then
     echo "<INFO> Upgrade - der Dienst wird von postupgrade.sh gestartet."
 elif P=$(dienst_pid); then
     echo "<INFO> Es laeuft schon ein Dienst (PID $P) - es wird keiner gestartet."
 else
     echo "<INFO> Neuinstallation - der Dienst wird gestartet."
-    dienst_starten
+    # Ein Sollmerker "angehalten" aus einer frueheren Installation gilt fuer
+    # diese nicht (die Deinstallation raeumt ihn sonst ab). Er faellt erst,
+    # wenn der Dienst laeuft (Regeln/03, "erst nach erfolgreicher Pruefung").
+    if dienst_starten; then
+        rm -f "$MERK_SOLL" 2>/dev/null
+    fi
 fi
 
 # --- Schlusswort: Anleitung nur, wo sie stimmt ------------------------------
@@ -369,7 +368,7 @@ fi
 # (Fall E1; Regeln/06, "Nach einer Aktualisierung darf der Schlusstext nicht
 # zur Erstinstallation raten"). Entschieden wird nach INHALT: steht eine
 # Tag-Zeile in der Konfiguration, ist sie eingerichtet.
-if merker_frisch "$MERK_UPGRADE"; then
+if [ -f "$MERK_UPGRADE" ]; then
     echo "<INFO> Die Einstellungen spielt postupgrade.sh gleich zurueck."
 elif grep -q '^tag[0-9][0-9]*=' "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null; then
     echo "<INFO> Die Einstellungen sind uebernommen (Tags eingetragen) - es ist nichts weiter zu tun."
