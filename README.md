@@ -1,11 +1,20 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.21
+Version 1.3.22
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.22
+
+Kopf wie alle Hausplugins: Statusübersicht über den Reitern, Zusammenfassung oben im ersten Reiter.
+
+* **Zusammenfassung** des Plugins in einem grünen Kasten oben im Reiter Einstellungen.
+* Die Statuskacheln über den Reitern (Dienst, anwesend, aktive Tags, Sekunden seit dem letzten
+  Empfang und seit dem letzten Abbild) bleiben, wie sie sind.
+* Nur Oberfläche; gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
 
 ## Neu in 1.3.21
 

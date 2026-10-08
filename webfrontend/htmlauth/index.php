@@ -974,6 +974,7 @@ if (class_exists('LBWeb', false)) {
 
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $bl_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
+<div class="sm-hinweis"><?= bl_t('TEXT.WAS_IST_DAS') ?></div>
 
 <?php /* EINE Legende oben im Reiter, genau mit den Farben, die hier als Knopf
          vorkommen: Gruen (Start, Suchen, Sichern) und Orange (Neustart,
