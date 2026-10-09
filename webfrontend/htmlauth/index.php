@@ -1387,11 +1387,14 @@ if ($bl_sich_warn) { ?>
 // Grenze fuer das Alter des Lebenszeichens: server/ts kommt seit 1.3.20
 // hoechstens alle 30 s, bei langem Takt einmal je Durchlauf - viermal das.
 $bl_ts_grenze = 4 * max(30, (int) bl_cfg($bl_cfg, 'intervall', '5'));
+// X-10 (1.3.23): Bausteine ohne Eingang mit Bemerkung in der Form "&mdash; (...)",
+// die Werkzeuge/leitungen_setzen.py als "kein Eingang" liest.
+$bl_gw = '&mdash; (' . bl_e(bl_t('BAUSTEIN.VOM_GATEWAY')) . ')';
 $bl_bausteine = array(
-    array('BAUSTEIN.VI', $bl_praefix . '_server_online',   'BAUSTEIN.DIGITAL',       'BAUSTEIN.VOM_GATEWAY'),
-    array('BAUSTEIN.VI', $bl_praefix . '_server_ok',       'BAUSTEIN.DIGITAL',       'BAUSTEIN.VOM_GATEWAY'),
-    array('BAUSTEIN.VI', $bl_praefix . '_server_ts',       'BAUSTEIN.ANALOG_ZEIT',   'BAUSTEIN.VOM_GATEWAY'),
-    array('BAUSTEIN.VI', $bl_praefix . '_summary_present', 'BAUSTEIN.ANALOG_ANZAHL', 'BAUSTEIN.VOM_GATEWAY'),
+    array('BAUSTEIN.VI', $bl_praefix . '_server_online',   'BAUSTEIN.DIGITAL',       $bl_gw),
+    array('BAUSTEIN.VI', $bl_praefix . '_server_ok',       'BAUSTEIN.DIGITAL',       $bl_gw),
+    array('BAUSTEIN.VI', $bl_praefix . '_server_ts',       'BAUSTEIN.ANALOG_ZEIT',   $bl_gw),
+    array('BAUSTEIN.VI', $bl_praefix . '_summary_present', 'BAUSTEIN.ANALOG_ANZAHL', $bl_gw),
     array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_present',    'BAUSTEIN.DIGITAL_JE_TAG', '&mdash;'),
     array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_last_seen_ts', 'BAUSTEIN.ANALOG_ZEIT', '&mdash;'),
     // ACHTUNG, wer hier einfuegt: die Bausteine verweisen mit ihrer NUMMER
