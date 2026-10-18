@@ -1,11 +1,23 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.25
+Version 1.3.26
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.26
+
+Pflege ohne neues Verhalten: Oberfläche, Loxone-Vorlage, Dienst und MQTT sind unverändert.
+
+* **Kein Neuimport nötig** – die Vorlage ist bytegleich mit 1.3.25, im eigenen Loxone-Projekt ändert sich
+  nichts.
+* Aufgeräumt: der Messwert-Katalog (aus `SENSORTHEMEN` in `bin/bl_beacon.py`) trägt die Beschreibung nicht
+  mehr mit. Sie war nur für die mit 1.3.25 entfernte Funktion `bl_sensor_text()` gedacht; die Beschriftung
+  eines Messwerts kommt aus der Sprachdatei. Grenzen und Einheiten liest das Plugin weiter aus derselben
+  Liste, die Prüfzeile im Reiter Test vergleicht sie wie bisher mit dem eingebauten Rückfall.
+* Gerendert unter PHP 7.4, 8.4 und 8.5 (Seiten unverändert), nicht am Gerät angesehen.
 
 ## Neu in 1.3.25
 

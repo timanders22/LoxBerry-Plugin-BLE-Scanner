@@ -1538,21 +1538,21 @@ function bl_sensorthemen_lesen()
     }
     $out = array();
     // "temperatur":  ("Temperatur", "°C", -45, 90),
-    $muster = '/"([a-z_0-9]+)"\s*:\s*\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,'
+    // Die Beschreibung (zweites Feld) muss passen, damit die Zeile erkannt
+    // wird, gefangen wird sie nicht mehr: bis 1.3.25 hielt der Katalog sie
+    // als Feld ersatz fuer bl_sensor_text(), den Rueckfall bei fehlendem
+    // Sprachschluessel. Der Helfer wurde nie aufgerufen und ist seit 1.3.25
+    // weg, das Feld seit 1.3.26. Die Beschriftung kommt aus THEMA.S_<NAME>.
+    $muster = '/"([a-z_0-9]+)"\s*:\s*\(\s*"[^"]*"\s*,\s*"([^"]*)"\s*,'
             . '\s*(-?[0-9]+)\s*,\s*(-?[0-9]+)\s*\)/u';
     if (preg_match_all($muster, $m[1], $treffer, PREG_SET_ORDER)) {
         foreach ($treffer as $t) {
             $out[$t[1]] = array(
-                // Der Sprachschluessel zuerst; fehlt er, traegt die
-                // Beschreibung aus der Python-Datei. So bleibt eine neu
-                // dazugekommene Groesse lesbar, auch bevor jemand sie
-                // uebersetzt hat.
                 's'       => 'THEMA.S_' . strtoupper($t[1]),
-                'ersatz'  => $t[2],
                 'art'     => 'analog',
-                'einheit' => $t[3],
-                'min'     => (int) $t[4],
-                'max'     => (int) $t[5],
+                'einheit' => $t[2],
+                'min'     => (int) $t[3],
+                'max'     => (int) $t[4],
             );
         }
     }
