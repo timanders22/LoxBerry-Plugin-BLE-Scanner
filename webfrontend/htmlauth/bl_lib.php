@@ -1560,21 +1560,6 @@ function bl_sensorthemen_lesen()
 }
 
 /**
- * Beschriftung eines Messwerts: Sprachdatei zuerst, sonst der Text aus
- * bl_beacon.py. bl_t() gibt bei unbekanntem Schluessel den Schluessel
- * zurueck - daran ist die Luecke zu erkennen. So bleibt eine Groesse, die in
- * SENSORTHEMEN neu dazukommt, sofort lesbar, auch bevor sie uebersetzt ist.
- */
-function bl_sensor_text($info)
-{
-    $t = bl_t($info['s']);
-    if ($t === $info['s'] && !empty($info['ersatz'])) {
-        return $info['ersatz'];
-    }
-    return $t;
-}
-
-/**
  * Welche Messwerte hat DIESER Tag wirklich geliefert?
  *
  * Gemessen aus dem Abbild des Dienstes, nicht geraten. Der Grund steht in

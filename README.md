@@ -1,11 +1,27 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.24
+Version 1.3.25
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.25
+
+Textnachzug zur Seite „BLE-Scanner NG Tags“ aus dem LoxBerry-Plugins Musterprojekt: ein Texteingang, den ein
+Statustext bisher nur nannte, ist jetzt angeschlossen.
+
+* **Status „Person 1 mit WLAN (BLE)“ (Nr. 13):** zeigt, worüber die Person erkannt wurde. Die Zeile V1 heißt
+  „zu Hause (erkannt über `<v2>`)“, an V2 liegt Nr. 12, der Virtuelle Texteingang
+  `blescanner_person_Person1_quelle` (ble, wlan oder ble+wlan). Bisher stand dort nur der Hinweis, die Quelle
+  stehe in diesem Texteingang.
+* **Kein Neuimport nötig** – Vorlage und Dienst sind unverändert. Wer die Seite schon gebaut hat, legt im
+  eigenen Projekt `blescanner_person_Person1_quelle` an V2 des Status und passt den Text der Zeile V1 an.
+* Bild der Seite „BLE-Scanner NG Tags“ neu aus dem Musterprojekt.
+* Aufgeräumt: die nie aufgerufene Funktion `bl_sensor_text()` ist entfernt; NOTICE nennt die Änderungen bis
+  1.3.25.
+* Gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
 
 ## Neu in 1.3.24
 
