@@ -462,6 +462,10 @@ def beschriftung(gedeutet):
 # Themennamen der Sensorwerte. Die Oberflaeche und die Loxone-Vorlage lesen
 # diese Liste - so kann sie nicht von dem abweichen, was hier entsteht.
 # Reihenfolge: Thema -> (Beschreibung, Einheit, MinVal, MaxVal)
+# Die Beschreibung ist nur Lesehilfe fuer diese Datei: seit 1.3.25 liest
+# sie niemand mehr (PHP ueberspringt sie, Python fragt nur die Themennamen
+# ab). Sie muss trotzdem stehen bleiben - bl_sensorthemen_lesen() erkennt
+# eine Zeile nur in genau dieser Tupelform mit vier Feldern.
 #
 # DIESER SATZ WAR BIS 1.3.13 FALSCH. Gemessen am 13.09.2026: keine einzige
 # PHP-Datei las diese Liste (null Treffer fuer "SENSORTHEMEN" im ganzen
@@ -477,9 +481,12 @@ def beschriftung(gedeutet):
 #
 # Wer hier eine Groesse ergaenzt: Sprachschluessel THEMA.S_<NAME> in
 # language_de.ini und language_en.ini anlegen und den Rueckfall in
-# bl_sensor_rueckfall() mitziehen. Fehlt der Sprachschluessel, traegt die
-# Beschreibung aus dieser Zeile; fehlt der Rueckfalleintrag, meldet es die
-# Pruefzeile.
+# bl_sensor_rueckfall() mitziehen. Fehlt der Sprachschluessel, zeigt die
+# Oberflaeche den englischen Text und, fehlt auch der, den Schluessel
+# THEMA.S_<NAME> roh (bl_t() in bl_lib.php) - die Beschreibung aus dieser
+# Zeile springt nicht ein (das versprach dieser Satz bis 1.3.26; der
+# Rueckfall bl_sensor_text() wurde nie aufgerufen und ist seit 1.3.25
+# weg). Fehlt der Rueckfalleintrag, meldet es die Pruefzeile.
 SENSORTHEMEN = {
     "temperatur":  ("Temperatur", "°C", -45, 90),
     "feuchte":     ("Relative Luftfeuchte", "%", 0, 100),
