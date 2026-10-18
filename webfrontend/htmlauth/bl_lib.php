@@ -1425,7 +1425,9 @@ function bl_miniserver()
  * 'min'/'max'  echte Grenzen. Loxone zieht daraus Reglergrenzen und
  *              Plausibilitaetspruefung; pauschale +-2147483647 verschenken
  *              beides.
- * 'einheit' erscheint als Unit="<v.1> ..." in der Vorlage.
+ * 'einheit' erscheint als Unit="<v.0> ..." in der Vorlage - <v.1> nur bei
+ *              distance und den Messwerten temperatur/feuchte/druck
+ *              (bl_vorlage_stellen(), seit 1.3.24).
  */
 function bl_status_themen()
 {
@@ -1997,7 +1999,11 @@ function bl_xml_virtual_in_http($kopf, $cmds)
         $min = isset($c['min']) && $c['min'] !== null ? $c['min'] : 0;
         $max = isset($c['max']) && $c['max'] !== null ? $c['max'] : 100;
         $einheit = isset($c['einheit']) ? trim((string) $c['einheit']) : '';
-        $unit = $einheit === '' ? '<v.1>' : '<v.1> ' . $einheit;
+        // Seit 1.3.24 (Welle Bild 19, Entwurf bl E13) traegt der Befehl seine
+        // Nachkommastellen selbst: ganze Zahlen <v.0>, Messwerte mit Komma <v.1>.
+        // Ohne Angabe bleibt es bei <v.1> wie bis 1.3.23.
+        $stellen = isset($c['stellen']) ? (int) $c['stellen'] : 1;
+        $unit = '<v.' . $stellen . '>' . ($einheit === '' ? '' : ' ' . $einheit);
         $o .= "\t" . '<VirtualInHttpCmd ';
         $o .= 'Title="' . bl_x($c['title']) . '" ';
         $o .= 'Comment="' . bl_x(isset($c['comment']) ? $c['comment'] : '') . '" ';
@@ -2068,6 +2074,54 @@ function bl_kommentar($bez, $kurz)
     return $bez . ' ' . $kurz;
 }
 
+/** Nachkommastellen eines Vorlagenbefehls (seit 1.3.24, Entwurf bl E13): nur Messwerte
+ *  mit Komma tragen <v.1>, alles andere sind ganze Zahlen (0/1, Zaehler, Sekunden,
+ *  Zeitstempel, dBm, Prozent der Batterie). */
+function bl_vorlage_stellen($schluessel)
+{
+    return in_array((string) $schluessel,
+                    array('distance', 'sensor/temperatur', 'sensor/feuchte', 'sensor/druck'), true) ? 1 : 0;
+}
+
+/** Die Personen der aktiven Tags (Zusatzangabe "person"), in Tag-Reihenfolge und so
+ *  gesaeubert wie im Dienst (thema_saeubern) - daraus werden die Themen person/<P>/... */
+function bl_personen($tags)
+{
+    $aus = array();
+    foreach ($tags as $tag) {
+        if (!isset($tag['aktiv']) || $tag['aktiv'] !== '1') {
+            continue;
+        }
+        $pn = isset($tag['opt']['person']) ? bl_saeubern(trim((string) $tag['opt']['person'])) : '';
+        if ($pn !== '' && !in_array($pn, $aus, true)) {
+            $aus[] = $pn;
+        }
+    }
+    return $aus;
+}
+
+/** "Anna_Handy=Anna, Bernd=Bernd" -> array(array('Anna_Handy', 'Anna'), ...) - dieselbe
+ *  Regel wie wlan_zuordnung_lesen() in bin/bl_common.py: ein Paar, das nicht so aussieht,
+ *  wird uebergangen, doppelte Namen: das erste Paar gilt, hoechstens 20. */
+function bl_wlan_zuordnung($text)
+{
+    $aus = array();
+    $wl = array();
+    $pe = array();
+    foreach (explode(',', (string) $text) as $stueck) {
+        if (!preg_match('/^([A-Za-z0-9_-]{1,40})\s*=\s*([A-Za-z0-9_-]{1,40})$/', trim($stueck), $m)) {
+            continue;
+        }
+        if (isset($wl[$m[1]]) || isset($pe[$m[2]])) {
+            continue;
+        }
+        $wl[$m[1]] = true;
+        $pe[$m[2]] = true;
+        $aus[] = array($m[1], $m[2]);
+    }
+    return array_slice($aus, 0, 20);
+}
+
 function bl_vorlage($cfg, $tags)
 {
     $praefix = bl_cfg($cfg, 'themenpraefix', 'blescanner');
@@ -2086,6 +2140,7 @@ function bl_vorlage($cfg, $tags)
             'check'   => ' ',
             'min'     => $info['min'], 'max' => $info['max'],
             'einheit' => $info['einheit'],
+            'stellen' => bl_vorlage_stellen($thema),
             // Frage 6 (Bauliste 29.09.2026): present gilt nur zusammen mit
             // server/online - der Hinweis steht an beiden Eingaengen.
             'hint'    => $thema === 'server/online' ? bl_t('VORLAGE.HINT_ONLINE') : '',
@@ -2123,7 +2178,47 @@ function bl_vorlage($cfg, $tags)
                 'check'   => ' ',
                 'min'     => $info['min'], 'max' => $info['max'],
                 'einheit' => $info['einheit'],
+                'stellen' => bl_vorlage_stellen($schluessel),
                 'hint'    => $schluessel === 'present' ? bl_t('VORLAGE.HINT_PRESENT') : '',
+            );
+        }
+    }
+
+    // NEU IN 1.3.24 (Welle Bild 19, Entwurf bl E13): die Personenthemen.
+    // person/<P>/present ist im Dienst das ODER ueber die aktiven Tags der
+    // Person (Zusatzangabe "person") - der natuerliche Anwesenheitsweg; bis
+    // 1.3.23 fehlte er in der Vorlage, wer ihn nutzen wollte, legte die
+    // Eingaenge von Hand an. Dieselbe Regel wie im Dienst: Personen aus den
+    // aktiven Tags (thema_saeubern), anwesend_gesamt je Paar der Zuordnung
+    // nur bei eingeschalteter Kopplung (wlan_zusammenfuehren). quelle ist
+    // Text und bleibt wie alle Textthemen draussen. Bestehende Importe bleiben
+    // gueltig: die Titel der uebrigen Befehle aendern sich nicht.
+    $personen = bl_personen($tags);
+    $gekoppelt = array();
+    if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
+        foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) {
+            $gekoppelt[] = $paar[1];
+        }
+    }
+    foreach (array_merge($personen, array_values(array_diff($gekoppelt, $personen))) as $pn) {
+        $themen = array();
+        if (in_array($pn, $personen, true)) {
+            $themen['present'] = array(0, 1, bl_t('VORLAGE.HINT_PRESENT'));
+            $themen['last_seen_ts'] = array(0, 2147483647, '');
+        }
+        if (in_array($pn, $gekoppelt, true)) {
+            $themen['anwesend_gesamt'] = array(0, 1, '');
+            $uebersprungen[] = $praefix . '/person/' . $pn . '/quelle';
+        }
+        foreach ($themen as $k => $w) {
+            $cmds[] = array(
+                'title'   => $praefix . '_person_' . $pn . '_' . $k,
+                'comment' => bl_kommentar($pn, bl_kurz('person/' . $k)),
+                'check'   => ' ',
+                'min'     => $w[0], 'max' => $w[1],
+                'einheit' => '',
+                'stellen' => 0,
+                'hint'    => $w[2],
             );
         }
     }
@@ -2136,6 +2231,187 @@ function bl_vorlage($cfg, $tags)
         'hint'    => '',
     ), $cmds);
     return array('VI_BLE-Scanner-NG.xml', $inhalt, count($cmds), $uebersprungen);
+}
+
+/**
+ * Die Baustein-Listen des Reiters "Einbindung in Loxone", Schritt 7 - Welle Bild 19 (1.3.24, Hausherr
+ * 11.10.2026: Vollausstattung, ein absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf
+ * Welle 19 bl, E1-E16, 18.10.2026). DREI Seiten wie im LoxBerry-Plugins Musterprojekt
+ * (Musterprojekt/baustein_listen.txt, Abschnitte "BLE-Scanner NG" 27, "BLE-Scanner NG Tags" 15,
+ * "BLE-Scanner NG Messwerte" 13 Zeilen). Bis 1.3.23 stand dort EINE Liste mit 19 Zeilen und darunter eine
+ * Messwert-Tabelle. Berichtigt gegen sie: "Abwesenheit gilt" war ein UND hinter einer Flankenerkennung,
+ * also ein Impuls von 1 s und kein Zustand; die Formeln "Wie lange schon weg" und "Alter des
+ * Lebenszeichens" hatten keinen Zeiteingang und erkannten einen stehenden server_ts nie (jetzt
+ * Analogwertvalidierung); das ODER "I1 bis In" je Tag ist jetzt person/<P>/present je Person.
+ *
+ * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge"
+ * (Zeilen mit Prozentzeichen dort doppelt und ueber sprintf() geholt, angezeigt mit einem; deutsch
+ * wortgleich mit der Liste; Bausteinnamen auch englisch deutsch). DIE NAMEN WERDEN GERECHNET, NICHT
+ * ABGESCHRIEBEN (bl_bausteinliste_ersatz()): mit Werkseinstellung und ohne Tags steht genau die Liste da.
+ * Keine Leitung geht ueber eine Seitengrenze; blescanner_server_online steht auf Seite 3 als weitere
+ * Instanz.
+ *
+ * Rueckgabe: Liste von array('nr', 'seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter,
+ * Eingaenge), ...), 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (beim Ausgeben maskiert),
+ * die Hinweise freigegebenes HTML aus der Sprachdatei.
+ */
+function bl_bausteinliste($cfg, $tags)
+{
+    $ersatz = bl_bausteinliste_ersatz($cfg, $tags);
+    // Nummer, Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
+    $seiten = array(
+        array(1, 'BLE-Scanner NG', 'einbindung_loxone.png', array(
+            bl_t('BAUSTEIN.Z1_01'),
+            bl_t('BAUSTEIN.Z1_02'),
+            bl_t('BAUSTEIN.Z1_03'),
+            bl_t('BAUSTEIN.Z1_04'),
+            bl_t('BAUSTEIN.Z1_05'),
+            bl_t('BAUSTEIN.Z1_06'),
+            bl_t('BAUSTEIN.Z1_07'),
+            bl_t('BAUSTEIN.Z1_08'),
+            bl_t('BAUSTEIN.Z1_09'),
+            bl_t('BAUSTEIN.Z1_10'),
+            bl_t('BAUSTEIN.Z1_11'),
+            bl_t('BAUSTEIN.Z1_12'),
+            bl_t('BAUSTEIN.Z1_13'),
+            bl_t('BAUSTEIN.Z1_14'),
+            bl_t('BAUSTEIN.Z1_15'),
+            bl_t('BAUSTEIN.Z1_16'),
+            bl_t('BAUSTEIN.Z1_17'),
+            bl_t('BAUSTEIN.Z1_18'),
+            bl_t('BAUSTEIN.Z1_19'),
+            bl_t('BAUSTEIN.Z1_20'),
+            bl_t('BAUSTEIN.Z1_21'),
+            bl_t('BAUSTEIN.Z1_22'),
+            bl_t('BAUSTEIN.Z1_23'),
+            bl_t('BAUSTEIN.Z1_24'),
+            bl_t('BAUSTEIN.Z1_25'),
+            bl_t('BAUSTEIN.Z1_26'),
+            bl_t('BAUSTEIN.Z1_27'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE1_SCHRITT1'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT2'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT3'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT4'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT5'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT6'),
+            bl_t('BAUSTEIN.SEITE1_SCHRITT7'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE1_H1'),
+            bl_t('BAUSTEIN.SEITE1_H2'),
+            bl_t('BAUSTEIN.SEITE1_H3'),
+            bl_t('BAUSTEIN.SEITE1_H4'),
+            bl_t('BAUSTEIN.SEITE1_H5'),
+            bl_t('BAUSTEIN.SEITE1_H6'),
+            bl_t('BAUSTEIN.SEITE1_H7'),
+            bl_t('BAUSTEIN.SEITE1_H8'),
+        )),
+        array(2, 'BLE-Scanner NG Tags', 'einbindung_loxone_tags.png', array(
+            bl_t('BAUSTEIN.Z2_01'),
+            bl_t('BAUSTEIN.Z2_02'),
+            bl_t('BAUSTEIN.Z2_03'),
+            bl_t('BAUSTEIN.Z2_04'),
+            bl_t('BAUSTEIN.Z2_05'),
+            sprintf(bl_t('BAUSTEIN.Z2_06')),
+            sprintf(bl_t('BAUSTEIN.Z2_07')),
+            bl_t('BAUSTEIN.Z2_08'),
+            bl_t('BAUSTEIN.Z2_09'),
+            bl_t('BAUSTEIN.Z2_10'),
+            bl_t('BAUSTEIN.Z2_11'),
+            bl_t('BAUSTEIN.Z2_12'),
+            bl_t('BAUSTEIN.Z2_13'),
+            bl_t('BAUSTEIN.Z2_14'),
+            bl_t('BAUSTEIN.Z2_15'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE2_SCHRITT1'),
+            bl_t('BAUSTEIN.SEITE2_SCHRITT2'),
+            bl_t('BAUSTEIN.SEITE2_SCHRITT3'),
+            bl_t('BAUSTEIN.SEITE2_SCHRITT4'),
+            bl_t('BAUSTEIN.SEITE2_SCHRITT5'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE2_H1'),
+            bl_t('BAUSTEIN.SEITE2_H2'),
+            bl_t('BAUSTEIN.SEITE2_H3'),
+        )),
+        array(3, 'BLE-Scanner NG Messwerte', 'einbindung_loxone_messwerte.png', array(
+            bl_t('BAUSTEIN.Z3_01'),
+            bl_t('BAUSTEIN.Z3_02'),
+            sprintf(bl_t('BAUSTEIN.Z3_03')),
+            sprintf(bl_t('BAUSTEIN.Z3_04')),
+            bl_t('BAUSTEIN.Z3_05'),
+            bl_t('BAUSTEIN.Z3_06'),
+            sprintf(bl_t('BAUSTEIN.Z3_07')),
+            bl_t('BAUSTEIN.Z3_08'),
+            bl_t('BAUSTEIN.Z3_09'),
+            bl_t('BAUSTEIN.Z3_10'),
+            bl_t('BAUSTEIN.Z3_11'),
+            bl_t('BAUSTEIN.Z3_12'),
+            bl_t('BAUSTEIN.Z3_13'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE3_SCHRITT1'),
+            bl_t('BAUSTEIN.SEITE3_SCHRITT2'),
+            bl_t('BAUSTEIN.SEITE3_SCHRITT3'),
+            bl_t('BAUSTEIN.SEITE3_SCHRITT4'),
+            bl_t('BAUSTEIN.SEITE3_SCHRITT5'),
+        ), array(
+            bl_t('BAUSTEIN.SEITE3_H1'),
+            bl_t('BAUSTEIN.SEITE3_H2'),
+            bl_t('BAUSTEIN.SEITE3_H3'),
+        )),
+    );
+    $aus = array();
+    foreach ($seiten as $bl_s) {
+        $bl_zeilen = array();
+        foreach ($bl_s[3] as $bl_i => $bl_z) {
+            $bl_zeilen[] = array_merge(array($bl_i + 1),
+                                       array_pad(explode(' | ', strtr($bl_z, $ersatz), 4), 4, ''));
+        }
+        $bl_tr = function ($x) use ($ersatz) { return strtr($x, $ersatz); };
+        $aus[] = array('nr' => $bl_s[0], 'seite' => $bl_s[1], 'bild' => $bl_s[2], 'zeilen' => $bl_zeilen,
+                       'schritte' => array_map($bl_tr, $bl_s[4]), 'hinweise' => array_map($bl_tr, $bl_s[5]));
+    }
+    return $aus;
+}
+
+/**
+ * Was in den Listen gerechnet wird (Entwurf bl Abschnitt 4): die Liste traegt die Namen des Musterprojekts
+ * (Praefix blescanner, Personen Person1/Person2, Alias schluessel1 und thermometer_wohnzimmer, Tmc 120 s).
+ * Eingesetzt werden das Praefix aus dem Reiter MQTT, die erste und zweite Person der aktiven Tags, der
+ * Themenzweig (Alias oder Adresse) des ersten aktiven Tags mit Person und des ersten mit Messwerten, und
+ * Tmc = 4 x max(30, Intervall) - so wie der Dienst server/ts sendet (hoechstens alle 30 s, bei langem
+ * Takt einmal je Durchlauf). Rueckgabe: Tabelle fuer strtr() (alle Ersetzungen in einem Durchgang).
+ */
+function bl_bausteinliste_ersatz($cfg, $tags)
+{
+    $praefix = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    if ($praefix === '') {
+        $praefix = 'blescanner';
+    }
+    $personen = bl_personen($tags);
+    $schluessel = '';
+    $thermo = '';
+    foreach ($tags as $tag) {
+        if (!isset($tag['aktiv']) || $tag['aktiv'] !== '1') {
+            continue;
+        }
+        $pn = isset($tag['opt']['person']) ? bl_saeubern(trim((string) $tag['opt']['person'])) : '';
+        if ($schluessel === '' && $pn !== '') {
+            $schluessel = bl_thema($tag);
+        }
+        if ($thermo === '' && bl_sensor_themen($tag['kennung'])) {
+            $thermo = bl_thema($tag);
+        }
+    }
+    $tmc = 4 * max(30, (int) bl_cfg($cfg, 'intervall', '5'));
+    return array(
+        'blescanner_'            => $praefix . '_',
+        'blescanner/#'           => $praefix . '/#',
+        'Person1'                => isset($personen[0]) ? $personen[0] : 'Person1',
+        'Person2'                => isset($personen[1]) ? $personen[1] : 'Person2',
+        'schluessel1'            => $schluessel !== '' ? $schluessel : 'schluessel1',
+        'thermometer_wohnzimmer' => $thermo !== '' ? $thermo : 'thermometer_wohnzimmer',
+        'Tmc 120 s'              => 'Tmc ' . $tmc . ' s',
+    );
 }
 
 /* ==================================================================

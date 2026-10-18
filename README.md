@@ -1,11 +1,46 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.23
+Version 1.3.24
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.24
+
+Einbindung in Loxone in Vollausstattung: drei Seiten aus dem LoxBerry-Plugins Musterprojekt mit drei Bildern
+und je einer Schritt-für-Schritt-Anleitung („So übernehmen Sie diese Seite“). Sie ersetzen im Reiter
+*Einbindung in Loxone*, Schritt 7, die Baustein-Liste mit 19 Zeilen und die Messwert-Tabelle.
+
+* **Seite „BLE-Scanner NG“** (27 Zeilen): läuft der Scanner, wer ist zu Hause? Störung aus dem Letzten Willen
+  `server/online`, „hört kein Bluetooth“ (`server/ok`) und dem Lebenszeichen `server/ts`
+  (Analogwertvalidierung, Tmc 120 s) mit 600 s Bestätigung und Meldung; Anwesenheit je Person aus
+  `person/<P>/present`, nur gültig mit `server/online`, 2 Minuten entprellt; die fertigen Schaltsignale
+  „Jemand zu Hause (BLE)“ und „Niemand zu Hause (BLE)“ (bei Störung 0 – eine tote Erkennung schaltet keine
+  Abwesenheitslogik), Kommen/Gehen-Impulse, zwei Status, Meldung „alle gegangen“.
+* **Seite „BLE-Scanner NG Tags“** (15 Zeilen): ein Schlüsselanhänger im Detail – Signalstufe, Signalstärke,
+  Entfernung, Batterie mit Meldung –, die Anwesenheit zusammen mit dem WiFi-Scanner NG und drei
+  Texteingänge.
+* **Seite „BLE-Scanner NG Messwerte“** (13 Zeilen): Xiaomi-Thermometer mit Temperatur und Feuchte
+  (Statistik), Batterie, Status und den Meldungen „Batterie schwach“ und „verstummt“.
+* Die Namen der Gateway-Eingänge rechnet die Tabelle aus den Einstellungen (Präfix, Person und Alias der
+  Tags, Tmc aus dem Intervall); ohne Tags stehen die Beispielnamen des Musterprojekts da. Spaltenkopf
+  „Name“ statt „Name (Vorschlag)“.
+* **Berichtigt – wer nach der bisherigen Liste gebaut hat, bitte ansehen:** „Abwesenheit gilt“ war ein UND
+  hinter einer Flankenerkennung und damit nur ein Impuls von einer Sekunde, kein Zustand; die Formeln „Wie
+  lange schon weg“ und „Alter des Lebenszeichens“ hatten keinen Eingang für die Uhrzeit und erkannten einen
+  hängenden Dienst deshalb nicht. Die Seiten lösen beides mit „Niemand zu Hause (BLE)“ und der
+  Analogwertvalidierung.
+* **Loxone-Vorlage** (Knopf „Vorlage für Loxone Config erzeugen“): neu je Person `person_<P>_present` und
+  `person_<P>_last_seen_ts`, mit eingeschalteter WLAN-Kopplung `person_<P>_anwesend_gesamt`; ganze Zahlen
+  tragen `<v.0>` statt `<v.1>` (Entfernung, Temperatur, Feuchte und Luftdruck bleiben `<v.1>`). Die Titel
+  aller übrigen Befehle bleiben gleich, bestehende Importe gelten weiter. **Neuimport:** wer die
+  Personen-Eingänge nutzen will, legt sie von Hand an (Name genau wie der Gateway-Name, z. B.
+  `blescanner_person_Person1_present`) – ein zweiter Import der Vorlage ergibt doppelte Eingänge; ein
+  frisches Projekt importiert die neue Vorlage. Der Dienst sendet unverändert.
+* Hilfe zu Einbindung und Ausfallerkennung angepasst. Gerendert unter PHP 7.4, 8.4 und 8.5, die Vorlage
+  gegen eine Attrappe erzeugt; nicht am Gerät angesehen.
 
 ## Neu in 1.3.23
 
@@ -1166,6 +1201,15 @@ getippten Zeilen nicht mehr weg.
 Der Reiter *Test* hat eine **Selbstprüfung**: je Zeile eine Frage mit Haken,
 Kreuz oder Strich. Ein Strich ist kein Haken — was nicht gemessen werden
 konnte, steht als Strich da.
+
+## Einbindung in Loxone
+
+Der Reiter *Einbindung in Loxone* führt Schritt für Schritt hin: Tags eintragen, Abo, Vorlage, und in
+Schritt 7 drei fertig verbundene Seiten mit Anleitung, Tabelle und Bild – „BLE-Scanner NG“ (Ausfall und
+Anwesenheit je Person), „BLE-Scanner NG Tags“ (ein Anhänger im Detail, WLAN-Kopplung) und „BLE-Scanner NG
+Messwerte“ (Thermometer). Die Bausteine stehen fertig verbunden im
+[LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt),
+einer gemeinsamen Projektdatei mit allen Plugin-Seiten und Vorlagen.
 
 ## MQTT-Themen
 

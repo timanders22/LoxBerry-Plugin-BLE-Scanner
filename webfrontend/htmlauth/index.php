@@ -814,6 +814,14 @@ if (class_exists('LBWeb', false)) {
 .sm-wrap, .sm-wrap *, .sm-tabs, .sm-tabs * { text-shadow: none !important; }
 .sm-wrap h2 { color: #6dac20; margin: 24px 0 10px; font-size: 1.15em; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
 .sm-wrap h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+/* Welle Bild 19 (1.3.24): Seiten, Schritte, Hinweise und Bild je Baustein-Liste (Bauart Sprachsteuerung 0.12.5). */
+.sm-wrap h4.sm-h4 { color: #4f7d17; font-size: 0.98em; font-weight: 700; margin: 22px 0 4px;
+    padding-top: 10px; border-top: 1px solid #e0e0e0; }
+.sm-schritte { margin: 6px 0 0 18px; padding: 0; }
+.sm-schritte li { margin: 3px 0; }
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
 .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
           padding: 9px 18px; font-size: 0.95em; color: #444 !important; text-decoration: none; display: inline-block; }
@@ -1378,93 +1386,48 @@ if ($bl_sich_warn) { ?>
 
 <h2><?= bl_e(bl_t('TEXT.BAUSTEINLISTE')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BAUSTEIN_EINLEITUNG')) ?></p>
-<div class="sm-breit">
-<table class="sm-tbl">
-<tr><th style="width:34px;">#</th><th style="width:170px;"><?= bl_e(bl_t('TEXT.SP_BAUSTEIN')) ?></th>
-<th style="width:210px;"><?= bl_e(bl_t('TEXT.SP_NAMENSVORSCHLAG')) ?></th>
-<th style="width:150px;"><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th><th><?= bl_e(bl_t('TEXT.SP_EINGAENGE')) ?></th></tr>
 <?php
-// Grenze fuer das Alter des Lebenszeichens: server/ts kommt seit 1.3.20
-// hoechstens alle 30 s, bei langem Takt einmal je Durchlauf - viermal das.
-$bl_ts_grenze = 4 * max(30, (int) bl_cfg($bl_cfg, 'intervall', '5'));
-// X-10 (1.3.23): Bausteine ohne Eingang mit Bemerkung in der Form "&mdash; (...)",
-// die Werkzeuge/leitungen_setzen.py als "kein Eingang" liest.
-$bl_gw = '&mdash; (' . bl_e(bl_t('BAUSTEIN.VOM_GATEWAY')) . ')';
-$bl_bausteine = array(
-    array('BAUSTEIN.VI', $bl_praefix . '_server_online',   'BAUSTEIN.DIGITAL',       $bl_gw),
-    array('BAUSTEIN.VI', $bl_praefix . '_server_ok',       'BAUSTEIN.DIGITAL',       $bl_gw),
-    array('BAUSTEIN.VI', $bl_praefix . '_server_ts',       'BAUSTEIN.ANALOG_ZEIT',   $bl_gw),
-    array('BAUSTEIN.VI', $bl_praefix . '_summary_present', 'BAUSTEIN.ANALOG_ANZAHL', $bl_gw),
-    array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_present',    'BAUSTEIN.DIGITAL_JE_TAG', '&mdash;'),
-    array('BAUSTEIN.VI', $bl_praefix . '_&lt;T&gt;_last_seen_ts', 'BAUSTEIN.ANALOG_ZEIT', '&mdash;'),
-    // ACHTUNG, wer hier einfuegt: die Bausteine verweisen mit ihrer NUMMER
-    // aufeinander ("Eingang = #5", "I1 = #9, I2 = #11 invertiert" - 13
-    // Stellen ueber beide Sprachdateien). Eine Zeile in der Mitte verschiebt
-    // alle folgenden Nummern, und zwar STILL: nichts wird rot, die Anleitung
-    // wird nur falsch. Neue Eintraege gehoeren ans Ende - oder, wie die
-    // Messwerte in 1.3.14, in einen eigenen Abschnitt unter dieser Tabelle.
-    array('BAUSTEIN.AUS', 'BAUSTEIN.N_ENTPRELLT',  'BAUSTEIN.P_ENTPRELLT',  'BAUSTEIN.E_ENTPRELLT'),
-    array('BAUSTEIN.ODER', 'BAUSTEIN.N_JEMAND',    'BAUSTEIN.P_JEMAND',     'BAUSTEIN.E_JEMAND'),
-    array('BAUSTEIN.FLANKE_F', 'BAUSTEIN.N_LETZTER', '&mdash;',             'BAUSTEIN.E_LETZTER'),
-    array('BAUSTEIN.FLANKE_S', 'BAUSTEIN.N_ERSTER',  '&mdash;',             'BAUSTEIN.E_ERSTER'),
-    array('BAUSTEIN.NICHT', 'BAUSTEIN.N_TOT',       '&mdash;',              'BAUSTEIN.E_TOT'),
-    array('BAUSTEIN.EIN', 'BAUSTEIN.N_AUSFALL',     'BAUSTEIN.P_AUSFALL',   'BAUSTEIN.E_AUSFALL'),
-    array('BAUSTEIN.UND', 'BAUSTEIN.N_GILT',        '&mdash;',              'BAUSTEIN.E_GILT'),
-    array('BAUSTEIN.FORMEL', 'BAUSTEIN.N_WIELANGE', 'BAUSTEIN.P_WIELANGE',  'BAUSTEIN.E_WIELANGE'),
-    array('BAUSTEIN.STATUS', 'BAUSTEIN.N_ANWESENHEIT', 'BAUSTEIN.P_STATUS', 'BAUSTEIN.E_STATUS'),
-    // NEU IN 1.3.20, am Ende (Pruefung 29.09.2026, O10 und Frage 6): die
-    // Ausfallerkennung haengt am Letzten Willen server_online (#1) und am
-    // Alter des Lebenszeichens server_ts (#3), nicht mehr an server_ok (#2) -
-    // server/ok ist fluechtig und steht nach einem harten Tod des Dienstes
-    // (kill -9, Speichermangel) in Loxone weiter auf 1. Und die Anwesenheit
-    // eines Tags gilt nur, solange der Dienst online ist (#19).
-    array('BAUSTEIN.FORMEL', 'BAUSTEIN.N_TS_ALTER', 'BAUSTEIN.P_WIELANGE', 'BAUSTEIN.E_TS_ALTER'),
-    array('BAUSTEIN.SCHWELLE', 'BAUSTEIN.N_TS_ZU_ALT',
-          bl_e(sprintf(bl_t('BAUSTEIN.P_TS_ZU_ALT'), $bl_ts_grenze, $bl_ts_grenze - 30)),
-          'BAUSTEIN.E_TS_ZU_ALT'),
-    array('BAUSTEIN.ODER', 'BAUSTEIN.N_DIENST_WEG', '&mdash;', 'BAUSTEIN.E_DIENST_WEG'),
-    array('BAUSTEIN.UND', 'BAUSTEIN.N_DA_ONLINE', 'BAUSTEIN.P_DA_ONLINE', 'BAUSTEIN.E_DA_ONLINE'),
-);
-foreach ($bl_bausteine as $nr => $b) { ?>
-<tr><td><?= $nr + 1 ?></td><td><?= bl_e(bl_t($b[0])) ?></td>
-<td class="sm-mono"><?= strpos($b[1], 'BAUSTEIN.') === 0 ? bl_e(bl_t($b[1])) : $b[1] ?></td>
-<td><?= strpos($b[2], 'BAUSTEIN.') === 0 ? bl_e(bl_t($b[2])) : $b[2] ?></td>
-<td><?= strpos($b[3], 'BAUSTEIN.') === 0 ? bl_e(bl_t($b[3])) : $b[3] ?></td></tr>
-<?php } ?>
-</table>
-</div>
-<div class="sm-hinweis">
-<b><?= bl_e(bl_t('BAUSTEIN.ZU13')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU13_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU7')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU7_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU14')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU14_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU12')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU12_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU11')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU11_TEXT')) ?><br>
-<b><?= bl_e(bl_t('BAUSTEIN.ZU19')) ?></b> <?= bl_e(bl_t('BAUSTEIN.ZU19_TEXT')) ?>
-</div>
-
-<!-- ===== Messwerte: eigener Abschnitt, absichtlich NICHT in der Tabelle =====
-     Sie brauchen keinen einzigen Logikbaustein - ein virtueller Eingang
-     genuegt, der Wert geht direkt an Anzeige, Statistik oder Regelung. Und
-     sie stehen hier unten, weil die Nummern der Tabelle oben aufeinander
-     verweisen. Neu in 1.3.14. -->
-<h2><?= bl_e(bl_t('TEXT.LOX_MESSWERTE')) ?></h2>
+/* Welle Bild 19 (1.3.24, Entwurf Welle 19 bl, E15): drei Seiten aus dem LoxBerry-Plugins Musterprojekt -
+   je Seite Ueberschrift (= Seitenname in Config), Kasten, Tabelle, Hinweise, Bild, Link; Zeilen und Namen aus
+   bl_bausteinliste() (bl_lib.php). Bis 1.3.23 stand hier EINE Liste mit 19 Zeilen und darunter die
+   Messwert-Tabelle; deren Texte stehen jetzt bei Seite 3. */
+foreach (bl_bausteinliste($bl_cfg, $bl_tags) as $bl_bs) { ?>
+<h4 class="sm-h4"><?= bl_e($bl_bs['seite']) ?></h4>
+<?php if ($bl_bs['nr'] === 3) { ?>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOX_MESSWERTE_TEXT')) ?></p>
+<?php } ?>
+<div class="sm-hinweis"><b><?= bl_e(bl_t('LOX.SCHRITTE_TITEL')) ?></b>
+<ol class="sm-schritte">
+<?php foreach ($bl_bs['schritte'] as $bl_bx) { ?>
+<li><?= bl_e($bl_bx) ?></li>
+<?php } ?>
+</ol></div>
 <div class="sm-breit">
 <table class="sm-tbl">
-<tr><th style="width:260px;"><?= bl_e(bl_t('TEXT.SP_NAMENSVORSCHLAG')) ?></th>
-<th style="width:170px;"><?= bl_e(bl_t('TEXT.SP_BAUSTEIN')) ?></th>
-<th style="width:150px;"><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th>
-<th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
-<?php foreach (bl_sensor_katalog() as $bl_sk => $bl_si) { ?>
-<tr><td class="sm-mono"><?= bl_e($bl_praefix) . '_&lt;T&gt;_sensor_' . bl_e($bl_sk) ?></td>
-<td><?= bl_e(bl_t('BAUSTEIN.VI')) ?></td>
-<td class="sm-mono"><?= bl_e($bl_si['min'] . ' … ' . $bl_si['max']
-                             . ($bl_si['einheit'] !== '' ? ' ' . $bl_si['einheit'] : '')) ?></td>
-<td><?= bl_e(bl_sensor_text($bl_si)) ?></td></tr>
+<tr><th style="width:34px;">#</th><th style="width:160px;"><?= bl_e(bl_t('TEXT.SP_BAUSTEIN')) ?></th>
+<th style="width:200px;"><?= bl_e(bl_t('TEXT.SP_NAMENSVORSCHLAG')) ?></th>
+<th><?= bl_e(bl_t('TEXT.SP_PARAMETER')) ?></th><th style="width:170px;"><?= bl_e(bl_t('TEXT.SP_EINGAENGE')) ?></th></tr>
+<?php foreach ($bl_bs['zeilen'] as $bl_bz) { ?>
+<tr><td><?= (int) $bl_bz[0] ?></td><td><?= bl_e($bl_bz[1]) ?></td><td><?= bl_e($bl_bz[2]) ?></td>
+<td><?= bl_e($bl_bz[3]) ?></td><td><?= bl_e($bl_bz[4]) ?></td></tr>
 <?php } ?>
 </table>
 </div>
+<div class="sm-warnung"><b><?= bl_e(bl_t('LOX.HINWEISE_TITEL')) ?></b>
+<ul class="sm-schritte">
+<?php foreach ($bl_bs['hinweise'] as $bl_bx) { ?>
+<li><?= $bl_bx ?></li>
+<?php } ?>
+</ul></div>
+<?php if ($bl_bs['nr'] === 3) { ?>
 <div class="sm-hinweis"><?= bl_e(bl_t('TEXT.LOX_MESSWERTE_HINWEIS')) ?></div>
+<?php } ?>
+<figure class="sm-bild">
+<img src="<?= bl_e($bl_bs['bild']) ?>" alt="<?= bl_e(sprintf(bl_t('LOX.BILD_ALT'), $bl_bs['seite'])) ?>" loading="lazy">
+<figcaption><?= bl_e(sprintf(bl_t('LOX.BILD_UNTERSCHRIFT'), $bl_bs['seite'])) ?></figcaption>
+</figure>
+<p class="sm-hilfe"><?= bl_t('LOX.MUSTERPROJEKT') ?></p>
+<?php } ?>
 
 <h2><?= bl_e(bl_t('TEXT.GEGENPROBE')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.GEGENPROBE_TEXT')) ?></p>
