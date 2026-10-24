@@ -2,7 +2,8 @@
 
 # To use important variables from command line use the following code:
 COMMAND=$0    # Zero argument is shell command
-PTEMPDIR=$1   # First argument is temp folder during install
+PTEMPDIR=$1   # NICHT der Auspackordner: $1 ist eine zehnstellige Zufallskennung; der Ordner steht in $6
+              # bzw. im Arbeitsverzeichnis (Regeln/06 Z. 276-277; Gruppe 13, E4). Unbenutzt.
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 # EINE Wurzel (seit 1.3.20, Regeln/06; Pruefung 29.09.2026, B8): $5 zuerst,
@@ -24,10 +25,33 @@ PVERSION=$4   # Forth argument is Plugin version
 # ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
 # Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
 # vollziehen.
-if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
-   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
-    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
-    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+# --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh ---------------------------------------
+# Fehlt die Datei oder ist sie defekt: Warnung und eine Minimalform (nur nach der PID-Datei) - keine stille
+# Luecke, aber auch kein Abbruch.
+BLH="${6:-$(pwd)}/bin/bl_haken.sh"
+if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$BLH" 2>/dev/null; then
+    BL_HAKEN_LADEN=1
+    . "$BLH"
+else
+    echo "<WARNING> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - es gilt die Minimalform (PID-Datei)."
+    bl_dienste_finden() {
+        bl_p=$(cat "$PDATA/dienst.pid" 2>/dev/null)
+        case "$bl_p" in ''|*[!0-9]*) return 0 ;; esac
+        grep -qaF "$1" "/proc/$bl_p/cmdline" 2>/dev/null && echo "$bl_p"
+        return 0
+    }
+    bl_cfg_traegt_inhalt() { [ -s "$1" ] && grep -q '^[[:space:]]*\[CONFIG\]' "$1" 2>/dev/null; }
+    bl_wurzel_gilt() {
+        case "$2" in ''|*/*|*..*) return 1 ;; esac
+        [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ] && [ -f "$1/config/system/general.json" ]
+    }
+fi
+# B7 (Gruppe 13): dieselbe Torbedingung wie preinstall.sh - auch config/system/general.json und ein Ordnername
+# ohne "/" und "..". Bis 1.3.27 genuegten hier config/plugins und data/plugins; in einem Pruefbaum ohne
+# general.json legte preinstall nichts beiseite, postinstall spielte aber die Zweitschrift zurueck.
+if ! bl_wurzel_gilt "$BASE" "$PDIR"; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Wurzel '$BASE', general.json"
+    echo "<WARNING> noetig) - dieses Skript tut nichts."
     exit 0
 fi
 
@@ -47,18 +71,8 @@ MERK_UPGRADE="$PDATA.upgrade_laeuft"
 MERK_LIEF="$PDATA.lief_vor_update"
 MERK_SOLL="$PDATA.soll_laufen"
 
-# --- Traegt eine Konfiguration INHALT? --------------------------------------
-#
-# NEU HIER IN 1.3.20 (Pruefung 29.09.2026, B2) - wortgleich mit preupgrade.sh
-# und postinstall.sh; ein /bin/sh-Hakenskript kann keine gemeinsame Datei
-# einbinden. Wer eine anfasst, fasst alle drei an.
-bl_cfg_traegt_inhalt() {
-    [ -s "$1" ] || return 1
-    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
-    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
-    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
-    return 0
-}
+# bl_cfg_traegt_inhalt() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 # --- Konfiguration zurueckspielen -------------------------------------------
 #
@@ -165,6 +179,8 @@ if [ -d "$SICHER" ]; then
     rm -f "$PCONFIG/verlauf.csv" 2>/dev/null
     if [ -z "$FEHLT" ]; then
         echo "<OK> Konfiguration zurueckgespielt."
+        # V1 (Gruppe 13): irk.json traegt Identitaetsschluessel - 0600, auch nach dem Zurueckspielen.
+        [ -f "$PCONFIG/irk.json" ] && chmod 0600 "$PCONFIG/irk.json" 2>/dev/null
     else
         ALLES_ZURUECK=0
         echo "<WARNING> Die Konfiguration liess sich nicht vollstaendig zurueckspielen"
@@ -201,37 +217,8 @@ chmod 755 "$PBIN"/*.py 2>/dev/null
 # 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
 # einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
 # umleitete, stand darueber auch nichts im Protokoll.
-# BERICHTIGT IN 1.3.17: die Suche verlangte nur IRGENDEIN Argument, das auf
-# "/ble_scanner_ng.py" endet - Interpreter, Zahl der Argumente und Benutzer
-# blieben ungeprueft, und der Dienst einer ZWEITEN Installation zaehlte mit.
-# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
-# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
-# Benutzer mit der Nummer $2 gehoeren. Dieselbe Funktion steht in
-# preupgrade.sh, postinstall.sh, uninstall und daemon.
-bl_dienste_finden() {
-    for bl_d in /proc/[0-9]*; do
-        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
-        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
-        bl_n=0
-        bl_treffer=0
-        while IFS= read -r bl_arg; do
-            bl_n=$((bl_n + 1))
-            if [ "$bl_n" = 1 ]; then
-                case "${bl_arg##*/}" in
-                    python|python3|python3.*) ;;
-                    *) break ;;
-                esac
-            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
-                bl_treffer=1
-            fi
-        done <<BL_ARGUMENTE
-$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
-BL_ARGUMENTE
-        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
-            echo "${bl_d#/proc/}"
-        fi
-    done
-}
+# bl_dienste_finden() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 # Dieses Skript laeuft als loxberry (sudo -n -u loxberry), der Dienst auch -
 # deshalb ist die eigene Nummer der richtige Rueckfall, wenn es den Benutzer
@@ -337,7 +324,8 @@ for k in /etc/dbus-1/system.d/bluetooth.conf /usr/share/dbus-1/system.d/bluetoot
 done
 if [ -z "$BTCONF" ]; then
     echo "<INFO> Keine bluetooth.conf fuer D-Bus gefunden - bluez scheint zu fehlen."
-elif grep -q '<policy context="default">' "$BTCONF" 2>/dev/null; then
+# B5 (Gruppe 13): wortgleich mit postinstall.sh - bis 1.3.27 genuegte hier <policy context="default"> allein.
+elif awk '/<policy context="default">/{d=1} d&&/<allow send_destination="org.bluez"/{a=1} /<\/policy>/{d=0} END{exit !a}' "$BTCONF"; then
     echo "<OK> $BTCONF erlaubt den Zugriff auf org.bluez jedem Benutzer"
     echo "<OK> (<policy context=\"default\">) - eine Gruppenmitgliedschaft ist unnoetig."
 elif grep -q 'group="bluetooth"' "$BTCONF" 2>/dev/null; then

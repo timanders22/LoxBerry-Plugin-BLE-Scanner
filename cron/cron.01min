@@ -1,0 +1,12 @@
+#!/bin/sh
+#
+# BLE-Scanner NG - Waechter der Befehlsbruecke, jede Minute. NEU IN 1.3.28 (Gruppe 13, E13).
+#
+# Die Bruecke (bin/befehlsbruecke.sh, Stammfassung Werkzeuge/gemeinsam/) ist der zweite Dauerprozess neben dem
+# Dienst. Ihr Waechter prueft selbst, ob sie laufen SOLL (Haken "Befehle ueber MQTT annehmen", Upgrade-Marke, Praefix)
+# und startet hoechstens alle 600 s neu (BB_WACHE_BREMSE; Gedaechtnis "Cron holt Minuten nach"). Ein Minutentakt haelt
+# den Ausfall klein (BB_WACHE_GRENZE 180 s) - in cron.05min waeren es bis zu fuenf Minuten. Der Waechter des Dienstes
+# bleibt in cron.05min unveraendert.
+BBSH="REPLACELBPBINDIR/befehlsbruecke.sh"
+[ -f "$BBSH" ] && /bin/bash "$BBSH" waechter >/dev/null 2>&1
+exit 0

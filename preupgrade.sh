@@ -2,7 +2,8 @@
 
 # To use important variables from command line use the following code:
 COMMAND=$0    # Zero argument is shell command
-PTEMPDIR=$1   # First argument is temp folder during install
+PTEMPDIR=$1   # NICHT der Auspackordner: $1 ist eine zehnstellige Zufallskennung; der Ordner steht in $6
+              # bzw. im Arbeitsverzeichnis (Regeln/06 Z. 276-277; Gruppe 13, E4). Unbenutzt.
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 # EINE Wurzel (seit 1.3.20, Regeln/06; Pruefung 29.09.2026, B8). Bis 1.3.19
@@ -30,10 +31,24 @@ PVERSION=$4   # Forth argument is Plugin version
 # ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
 # Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
 # vollziehen.
-if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
-   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
-    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
-    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+# --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh aus dem Auspackordner -----------------
+# $6 ist der Auspackordner und zugleich das Arbeitsverzeichnis (plugininstall.pl: cd "$tempfolder" && ...);
+# $1 ist nur eine zehnstellige Zufallskennung. Fehlt die Datei oder ist sie defekt, bricht preupgrade.sh
+# ab: lieber kein Update als eines ohne Sicherung und Zweitschrift.
+BLH="${6:-$(pwd)}/bin/bl_haken.sh"
+if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$BLH" 2>/dev/null; then
+    BL_HAKEN_LADEN=1
+    . "$BLH"
+else
+    echo "<ERROR> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - preupgrade.sh bricht ab."
+    exit 1
+fi
+# B7 (Gruppe 13): dieselbe Torbedingung wie preinstall.sh - auch config/system/general.json und ein Ordnername
+# ohne "/" und "..". Bis 1.3.27 genuegten hier config/plugins und data/plugins; in einem Pruefbaum ohne
+# general.json legte preinstall nichts beiseite, postinstall spielte aber die Zweitschrift zurueck.
+if ! bl_wurzel_gilt "$BASE" "$PDIR"; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Wurzel '$BASE', general.json"
+    echo "<WARNING> noetig) - dieses Skript tut nichts."
     exit 0
 fi
 
@@ -98,80 +113,27 @@ MERK_LIEF="$PDATA.lief_vor_update"
 # In den Merker kommt der Zeitpunkt, nicht nichts. Bricht ein Upgrade zwischen
 # preupgrade.sh und postupgrade.sh ab, bleibt die Datei neben dem Ordner
 # liegen - und wuerde eine spaetere echte Neuinstallation faelschlich als
-# Upgrade ausweisen. Wer ihn liest, prueft deshalb sein Alter.
+# Upgrade ausweisen. postinstall/preinstall pruefen nur das Vorhandensein
+# (Entscheidung 1 vom 29.09.); daemon und Waechter begrenzen auf eine Stunde;
+# uninstall raeumt die Marke ab. (B3, Gruppe 13 - bis 1.3.27 stand hier, wer
+# ihn lese, pruefe sein Alter.)
 date +%s > "$MERK_UPGRADE" 2>/dev/null
 chown loxberry:loxberry "$MERK_UPGRADE" 2>/dev/null
 chmod 0644 "$MERK_UPGRADE" 2>/dev/null
 
+# Gruppe 13 (3.5): die Befehlsbruecke NACH der Marke anhalten - befehlsbruecke.sh start und ihr Waechter pruefen
+# dieselbe Marke und starten nicht, solange sie liegt (hoechstens 3600 s). Danach startet sie der Waechter in
+# cron.01min binnen einer Minute (nur mit "Befehle ueber MQTT annehmen"). 9>&-: keine offene Sperre vererben.
+BL_BB="$LBPBIN/$PDIR/befehlsbruecke.sh"
+if [ -f "$BL_BB" ] && command -v bash >/dev/null 2>&1; then
+    echo "<INFO> Befehlsbruecke: $(timeout 40 bash "$BL_BB" stop 2>&1 9>&- | head -n 1)"
+fi
+
 PIDDATEI="$PDATA/dienst.pid"
 DIENST="$LBPBIN/$PDIR/ble_scanner_ng.py"
 
-# BERICHTIGT IN 1.3.17. Die Suche fand zwar schon argumentweise statt, aber sie
-# verlangte nur IRGENDEIN Argument, das auf "/ble_scanner_ng.py" endet - der
-# Interpreter, die Zahl der Argumente und der Benutzer blieben ungeprueft, und
-# vor dem "kill -9" stand wieder die blosse Teilzeichenkette. In WSL gemessen
-# (18.09.2026, Fall v1): die Nummer eines "tail -f <dienst>" in der PID-Datei
-# hat der alte Zweig ohne Rueckfrage beendet. Ein Treffer hat jetzt GENAU zwei
-# Argumente: einen python-Interpreter und den vollen Dienstpfad DIESER
-# Installation; dazu muss er dem Benutzer mit der Nummer $2 gehoeren. Dieselbe
-# Funktion steht in uninstall, postinstall.sh, postupgrade.sh und daemon.
-bl_dienste_finden() {
-    for bl_d in /proc/[0-9]*; do
-        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
-        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
-        bl_n=0
-        bl_treffer=0
-        while IFS= read -r bl_arg; do
-            bl_n=$((bl_n + 1))
-            if [ "$bl_n" = 1 ]; then
-                case "${bl_arg##*/}" in
-                    python|python3|python3.*) ;;
-                    *) break ;;
-                esac
-            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
-                bl_treffer=1
-            fi
-        done <<BL_ARGUMENTE
-$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
-BL_ARGUMENTE
-        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
-            echo "${bl_d#/proc/}"
-        fi
-    done
-}
-
-# Beendet ALLE Treffer mit Geduld und sucht vor dem -9 neu, statt anzunehmen.
-bl_dienste_beenden() {
-    BL_GEFUNDEN=0
-    BL_UEBRIG=""
-    bl_pids=$(bl_dienste_finden "$1" "$2")
-    for bl_p in $bl_pids; do
-        BL_GEFUNDEN=$((BL_GEFUNDEN + 1))
-    done
-    [ -n "$bl_pids" ] || return 0
-    echo "<INFO> Halte den laufenden BLE-Scanner NG an (PID$(for bl_p in $bl_pids; do printf ' %s' "$bl_p"; done))."
-    kill $bl_pids 2>/dev/null
-    bl_i=0
-    while [ $bl_i -lt 20 ]; do
-        bl_lebt=0
-        for bl_p in $bl_pids; do
-            kill -0 "$bl_p" 2>/dev/null && bl_lebt=1
-        done
-        [ "$bl_lebt" = 0 ] && break
-        sleep 0.5
-        bl_i=$((bl_i + 1))
-    done
-    bl_rest=$(bl_dienste_finden "$1" "$2")
-    if [ -n "$bl_rest" ]; then
-        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
-        kill -9 $bl_rest 2>/dev/null
-        sleep 1
-        bl_rest=$(bl_dienste_finden "$1" "$2")
-    fi
-    for bl_p in $bl_rest; do
-        BL_UEBRIG="$BL_UEBRIG $bl_p"
-    done
-}
+# bl_dienste_finden() und bl_dienste_beenden() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 BL_UID=$(id -u loxberry 2>/dev/null)
 if [ -z "$BL_UID" ]; then
@@ -200,29 +162,8 @@ else
     echo "<INFO> Es lief kein BLE-Scanner NG."
 fi
 
-# --- Traegt eine Datei INHALT? ----------------------------------------------
-#
-# NEU IN 1.3.18. Die GROESSE beantwortet die Frage nicht: eine abgeschnittene
-# Datei ist nicht leer, besteht jede Groessenpruefung und verdraengt damit den
-# brauchbaren Stand (Bestandsmessung Klasse C, 18.09.2026). Gefragt wird
-# deshalb nach dem, was das Plugin selbst liest:
-#   * der Abschnittskopf [CONFIG], den bl_config_write() (bl_lib.php:594)
-#     immer als erste nicht auskommentierte Zeile schreibt,
-#   * mindestens eine vollstaendige Zeile "schluessel=wert",
-#   * ein Zeilenumbruch als letztes Byte - abgeschnitten wird mitten in einer
-#     Zeile, und bl_config_write() schliesst jede Datei mit "\n".
-#
-# Im Zweifel faellt die Pruefung GESCHLOSSEN aus (CLAUDE.md 4): es wird nichts
-# ueberschrieben, und es wird gesagt. Wortgleich in postinstall.sh - ein
-# /bin/sh-Hakenskript kann keine gemeinsame Datei einbinden, der Installer
-# ruft es aus dem Auspackordner heraus. Wer eine anfasst, fasst beide an.
-bl_cfg_traegt_inhalt() {
-    [ -s "$1" ] || return 1
-    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
-    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
-    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
-    return 0
-}
+# bl_cfg_traegt_inhalt() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 # --- Sicherung der Konfiguration --------------------------------------------
 #
@@ -394,6 +335,23 @@ elif [ -f "$NETZ_ZIEL" ]; then
     echo "<WARNING> Zweitschrift bleibt unveraendert ($NETZ_ZIEL)."
 else
     echo "<INFO> Keine lesbaren Einstellungen vorhanden - keine Zweitschrift angelegt."
+fi
+
+# V1 (Gruppe 13): Zweitschrift von irk.json neben den Konfigurationsordner - wie die der Konfiguration, aber 0600
+# (Identitaetsschluessel). Nur eine Datei, die als JSON-Objekt beginnt und endet; sonst bleibt die bisherige.
+NETZ_IRK="$NETZ_CFG/irk.json"
+NETZ_IRK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
+if [ -s "$NETZ_IRK" ] && [ "$(head -c 1 "$NETZ_IRK" 2>/dev/null)" = "{" ] \
+   && tail -c 3 "$NETZ_IRK" 2>/dev/null | grep -q '}'; then
+    if cp "$NETZ_IRK" "$NETZ_IRK_ZIEL.neu" 2>/dev/null \
+       && chmod 0600 "$NETZ_IRK_ZIEL.neu" 2>/dev/null \
+       && cmp -s "$NETZ_IRK" "$NETZ_IRK_ZIEL.neu" \
+       && mv "$NETZ_IRK_ZIEL.neu" "$NETZ_IRK_ZIEL" 2>/dev/null; then
+        echo "<INFO> Zweitschrift der IRK-Schluessel angelegt (0600)."
+    else
+        rm -f "$NETZ_IRK_ZIEL.neu" 2>/dev/null
+        echo "<WARNING> Die Zweitschrift der IRK-Schluessel liess sich nicht anlegen."
+    fi
 fi
 
 exit 0

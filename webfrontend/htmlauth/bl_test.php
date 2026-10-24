@@ -318,6 +318,9 @@ function bl_leser_vergleich()
         'tag1=AA:BB:CC:DD:EE:FF|1|Name|abw=90,alias=anna',
         'TAG1="BLE_AA_BB_CC_DD_EE_FF:on:1^on~2^off:Anna"',
         'tag1=IB:FDA50693A4E24FB1AFCFC6EB07647825:1:2|1|Beacon',
+        // Gruppe 13: Tag-Art IRK (V1), haus=1 (V12), Altoptionen min/raum (B19)
+        'tag1=IRK:telefon_anna|1|Telefon|alias=telefon_anna,haus=1',
+        'tag1=AA:BB:CC:DD:EE:FF|1|Alt|abw=60,min=-80,raum=Kueche',
         'tag1=UNSINN',
     );
     $tmp = tempnam(sys_get_temp_dir(), 'blecmp');
@@ -506,7 +509,7 @@ function bl_themen_vergleich($cfg)
     // bl_zusatzthemen_alle(), also unabhaengig von jeder Einstellung? Wenn
     // nicht, ist es kein bedingtes Thema, sondern ein vergessenes.
     $bedingt = array('distance', 'battery', 'battery_ts', 'raum', 'raum_seit',
-                     'sensor/');
+                     'sensor/', 'button', 'kalibrierung');
     $ueberhaupt = array_keys(bl_zusatzthemen_alle());
     $fehlt = array();
     foreach ($erwartet as $k) {
@@ -663,8 +666,15 @@ function bl_formate_vergleich()
         list($a, $e) = $grenzen[$format];
         $block = substr($quelle, $a, $e - $a);
         $ist = array();
-        if (preg_match_all('/_sammle\(out\["werte"\],\s*"(\w+)"/', $block, $t)) {
-            $ist = array_values(array_unique($t[1]));
+        // B15 (Gruppe 13): auch direkte Zuweisungen out["werte"]["NAME"] = ... (eddystone, ruuvi) - bis 1.3.27
+        // war die Zeile fuer sie blind und blieb gruen, obwohl vier Groessen in der Tabelle fehlten.
+        if (preg_match_all('/_sammle\(out\["werte"\],\s*"(\w+)"|_sammle\(w,\s*"(\w+)"|out\["werte"\]\["(\w+)"\]\s*=/',
+                           $block, $t)) {
+            $ist = array_values(array_unique(array_filter(array_merge($t[1], $t[2], $t[3]), 'strlen')));
+            // Nur Groessen mit Thema (SENSORTHEMEN): eddystone legt auch "url" unter werte ab - eine Anzeige im
+            // Reiter Einstellungen, kein Messwert, der hinausgeht (ble_scanner_ng.py sendet nur SENSORTHEMEN).
+            $bl_kat = bl_sensor_katalog();
+            $ist = array_values(array_filter($ist, function ($n) use ($bl_kat) { return isset($bl_kat[$n]); }));
         }
         sort($ist);
         $soll = array_values($soll);
@@ -682,58 +692,38 @@ function bl_formate_vergleich()
     return array(true, sprintf(bl_t('TEST.FORMATE_OK'), count($tabelle)));
 }
 
-/** Die erzeugte Loxone-Vorlage auf Wohlgeformtheit pruefen. */
-function bl_vorlage_pruefen($cfg, $tags)
-{
-    if (!function_exists('simplexml_load_string')) {
-        return array(null, bl_t('TEST.KEIN_SIMPLEXML'));
-    }
-    $probe = $tags;
-    if (!$probe) {
-        // Auch ohne eingetragenen Tag laesst sich das Format pruefen - mit
-        // einem Namen, der Anfuehrungszeichen, ein Und und einen Umlaut
-        // enthaelt. Genau dort bricht es, wenn ENT_XML1 fehlt.
-        $probe = array(array('art' => 'mac', 'kennung' => 'AA:BB:CC:DD:EE:FF',
-                             'mac' => 'AA:BB:CC:DD:EE:FF', 'aktiv' => '1',
-                             'name' => 'Schlüssel "Anna" & Co', 'opt' => array()));
-    }
-    list($_n, $inhalt, $anzahl, $uebersprungen) = bl_vorlage($cfg, $probe);
-    $vorher = libxml_use_internal_errors(true);
-    $xml = simplexml_load_string($inhalt);
-    libxml_clear_errors();
-    libxml_use_internal_errors($vorher);
-    if ($xml === false) {
-        return array(false, bl_t('TEST.VORLAGE_KAPUTT'));
-    }
-    $crlf = substr_count($inhalt, "\r\n");
-    $lf = substr_count($inhalt, "\n");
-    $meldung = array();
-    if ($crlf !== $lf) {
-        $meldung[] = sprintf(bl_t('TEST.VORLAGE_ZEILENENDEN'), $crlf, $lf);
-    }
-    if (strpos($inhalt, '<Info templateType="2" minVersion="17010727"/>') === false) {
-        $meldung[] = bl_t('TEST.VORLAGE_INFO_FEHLT');
-    }
-    if (strpos($inhalt, 'MinVal="-2147483647"') !== false) {
-        $meldung[] = bl_t('TEST.VORLAGE_GRENZEN');
-    }
-    return array(count($meldung) === 0,
-                 implode("\n", $meldung)
-                 . ($meldung ? "\n" : '')
-                 . sprintf(bl_t('TEST.VORLAGE_ANZAHL'), $anzahl, count($uebersprungen)));
-}
+/* Gruppe 13 (E12): bl_vorlage_pruefen() ist mit der HTTP-Vorlage entfallen; die Vorlage MQTT-Befehle
+ * prueft bl_pruef_vorlage_mqtt(), die Namenstabelle bl_pruef_namen() (bl_lib.php). */
 
 /** Sprachdateien: deckungsgleich? */
 function bl_sprachen_vergleich()
 {
-    $abschnitte = array('REITER', 'TEXT', 'LEGENDE', 'THEMA', 'TEST', 'VORLAGE', 'BAUSTEIN', 'KURZ');
-    $fehlend = array();
-    foreach ($abschnitte as $a) {
-        $s = bl_sprachschluessel($a);
-        foreach (array_diff($s['de'], $s['en']) as $k) { $fehlend[] = 'en: ' . $a . '.' . $k; }
-        foreach (array_diff($s['en'], $s['de']) as $k) { $fehlend[] = 'de: ' . $a . '.' . $k; }
+    // B22 (Gruppe 13): alle Abschnitte aus beiden Dateien (de und en vereinigt) statt einer festen Liste von acht -
+    // bis 1.3.27 blieben ADRESSTYP, ART, FELD, KNOPF, LOX, MANGEL, PRUEF, WACHE ungeprueft -, dazu help_de/help_en.
+    $pp = bl_paths();
+    $pfad = $pp['home'] !== '' ? $pp['home'] . '/templates/plugins/' . $pp['plugin'] . '/lang' : '';
+    if ($pfad === '' || !is_dir($pfad)) {
+        $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
     }
-    return array(count($fehlend) === 0, implode(', ', array_slice($fehlend, 0, 12)));
+    $fehlend = array();
+    $abschnitte = 0;
+    foreach (array('language', 'help') as $art) {
+        $de = @parse_ini_file($pfad . '/' . $art . '_de.ini', true, INI_SCANNER_RAW);
+        $en = @parse_ini_file($pfad . '/' . $art . '_en.ini', true, INI_SCANNER_RAW);
+        if (!is_array($de) || !is_array($en)) {
+            $fehlend[] = $art . '_de/_en.ini unlesbar';
+            continue;
+        }
+        foreach (array_unique(array_merge(array_keys($de), array_keys($en))) as $a) {
+            $abschnitte++;
+            $kd = isset($de[$a]) && is_array($de[$a]) ? array_keys($de[$a]) : array();
+            $ke = isset($en[$a]) && is_array($en[$a]) ? array_keys($en[$a]) : array();
+            foreach (array_diff($kd, $ke) as $k) { $fehlend[] = 'en: ' . $art . ' ' . $a . '.' . $k; }
+            foreach (array_diff($ke, $kd) as $k) { $fehlend[] = 'de: ' . $art . ' ' . $a . '.' . $k; }
+        }
+    }
+    return array(count($fehlend) === 0, $fehlend ? implode(', ', array_slice($fehlend, 0, 12))
+                                                 : sprintf(bl_t('TEST.SPRACHEN_OK'), $abschnitte));
 }
 
 /**
@@ -1193,8 +1183,27 @@ function bl_pruefzeilen($cfg, $tags)
     list($ok, $meldung) = bl_retain_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.RETAIN'), $ok, $meldung);
 
-    list($ok, $meldung) = bl_vorlage_pruefen($cfg, $tags);
+    // --- Gruppe 13 (1.3.28): Gateway-Namen, Befehlsbruecke, Lebenszeichen, IRK, Haus-Themen
+    list($ok, $meldung) = bl_pruef_vorlage_mqtt($cfg, $tags);
     $zeilen[] = bl_zeile(bl_t('PRUEF.VORLAGE'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_namen($cfg, $tags);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.NAMEN'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_lebenszeichen($status, $gilt, $grund);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.LEBENSZEICHEN'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_reserviert($tags);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.RESERVIERT'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_bruecke($cfg);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.BRUECKE'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_bruecke_einrichtung($cfg);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.BRUECKE_EINRICHTUNG'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_praefix_bruecke($cfg);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.PRAEFIX_BRUECKE'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_auftrag($cfg);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.AUFTRAG'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_irk($cfg, $tags, $status);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.IRK'), $ok, $meldung);
+    list($ok, $meldung) = bl_pruef_haus($cfg, $tags, $status, $gilt);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.HAUS'), $ok, $meldung);
 
     list($ok, $meldung) = bl_sprachen_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.SPRACHEN'), $ok, $meldung);
@@ -1205,7 +1214,7 @@ function bl_pruefzeilen($cfg, $tags)
         ? trim((string) @file_get_contents($p['fassung'])) : '';
     if ($ausdatei === '') {
         $zeilen[] = bl_zeile(bl_t('PRUEF.FASSUNG'), null,
-                             sprintf(bl_t('PRUEF.FASSUNG_KEINE'), $fassung));
+                             sprintf(bl_t('PRUEF.FASSUNG_KEINE'), $fassung !== '' ? $fassung : '–'));
     } else {
         $status_f = ($status && $gilt) ? (string) ($status['version'] ?? '') : '';
         $zeilen[] = bl_zeile(bl_t('PRUEF.FASSUNG'),
@@ -1367,26 +1376,22 @@ function bl_test_ausfuehren($was, $zusatz = '')
             return array(bl_t('TEST.T_TAGS'), $t);
 
         case 'themen':
+            // B25 (Gruppe 13): aus bl_mqtt_namen() - derselben Quelle wie die Namenstabelle im Reiter Einbindung.
+            // Bis 1.3.27 fehlten hier last_seen_ts, anwesend_gesamt, quelle, sensor/* und scanner/...
             $praefix = bl_cfg($cfg, 'themenpraefix', 'blescanner');
             $t = bl_t('TEST.THEMEN_KOPF') . "\n\n";
-            foreach (bl_allgemeine_themen() as $thema => $info) {
-                $t .= sprintf("  %s/%-26s %s\n", $praefix, $thema, bl_t($info['s']));
-            }
-            $alle = array_merge(bl_status_themen(), bl_zusatzthemen($cfg));
+            $wer = null;
             $aktive = 0;
-            foreach ($tags as $tag) {
-                if ($tag['aktiv'] !== '1') { continue; }
-                $aktive++;
-                $th = bl_thema($tag);
-                $t .= "\n  " . $tag['kennung'] . ($tag['name'] !== '' ? '  (' . $tag['name'] . ')' : '') . "\n";
-                foreach ($alle as $k => $info) {
-                    $t .= sprintf("    %s/%s/%-14s %s\n", $praefix, $th, $k, bl_t($info['s']));
+            foreach ($tags as $tag) { if ($tag['aktiv'] === '1') { $aktive++; } }
+            foreach (bl_mqtt_namen($cfg, $tags) as $z) {
+                if ($z['wer'] !== $wer) {
+                    $wer = $z['wer'];
+                    $t .= "\n" . ($wer !== '' ? '  ' . $wer : '  ' . bl_t('TEST.THEMEN_ALLGEMEIN')) . "\n";
                 }
-                $person = $tag['opt']['person'] ?? '';
-                if ($person !== '') {
-                    $t .= sprintf("    %s/person/%s/present\n", $praefix, bl_saeubern($person));
-                }
+                $t .= sprintf("    %-48s %-4s %-2s %s\n", $praefix . '/' . $z['thema'],
+                              $z['text'] ? 'Text' : 'Zahl', $z['v2'], bl_t($z['s']));
             }
+            $t .= "\n    " . $praefix . "/befehl/<Name>/quittung, " . $praefix . "/status/befehle - " . bl_t('TEST.THEMEN_BRUECKE') . "\n";
             if (!$aktive) {
                 $t .= "\n" . bl_t('TEST.KEIN_AKTIVER_TAG');
             }
@@ -1601,6 +1606,15 @@ function bl_test_ausfuehren($was, $zusatz = '')
                          $grund === '' ? bl_t('TEST.KALIBRIERUNG_LAEUFT') : $grund);
 
         case 'batterie':
+            // F4 (Gruppe 13): ohne "Batteriestand ueber eine Verbindung lesen" oder ohne Tag mit "Batterie lesen"
+            // tat der Auftrag nichts und meldete trotzdem "angefordert".
+            $bl_mit = false;
+            foreach ($tags as $bl_tb) {
+                if ($bl_tb['aktiv'] === '1' && isset($bl_tb['opt']['batt']) && $bl_tb['opt']['batt'] === '1') { $bl_mit = true; }
+            }
+            if (bl_cfg($cfg, 'batterie', '0') !== '1' || !$bl_mit) {
+                return array(bl_t('TEST.T_BATTERIE'), bl_t('TEST.BATTERIE_AUS'));
+            }
             $grund = bl_steuern('batterie');
             return array(bl_t('TEST.T_BATTERIE'),
                          $grund === '' ? bl_t('TEST.BATTERIE_ANGEFORDERT') : $grund);

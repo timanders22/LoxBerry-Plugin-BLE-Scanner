@@ -195,10 +195,24 @@ function bl_fassung()
             return $f = $wert;
         }
     }
-    $py = $p['bindir'] . '/bl_common.py';
-    if (is_file($py) && preg_match('/VERSION_RUECKFALL\s*=\s*"([0-9.]+)"/',
-                                   (string) @file_get_contents($py), $m)) {
-        return $f = $m[1];
+    // B21 (Gruppe 13): danach LBSystem::pluginversion() MIT dem Ordnernamen (Regeln/06 Z. 551-559; ohne Argument
+    // liefert es nichts Brauchbares, Gedaechtnis pluginversion-ohne-argument), dann plugin.cfg zwei Ebenen ueber
+    // htmlauth - wie fassung() in bl_common.py. Bis 1.3.27 suchte hier ein Muster den Rueckfallwert
+    // VERSION_RUECKFALL = "" und lieferte '' (Probe b21: "Rueckfallwert  aus bl_common.py", doppeltes Leerzeichen).
+    if (class_exists('LBSystem') && method_exists('LBSystem', 'pluginversion')) {
+        $wert = trim((string) @LBSystem::pluginversion($p['plugin']));
+        if (preg_match('/^\d+(\.\d+){0,3}$/', $wert)) {
+            return $f = $wert;
+        }
+    }
+    foreach (array(dirname(dirname(__DIR__)) . '/plugin.cfg', $p['home'] !== ''
+                   ? $p['home'] . '/data/system/plugindatabase.json' : '') as $k) {
+        if ($k === '' || substr($k, -10) !== 'plugin.cfg' || !is_file($k)) {
+            continue;
+        }
+        if (preg_match('/^\s*VERSION\s*=\s*"?([0-9]+(?:\.[0-9]+){0,3})"?\s*$/m', (string) @file_get_contents($k), $m)) {
+            return $f = $m[1];
+        }
     }
     return $f = '';
 }
@@ -249,6 +263,13 @@ function bl_defaults()
         // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026), ab Werk aus
         'wlan_kopplung'      => '0',
         'wlan_zuordnung'     => '',
+        // Gruppe 13 (1.3.28): Befehlsbruecke (beide ab Werk aus), Haus-Themen (aus), BTHome v2 (0; die Paket-cfg
+        // traegt 1 - nur eine Neuinstallation ist an), IRK-Aufloesung (aus)
+        'befehle_mqtt_ein'        => '0',
+        'befehle_eingreifend_ein' => '0',
+        'haus_anwesenheit'        => '0',
+        'bthome'                  => '0',
+        'irk_aufloesen'           => '0',
     );
 }
 
@@ -260,7 +281,8 @@ function bl_defaults()
  */
 function bl_schluessel_spaeter()
 {
-    return array('wlan_kopplung', 'wlan_zuordnung');
+    return array('wlan_kopplung', 'wlan_zuordnung', 'befehle_mqtt_ein', 'befehle_eingreifend_ein',
+                 'haus_anwesenheit', 'bthome', 'irk_aufloesen');
 }
 
 /**
@@ -313,6 +335,11 @@ function bl_regeln()
         'batterie_uhrzeit'   => array('muster', '/^([01]?\d|2[0-3]):[0-5]\d$/'),
         'wlan_kopplung'      => array('schalter'),
         'wlan_zuordnung'     => array('zuordnung'),
+        'befehle_mqtt_ein'        => array('schalter'),
+        'befehle_eingreifend_ein' => array('schalter'),
+        'haus_anwesenheit'        => array('schalter'),
+        'bthome'                  => array('schalter'),
+        'irk_aufloesen'           => array('schalter'),
     );
 }
 
@@ -458,7 +485,14 @@ function bl_tag_pruefen($t)
         if ($k === 'batt' && $v !== '1') {
             return array(null, 'opt.batt');
         }
+        if ($k === 'haus' && $v !== '1') {
+            return array(null, 'opt.haus');
+        }
         $opt[$k] = $v;
+    }
+    // V1 (Gruppe 13): ein IRK-Tag braucht einen Alias - sonst hiesse sein Themenzweig nach dem Schluesselnamen.
+    if ($art === 'irk' && (!isset($opt['alias']) || bl_saeubern($opt['alias']) === '')) {
+        return array(null, 'opt.alias');
     }
     return array(array('art' => $art, 'kennung' => $kennung,
                        'mac' => $art === 'mac' ? $kennung : '',
@@ -530,13 +564,19 @@ function bl_retain()
         'server/ts'     => false,
         // -- regelmaessig leer; eine leere Nutzlast loescht ein retained Thema
         'summary/names' => false,
+        // -- Gruppe 13 (1.3.28): Lebenszeichen fuer Loxone und je Scanner, Taster-Ereignis (V2), Kalibrierung (E5)
+        'status/zaehler'  => false,
+        'scanner/zaehler' => false,
+        'button'          => false,
+        'kalibrierung'    => false,
     );
 }
 
 /** Zweignamen, die der Themenbaum belegt - dieselbe Liste wie in Python. */
 function bl_reservierte_zweige()
 {
-    return array('server', 'summary', 'person', 'scanner', 'sensor');
+    // F2 (Gruppe 13): status und befehl dazu.
+    return array('server', 'summary', 'person', 'scanner', 'sensor', 'status', 'befehl');
 }
 
 /**
@@ -558,7 +598,7 @@ function bl_thema_stamm($thema)
     if (in_array('sensor', $teile, true)) {
         return 'sensor';
     }
-    if (in_array($teile[0], array('server', 'summary'), true)) {
+    if (in_array($teile[0], array('server', 'summary', 'status'), true)) {
         return $teile[0] . '/' . (isset($teile[1]) ? $teile[1] : '');
     }
     if (in_array($teile[0], array('person', 'scanner'), true)) {
@@ -584,7 +624,8 @@ function bl_retain_text($thema)
 /** Erlaubte Zusatzangaben je Tag - dieselbe Liste wie TAG_OPTIONEN in Python. */
 function bl_tag_optionen()
 {
-    return array('abw', 'min', 'ref', 'alias', 'person', 'batt', 'raum');
+    // B19 (Gruppe 13): min und raum sind Altoptionen (bl_altoptionen()); V12: haus.
+    return array('abw', 'ref', 'alias', 'person', 'batt', 'haus');
 }
 
 /**
@@ -655,6 +696,10 @@ function bl_ibeacon($wert)
 /** Erstes Feld einer Tag-Zeile deuten: array(art, kennung). */
 function bl_kennung($wert)
 {
+    $irk = bl_irk_kennung($wert);
+    if ($irk !== '') {
+        return array('irk', $irk);
+    }
     $ib = bl_ibeacon($wert);
     if ($ib !== '') {
         return array('ibeacon', $ib);
@@ -704,7 +749,7 @@ function bl_thema($tag)
 /** Sieht dieses Feld nach Zusatzangaben aus? (wie sind_optionen in Python) */
 function bl_sind_optionen($text)
 {
-    return (bool) preg_match('/^\s*(' . implode('|', bl_tag_optionen()) . ')\s*=/i',
+    return (bool) preg_match('/^\s*(' . implode('|', array_merge(bl_tag_optionen(), bl_altoptionen())) . ')\s*=/i',
                              (string) $text);
 }
 
@@ -800,8 +845,13 @@ function bl_config_read($datei = null)
             $name = isset($teile[2]) ? $teile[2] : '';
             $viertes = isset($teile[3]) ? $teile[3] : '';
             $opt = array();
+            $altopt = array();
             if ($viertes !== '' && bl_sind_optionen($viertes)) {
                 $opt = bl_optionen_lesen($viertes);
+                // B19 (Gruppe 13): wirkungslose Altoptionen merken - das Speichern verwirft sie mit Hinweis.
+                if (preg_match_all('/(?:^|,)\s*(' . implode('|', bl_altoptionen()) . ')\s*=/i', $viertes, $bl_am)) {
+                    $altopt = array_values(array_unique(array_map('strtolower', $bl_am[1])));
+                }
             } elseif ($viertes !== '') {
                 $name .= '|' . $viertes;
             }
@@ -813,7 +863,7 @@ function bl_config_read($datei = null)
                     'aktiv' => in_array($aktiv, array('1', 'on', 'true'), true) ? '1' : '0',
                     'name' => trim($name),
                     'opt' => $opt,
-                );
+                ) + ($altopt ? array('altopt' => $altopt) : array());
             }
             continue;
         }
@@ -895,6 +945,8 @@ function bl_config_write($werte, $tags)
         $kennung = isset($tag['kennung']) ? $tag['kennung'] : '';
         if ($art === 'ibeacon') {
             $kennung = bl_ibeacon($kennung);
+        } elseif ($art === 'irk') {
+            $kennung = bl_irk_kennung($kennung);   // V1 (Gruppe 13)
         } else {
             $art = 'mac';
             $kennung = bl_mac($kennung);
@@ -1286,21 +1338,46 @@ function bl_archiv_text()
  * (Faelle P6, S1); aus einem Archiv schrieb er in die Steuerdatei der Anlage
  * (P5). Der Dienst verwirft zusaetzlich jeden Auftrag, der aelter als 60 s ist.
  */
-function bl_steuern($art, $kennung = '', $dauer = 0)
+function bl_steuern($art, $kennung = '', $dauer = 0, $bruecke = false)
 {
     if (bl_paths()['home'] === '') {
-        return bl_archiv_text();
+        return $bruecke ? 'ARCHIV' : bl_archiv_text();
     }
     if (bl_dienst_pid() <= 0) {
-        return bl_t('TEST.STEUER_OHNE_DIENST');
+        return $bruecke ? 'DIENST_AUS' : bl_t('TEST.STEUER_OHNE_DIENST');
     }
     $daten = array('art' => (string) $art, 'kennung' => (string) $kennung,
                    'dauer' => (int) $dauer, 'zeit' => time());
     $json = json_encode($daten, JSON_UNESCAPED_UNICODE);
-    if ($json === false || !bl_datei_schreiben(bl_paths()['steuer'], $json, 0640)) {
-        return bl_t('TEST.STEUER_FEHLER');
+    if ($json === false) {
+        return $bruecke ? 'STEUER_FEHLER' : bl_t('TEST.STEUER_FEHLER');
     }
-    return '';
+    // E3 (Gruppe 13): die Auftragsdatei ist EIN Platz - der Dienst liest sie je Takt einmal und loescht sie. Bis
+    // 1.3.27 ueberschrieb ein zweiter Auftrag binnen eines Taktes den ersten (heute ohne Folgen, weil nur die
+    // Oberflaeche schrieb; mit der Befehlsbruecke schreiben zwei). Jetzt: warten, solange sie noch liegt, hoechstens
+    // 2 x intervall + 1 s in 0,25-s-Schritten; Pruefen und Schreiben unter einer kurzen Sperrdatei <steuer>.sperre
+    // (flock). Kein Dienstcode aendert sich; die Bruecke haelt keinen Kindprozess offen, also nichts zu vererben.
+    $ziel = bl_paths()['steuer'];
+    list($cfg) = bl_config_read();
+    $ende = microtime(true) + 2 * max(2, (int) bl_cfg($cfg, 'intervall', '5')) + 1;
+    $sh = @fopen($ziel . '.sperre', 'c');
+    while (true) {
+        $gesperrt = $sh !== false && @flock($sh, LOCK_EX);
+        clearstatcache(true, $ziel);
+        if (!is_file($ziel)) {
+            $ok = bl_datei_schreiben($ziel, $json, 0640);
+            if ($gesperrt) { @flock($sh, LOCK_UN); }
+            if ($sh !== false) { @fclose($sh); }
+            return $ok ? '' : ($bruecke ? 'STEUER_FEHLER' : bl_t('TEST.STEUER_FEHLER'));
+        }
+        if ($gesperrt) { @flock($sh, LOCK_UN); }
+        if (microtime(true) >= $ende) {
+            break;
+        }
+        usleep(250000);
+    }
+    if ($sh !== false) { @fclose($sh); }
+    return $bruecke ? 'BELEGT' : bl_t('TEST.STEUER_BELEGT');
 }
 
 /**
@@ -1499,6 +1576,10 @@ function bl_sensor_rueckfall()
         'laufzeit_s'  => array('min' => 0,   'max' => 4294967295, 'einheit' => 's'),
         'bewegung'    => array('min' => 0,   'max' => 255,        'einheit' => ''),
         'folge'       => array('min' => 0,   'max' => 65535,      'einheit' => ''),
+        // Gruppe 13 (V2, BTHome v2)
+        'helligkeit'  => array('min' => 0,   'max' => 120000,     'einheit' => 'lx'),
+        'fenster'     => array('min' => 0,   'max' => 1,          'einheit' => ''),
+        'bewegungsmelder' => array('min' => 0, 'max' => 1,        'einheit' => ''),
     );
     foreach ($k as $n => $_i) {
         $k[$n]['art'] = 'analog';
@@ -1666,7 +1747,10 @@ function bl_zusatzthemen_alle()
 {
     $out = array(
         'distance'   => array('s' => 'THEMA.DISTANCE',   'art' => 'analog', 'min' => -1, 'max' => 1000, 'einheit' => 'm'),
-        'battery'    => array('s' => 'THEMA.BATTERY',    'art' => 'analog', 'min' => 0,  'max' => 100,  'einheit' => '%'),
+        'battery'    => array('s' => 'THEMA.BATTERY',    'art' => 'analog', 'min' => -1, 'max' => 100,  'einheit' => '%'),
+        // Gruppe 13: Taster-Ereignis (V2, nur mit bthome) und Ergebnis der Kalibrierung (E5)
+        'button'       => array('s' => 'THEMA.BUTTON',       'art' => 'text',   'min' => 0,    'max' => 0, 'einheit' => ''),
+        'kalibrierung' => array('s' => 'THEMA.KALIBRIERUNG', 'art' => 'analog', 'min' => -255, 'max' => 0, 'einheit' => 'dBm'),
         'battery_ts' => array('s' => 'THEMA.BATTERY_TS', 'art' => 'analog', 'min' => 0,  'max' => 2147483647, 'einheit' => ''),
         'raum'       => array('s' => 'THEMA.RAUM',       'art' => 'text',   'min' => 0,  'max' => 0,    'einheit' => ''),
         'raum_seit'  => array('s' => 'THEMA.RAUM_SEIT',  'art' => 'analog', 'min' => 0,  'max' => 2147483647, 'einheit' => ''),
@@ -1687,7 +1771,7 @@ function bl_zusatzthemen($cfg)
     }
     if (bl_cfg($cfg, 'batterie', '0') === '1') {
         $out['battery'] = array('s' => 'THEMA.BATTERY', 'art' => 'analog',
-                                'min' => 0, 'max' => 100, 'einheit' => '%');
+                                'min' => -1, 'max' => 100, 'einheit' => '%');
         $out['battery_ts'] = array('s' => 'THEMA.BATTERY_TS', 'art' => 'analog',
                                    'min' => 0, 'max' => 2147483647, 'einheit' => '');
     }
@@ -1707,6 +1791,8 @@ function bl_allgemeine_themen()
         'server/online'         => array('s' => 'THEMA.SRV_ONLINE',   'art' => 'digital', 'min' => 0, 'max' => 1, 'einheit' => ''),
         'server/ok'             => array('s' => 'THEMA.SRV_OK',       'art' => 'digital', 'min' => 0, 'max' => 1, 'einheit' => ''),
         'server/ts'             => array('s' => 'THEMA.SRV_TS',       'art' => 'analog',  'min' => 0, 'max' => 2147483647, 'einheit' => ''),
+        // Gruppe 13: das Lebenszeichen fuer Loxone (hoechstens alle 30 s, 0-999, nie retained)
+        'status/zaehler'        => array('s' => 'THEMA.STATUS_ZAEHLER', 'art' => 'analog', 'min' => 0, 'max' => 999, 'einheit' => ''),
         'server/adapter_ok'     => array('s' => 'THEMA.SRV_ADAPTER',  'art' => 'digital', 'min' => 0, 'max' => 1, 'einheit' => ''),
         'server/letzte_sichtung' => array('s' => 'THEMA.SRV_SICHT',   'art' => 'analog',  'min' => 0, 'max' => 2147483647, 'einheit' => ''),
         'summary/present'       => array('s' => 'THEMA.SUM_PRESENT',  'art' => 'analog',  'min' => 0, 'max' => 999, 'einheit' => ''),
@@ -1968,105 +2054,10 @@ function bl_x($s)
     return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
 }
 
-function bl_xml_virtual_in_http($kopf, $cmds)
-{
-    $crlf = "\r\n";
-    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
-    $o .= '<VirtualInHttp ';
-    $o .= 'HintText="' . bl_x(isset($kopf['hint']) ? $kopf['hint'] : '') . '" ';
-    $o .= 'Title="' . bl_x($kopf['title']) . '" ';
-    $o .= 'Comment="' . bl_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
-    $o .= 'Address="' . bl_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
-    $o .= 'PollingTime="' . bl_x(isset($kopf['polling']) ? $kopf['polling'] : '60') . '"';
-    $o .= '>' . $crlf;
-    $o .= "\t" . '<Info templateType="2" minVersion="17010727"/>' . $crlf;
-    foreach ($cmds as $c) {
-        $min = isset($c['min']) && $c['min'] !== null ? $c['min'] : 0;
-        $max = isset($c['max']) && $c['max'] !== null ? $c['max'] : 100;
-        $einheit = isset($c['einheit']) ? trim((string) $c['einheit']) : '';
-        // Seit 1.3.24 (Welle Bild 19, Entwurf bl E13) traegt der Befehl seine
-        // Nachkommastellen selbst: ganze Zahlen <v.0>, Messwerte mit Komma <v.1>.
-        // Ohne Angabe bleibt es bei <v.1> wie bis 1.3.23.
-        $stellen = isset($c['stellen']) ? (int) $c['stellen'] : 1;
-        $unit = '<v.' . $stellen . '>' . ($einheit === '' ? '' : ' ' . $einheit);
-        $o .= "\t" . '<VirtualInHttpCmd ';
-        $o .= 'Title="' . bl_x($c['title']) . '" ';
-        $o .= 'Comment="' . bl_x(isset($c['comment']) ? $c['comment'] : '') . '" ';
-        $o .= 'Check="' . bl_x(isset($c['check']) ? $c['check'] : ' ') . '" ';
-        $o .= 'Signed="' . (((int) $min) < 0 ? 'true' : 'false') . '" ';
-        $o .= 'Analog="true" ';
-        $o .= 'SourceValLow="0" ';
-        $o .= 'DestValLow="0" ';
-        $o .= 'SourceValHigh="100" ';
-        $o .= 'DestValHigh="100" ';
-        $o .= 'DefVal="0" ';
-        $o .= 'MinVal="' . bl_x($min) . '" ';
-        $o .= 'MaxVal="' . bl_x($max) . '" ';
-        $o .= 'Unit="' . bl_x($unit) . '" ';
-        $o .= 'HintText="' . bl_x(isset($c['hint']) ? $c['hint'] : '') . '"';
-        $o .= '/>' . $crlf;
-    }
-    $o .= '</VirtualInHttp>' . $crlf;
-    return $o;
-}
-
-/**
- * Vorlage der MQTT-Eingaenge erzeugen.
- * Rueckgabe: array(dateiname, inhalt, anzahl, uebersprungen)
- *
- * Der Gateway-Name eines Themas entsteht, indem das Gateway '/' und '%'
- * durch '_' ersetzt. Punkte bleiben stehen.
- */
-/** Zeichen zaehlen ohne mbstring (wie bl_kuerzen()). */
-function bl_zeichen($s)
-{
-    $n = @preg_match_all('/./us', (string) $s);
-    return $n === false ? strlen((string) $s) : (int) $n;
-}
-
-/**
- * Der kurze Kachelname eines Themas (seit 1.3.20, Pruefung 29.09.2026, O12).
- * Der Comment einer Vorlagenzeile wird in Loxone zum Anzeigenamen
- * (Regeln/07); bis 1.3.19 war er "Bezeichnung - lange Erklaerung", bis zu 81
- * Zeichen. Die lange Erklaerung bleibt in der Thementabelle.
- */
-function bl_kurz($schluessel)
-{
-    $k = 'KURZ.' . strtoupper(str_replace('/', '_', (string) $schluessel));
-    $t = bl_t($k);
-    if ($t === $k) {
-        $teile = explode('/', (string) $schluessel);
-        $t = end($teile);
-    }
-    return $t;
-}
-
-/** Comment der Vorlage: Bezeichnung und Kurzname, hoechstens 40 Zeichen. */
-function bl_kommentar($bez, $kurz)
-{
-    $bez = trim((string) $bez);
-    $kurz = (string) $kurz;
-    if ($bez === '') {
-        return bl_kuerzen($kurz, 40);
-    }
-    $platz = 40 - bl_zeichen($kurz) - 1;
-    if ($platz < 4) {
-        return bl_kuerzen($kurz, 40);
-    }
-    if (bl_zeichen($bez) > $platz) {
-        $bez = bl_kuerzen($bez, $platz - 1) . '…';
-    }
-    return $bez . ' ' . $kurz;
-}
-
-/** Nachkommastellen eines Vorlagenbefehls (seit 1.3.24, Entwurf bl E13): nur Messwerte
- *  mit Komma tragen <v.1>, alles andere sind ganze Zahlen (0/1, Zaehler, Sekunden,
- *  Zeitstempel, dBm, Prozent der Batterie). */
-function bl_vorlage_stellen($schluessel)
-{
-    return in_array((string) $schluessel,
-                    array('distance', 'sensor/temperatur', 'sensor/feuchte', 'sensor/druck'), true) ? 1 : 0;
-}
+/* Gruppe 13 (1.3.28, E12): bl_xml_virtual_in_http(), bl_vorlage() und ihre Helfer bl_zeichen(),
+ * bl_kurz(), bl_kommentar(), bl_vorlage_stellen() sind entfallen - die Vorlage legte Virtuelle
+ * HTTP-Eingaenge an http://localhost an, den verbotenen Kunstgriff (Wiki widget_mqtt). Ersatz:
+ * Namenstabelle bl_mqtt_namen() und Vorlage MQTT-Befehle bl_vorlage_mqtt_out() (unten). */
 
 /** Die Personen der aktiven Tags (Zusatzangabe "person"), in Tag-Reihenfolge und so
  *  gesaeubert wie im Dienst (thema_saeubern) - daraus werden die Themen person/<P>/... */
@@ -2105,117 +2096,6 @@ function bl_wlan_zuordnung($text)
         $aus[] = array($m[1], $m[2]);
     }
     return array_slice($aus, 0, 20);
-}
-
-function bl_vorlage($cfg, $tags)
-{
-    $praefix = bl_cfg($cfg, 'themenpraefix', 'blescanner');
-    $fuss = sprintf(bl_t('VORLAGE.FUSS'), date('d.m.Y'));
-    $cmds = array();
-    $uebersprungen = array();
-
-    foreach (bl_allgemeine_themen() as $thema => $info) {
-        if ($info['art'] === 'text') {
-            $uebersprungen[] = $praefix . '/' . $thema;
-            continue;
-        }
-        $cmds[] = array(
-            'title'   => $praefix . '_' . str_replace('/', '_', $thema),
-            'comment' => bl_kommentar('', bl_kurz($thema)),
-            'check'   => ' ',
-            'min'     => $info['min'], 'max' => $info['max'],
-            'einheit' => $info['einheit'],
-            'stellen' => bl_vorlage_stellen($thema),
-            // Frage 6 (Bauliste 29.09.2026): present gilt nur zusammen mit
-            // server/online - der Hinweis steht an beiden Eingaengen.
-            'hint'    => $thema === 'server/online' ? bl_t('VORLAGE.HINT_ONLINE') : '',
-        );
-    }
-
-    $grund = array_merge(bl_status_themen(), bl_zusatzthemen($cfg));
-    foreach ($tags as $tag) {
-        if ($tag['aktiv'] !== '1') {
-            continue;
-        }
-        $t = bl_thema($tag);
-        $bez = $tag['name'] !== '' ? $tag['name'] : $tag['kennung'];
-        // Die Messwerte kommen je Tag dazu - und nur die, die dieser Tag
-        // wirklich gesendet hat. Neu in 1.3.14; vorher fehlten sie ganz,
-        // siehe bl_sensor_themen().
-        $alle = array_merge($grund, bl_sensor_themen($tag['kennung']));
-        foreach ($alle as $schluessel => $info) {
-            if ($info['art'] === 'text') {
-                // Textthemen gehoeren NICHT in die Vorlage: das nachgebaute
-                // Format ist nur fuer Zahlenwerte belegt, und ein
-                // Analogeingang auf einem Text steht dauerhaft auf 0.
-                $uebersprungen[] = $praefix . '/' . $t . '/' . $schluessel;
-                continue;
-            }
-            $cmds[] = array(
-                // Der Schraegstrich MUSS hier heraus: seit 1.3.14 gibt es
-                // Schluessel mit Unterthema ("sensor/temperatur"), und ein
-                // "/" im Namen eines virtuellen Eingangs ist in Loxone
-                // Config nicht zulaessig. Die allgemeinen Themen oben machen
-                // dieselbe Ersetzung seit jeher.
-                'title'   => $praefix . '_' . $t . '_'
-                             . str_replace('/', '_', $schluessel),
-                'comment' => bl_kommentar($bez, bl_kurz($schluessel)),
-                'check'   => ' ',
-                'min'     => $info['min'], 'max' => $info['max'],
-                'einheit' => $info['einheit'],
-                'stellen' => bl_vorlage_stellen($schluessel),
-                'hint'    => $schluessel === 'present' ? bl_t('VORLAGE.HINT_PRESENT') : '',
-            );
-        }
-    }
-
-    // NEU IN 1.3.24 (Welle Bild 19, Entwurf bl E13): die Personenthemen.
-    // person/<P>/present ist im Dienst das ODER ueber die aktiven Tags der
-    // Person (Zusatzangabe "person") - der natuerliche Anwesenheitsweg; bis
-    // 1.3.23 fehlte er in der Vorlage, wer ihn nutzen wollte, legte die
-    // Eingaenge von Hand an. Dieselbe Regel wie im Dienst: Personen aus den
-    // aktiven Tags (thema_saeubern), anwesend_gesamt je Paar der Zuordnung
-    // nur bei eingeschalteter Kopplung (wlan_zusammenfuehren). quelle ist
-    // Text und bleibt wie alle Textthemen draussen. Bestehende Importe bleiben
-    // gueltig: die Titel der uebrigen Befehle aendern sich nicht.
-    $personen = bl_personen($tags);
-    $gekoppelt = array();
-    if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
-        foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) {
-            $gekoppelt[] = $paar[1];
-        }
-    }
-    foreach (array_merge($personen, array_values(array_diff($gekoppelt, $personen))) as $pn) {
-        $themen = array();
-        if (in_array($pn, $personen, true)) {
-            $themen['present'] = array(0, 1, bl_t('VORLAGE.HINT_PRESENT'));
-            $themen['last_seen_ts'] = array(0, 2147483647, '');
-        }
-        if (in_array($pn, $gekoppelt, true)) {
-            $themen['anwesend_gesamt'] = array(0, 1, '');
-            $uebersprungen[] = $praefix . '/person/' . $pn . '/quelle';
-        }
-        foreach ($themen as $k => $w) {
-            $cmds[] = array(
-                'title'   => $praefix . '_person_' . $pn . '_' . $k,
-                'comment' => bl_kommentar($pn, bl_kurz('person/' . $k)),
-                'check'   => ' ',
-                'min'     => $w[0], 'max' => $w[1],
-                'einheit' => '',
-                'stellen' => 0,
-                'hint'    => $w[2],
-            );
-        }
-    }
-
-    $inhalt = bl_xml_virtual_in_http(array(
-        'title'   => 'BLE-Scanner NG',
-        'address' => 'http://localhost',
-        'polling' => '604800',
-        'comment' => $fuss,
-        'hint'    => '',
-    ), $cmds);
-    return array('VI_BLE-Scanner-NG.xml', $inhalt, count($cmds), $uebersprungen);
 }
 
 /**
@@ -2307,16 +2187,26 @@ function bl_bausteinliste($cfg, $tags)
             bl_t('BAUSTEIN.Z2_13'),
             bl_t('BAUSTEIN.Z2_14'),
             bl_t('BAUSTEIN.Z2_15'),
+            bl_t('BAUSTEIN.Z2_16'),
+            bl_t('BAUSTEIN.Z2_17'),
+            bl_t('BAUSTEIN.Z2_18'),
+            bl_t('BAUSTEIN.Z2_19'),
+            bl_t('BAUSTEIN.Z2_20'),
+            bl_t('BAUSTEIN.Z2_21'),
+            bl_t('BAUSTEIN.Z2_22'),
+            bl_t('BAUSTEIN.Z2_23'),
         ), array(
             bl_t('BAUSTEIN.SEITE2_SCHRITT1'),
             bl_t('BAUSTEIN.SEITE2_SCHRITT2'),
             bl_t('BAUSTEIN.SEITE2_SCHRITT3'),
             bl_t('BAUSTEIN.SEITE2_SCHRITT4'),
             bl_t('BAUSTEIN.SEITE2_SCHRITT5'),
+            bl_t('BAUSTEIN.SEITE2_SCHRITT6'),
         ), array(
             bl_t('BAUSTEIN.SEITE2_H1'),
             bl_t('BAUSTEIN.SEITE2_H2'),
             bl_t('BAUSTEIN.SEITE2_H3'),
+            bl_t('BAUSTEIN.SEITE2_H4'),
         )),
         array(3, 'BLE-Scanner NG Messwerte', 'einbindung_loxone_messwerte.png', array(
             bl_t('BAUSTEIN.Z3_01'),
@@ -2390,7 +2280,7 @@ function bl_bausteinliste_ersatz($cfg, $tags)
     $tmc = 4 * max(30, (int) bl_cfg($cfg, 'intervall', '5'));
     return array(
         'blescanner_'            => $praefix . '_',
-        'blescanner/#'           => $praefix . '/#',
+        'blescanner/'            => $praefix . '/',
         'Person1'                => isset($personen[0]) ? $personen[0] : 'Person1',
         'Person2'                => isset($personen[1]) ? $personen[1] : 'Person2',
         'schluessel1'            => $schluessel !== '' ? $schluessel : 'schluessel1',
@@ -2461,22 +2351,8 @@ function bl_t($schluessel)
     return isset($texte[$a][$s]) ? $texte[$a][$s] : $schluessel;
 }
 
-/** Alle Sprachschluessel eines Abschnitts - fuer die Selbstpruefung. */
-function bl_sprachschluessel($abschnitt)
-{
-    $pp = bl_paths();
-    $pfad = $pp['home'] !== ''
-        ? $pp['home'] . '/templates/plugins/' . $pp['plugin'] . '/lang' : '';
-    if ($pfad === '' || !is_dir($pfad)) {
-        $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
-    }
-    $out = array();
-    foreach (array('de', 'en') as $spr) {
-        $d = @parse_ini_file($pfad . '/language_' . $spr . '.ini', true, INI_SCANNER_RAW);
-        $out[$spr] = (is_array($d) && isset($d[$abschnitt])) ? array_keys($d[$abschnitt]) : array();
-    }
-    return $out;
-}
+/* Gruppe 13 (B22): bl_sprachschluessel() ist entfallen - bl_sprachen_vergleich() in bl_test.php liest alle
+ * Abschnitte von language_de/en.ini und help_de/en.ini selbst. */
 
 
 /**
@@ -3090,12 +2966,13 @@ function bl_zweig_themen()
     return array(
         'person/<P>/present'      => array('s' => 'THEMA.P_PRESENT', 'art' => 'digital'),
         'person/<P>/last_seen_ts' => array('s' => 'THEMA.P_LAST_SEEN_TS', 'art' => 'analog'),
-        // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026), nur
-        // bei eingeschalteter Kopplung
+        // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026); seit Gruppe 13 (V10) fuer jede Person
         'person/<P>/anwesend_gesamt' => array('s' => 'THEMA.P_GESAMT', 'art' => 'digital'),
         'person/<P>/quelle'          => array('s' => 'THEMA.P_QUELLE', 'art' => 'text'),
         'scanner/<S>/<T>/present' => array('s' => 'THEMA.SC_PRESENT', 'art' => 'digital'),
         'scanner/<S>/<T>/rssi'    => array('s' => 'THEMA.SC_RSSI', 'art' => 'analog'),
+        // Gruppe 13 (E9): Lebenszeichen je Scanner, nur bei scanner_themen
+        'scanner/<S>/status/zaehler' => array('s' => 'THEMA.SC_ZAEHLER', 'art' => 'analog'),
     );
 }
 
@@ -3198,4 +3075,753 @@ function bl_wachposten()
         return bl_t('WACHE.FALSCH');
     }
     return '';
+}
+
+/* ==================================================================
+ * Gruppe 13 (1.3.28): MQTT-Gateway (Namenstabelle, V2-Hakenliste), Befehlsbruecke, IRK, Haus-Themen
+ * ==================================================================
+ *
+ * Bauvorschrift wz_bild/GRUPPE13_BAUVORSCHRIFT.md, Entwurf Musterprojekt/entwurf_gruppe13_bl.txt (2.5-2.7,
+ * 3.2-3.7, 7), ENTSCHEIDUNGEN_GRUPPE13_BLE.md E1-E19. Die Werte sendet der Dienst selbst ueber paho (seit
+ * jeher); der Reiter "Einbindung in Loxone" nennt jetzt die Gateway-Namen fuer einfache Virtuelle Eingaenge -
+ * die Vorlage mit Virtuellen HTTP-Eingaengen (VirtualInHttp an http://localhost) ist entfallen (E12; Wiki
+ * widget_mqtt, Gedaechtnis gateway-werte-virtueller-eingang). Befehle aus Loxone nimmt die gemeinsame
+ * Befehlsbruecke an (bin/befehlsbruecke.php, Stammfassung; bin/befehle_zuordnung.php) und reicht sie ueber
+ * bl_bb_tun() an bl_steuern() - die vorhandene Auftragsdatei. Kein HTTP auf sich selbst, kein Kindprozess.
+ */
+
+/** Altoptionen je Tag (B19): beim Lesen erkannt, beim Speichern verworfen - dieselbe Liste wie ALTOPTIONEN. */
+function bl_altoptionen()
+{
+    return array('min', 'raum');
+}
+
+/** V1: "IRK:<name>" normieren (wie kennung_lesen() in Python), sonst ''. */
+function bl_irk_kennung($wert)
+{
+    return preg_match('/^irk:([A-Za-z0-9_-]{1,40})$/i', trim((string) $wert), $m) ? 'IRK:' . $m[1] : '';
+}
+
+/** V1: irk.json (0600) neben der Konfiguration: Name -> 32 Hex. Nur gueltige Eintraege. */
+function bl_irk_datei()
+{
+    return bl_paths()['configdir'] . '/irk.json';
+}
+
+function bl_irk_lesen()
+{
+    $f = bl_irk_datei();
+    $j = is_readable($f) ? @json_decode((string) @file_get_contents($f), true) : null;
+    $aus = array();
+    if (is_array($j)) {
+        foreach ($j as $n => $v) {
+            if (preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) && is_string($v)
+                && preg_match('/^[0-9A-Fa-f]{32}$/', $v)) {
+                $aus[(string) $n] = strtolower($v);
+            }
+        }
+    }
+    return $aus;
+}
+
+/** Schreiben mit 0600 (Rechte vor Inhalt, atomar). Leere Tabelle: Datei bleibt mit {} stehen. */
+function bl_irk_schreiben($tab)
+{
+    $f = bl_irk_datei();
+    if (bl_paths()['home'] === '' && !is_dir(dirname($f))) {
+        return false;
+    }
+    ksort($tab);
+    return bl_datei_schreiben($f, json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n", 0600);
+}
+
+/** Anzeige im Formular: nie der Schluessel - nur "hinterlegt ... <letzte vier Hex>" oder "fehlt". */
+function bl_irk_anzeige($name, $tab = null)
+{
+    if (!is_array($tab)) { $tab = bl_irk_lesen(); }
+    return isset($tab[$name]) ? sprintf(bl_t('TEXT.IRK_HINTERLEGT'), substr($tab[$name], -4))
+                              : bl_t('TEXT.IRK_FEHLT');
+}
+
+/**
+ * V1: die Schluessel aus dem Formular (tag_irk[<i>], nur Schreiben) zu den Tags. Leer = unveraendert.
+ * Rueckgabe array(neue Tabelle, geaendert). Beanstandet wird in $mangel (Feld beanstandet, Tabelle unveraendert).
+ */
+function bl_irk_aus_post(&$mangel, $tags, &$bean = null)
+{
+    $tab = bl_irk_lesen();
+    $roh = isset($_POST['tag_irk']) && is_array($_POST['tag_irk']) ? $_POST['tag_irk'] : array();
+    $kenn = isset($_POST['tag_kennung']) && is_array($_POST['tag_kennung']) ? $_POST['tag_kennung'] : array();
+    $geaendert = false;
+    foreach ($roh as $i => $w) {
+        if (!is_string($w) || trim($w) === '') {
+            continue;
+        }
+        $name = isset($kenn[$i]) ? bl_irk_kennung($kenn[$i]) : '';
+        $w = preg_replace('/[\s:]/', '', $w);
+        if ($name === '' || !preg_match('/^[0-9A-Fa-f]{32}$/', $w)) {
+            $mangel[] = sprintf(bl_t('MANGEL.IRK'), $name !== '' ? $name : (is_string($kenn[$i] ?? null) ? bl_kuerzen($kenn[$i], 40) : '-'));
+            if (is_array($bean)) { $bean[$i][] = 'irk'; }
+            continue;
+        }
+        $tab[substr($name, 4)] = strtolower($w);
+        $geaendert = true;
+    }
+    // Schluessel entfernter Tags fallen weg (keine Waisen in irk.json).
+    $namen = array();
+    foreach ($tags as $t) {
+        if (isset($t['art']) && $t['art'] === 'irk') { $namen[] = substr($t['kennung'], 4); }
+    }
+    foreach (array_keys($tab) as $n) {
+        if (!in_array($n, $namen, true)) { unset($tab[$n]); $geaendert = true; }
+    }
+    return array($tab, $geaendert);
+}
+
+/** V6-V8/V12: <name> nach Regeln/07 Nr. 15 - dieselbe Regel wie haus_name() in bl_common.py. */
+function bl_haus_name($text)
+{
+    $t = strtolower((string) $text);
+    $t = strtr($t, array('ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss', 'Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue'));
+    $t = preg_replace('/[^a-z0-9]/', '_', $t);
+    return substr($t, 0, 40);
+}
+
+/**
+ * B24/E2: eine Tag-Zeile, die bl_tag_pruefen() verwirft, NICHT verlieren (Rueckweg nach dem Suchlauf). Uebernommen
+ * wird sie, wenn Kennung, aktiv und Name taugen; die Zusatzangaben bleiben unveraendert stehen, die Zeile traegt die
+ * Beanstandung ('_bean'). Speichern beanstandet sie erneut (bl_tags_aus_post) - nichts wird still geaendert oder
+ * geloescht. Rueckgabe Tag oder null.
+ */
+function bl_tag_beanstandet($t, $grund)
+{
+    if (!is_array($t)) {
+        return null;
+    }
+    foreach (array('kennung', 'aktiv', 'name') as $f) {
+        if (!isset($t[$f]) || !is_string($t[$f])) {
+            return null;
+        }
+    }
+    list($art, $kennung) = bl_kennung($t['kennung']);
+    if ($art === '') {
+        return null;
+    }
+    $opt = array();
+    foreach ((isset($t['opt']) && is_array($t['opt'])) ? $t['opt'] : array() as $k => $v) {
+        if (in_array($k, bl_tag_optionen(), true) && is_string($v)) {
+            $opt[$k] = $v;
+        }
+    }
+    $feld = strpos((string) $grund, 'opt.') === 0 ? substr((string) $grund, 4) : (string) $grund;
+    return array('art' => $art, 'kennung' => $kennung, 'mac' => $art === 'mac' ? $kennung : '',
+                 'aktiv' => $t['aktiv'] === '1' ? '1' : '0', 'name' => $t['name'], 'opt' => $opt,
+                 '_bean' => array($feld));
+}
+
+/* ---------------- Namenstabelle und V2-Hakenliste (Entwurf 2.5, E11) ---------------- */
+
+/** Der Name, den das MQTT-Gateway einem Thema gibt: Praefix und Thema, "/", "%" und Leerzeichen als "_". EINE Stelle. */
+function bl_vi_name($thema, $cfg)
+{
+    $p = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    return str_replace(array('/', '%', ' '), '_', $p . '/' . trim((string) $thema, '/'));
+}
+
+/**
+ * Die Themen fuer Loxone - EINE Quelle fuer Namenstabelle (Reiter Einbindung), Thementabelle (Reiter Test,
+ * test=themen, B25) und Pruefzeile. Aus denselben Quellen wie bisher: bl_allgemeine_themen(), bl_status_themen(),
+ * bl_zusatzthemen(), bl_sensor_themen() je aktivem Tag, bl_personen() (V10: anwesend_gesamt/quelle fuer JEDE Person),
+ * scanner/... bei scanner_themen, dazu status/zaehler, button, kalibrierung.
+ * Je Zeile: thema (ohne Praefix), name (Gateway), text (bool), retained, v2 ('N' Noncached, 'R' Resetaftersend, ''),
+ * muster (im Musterprojekt), min, max, s (Sprachschluessel der Bedeutung), wer (Tag-Bezeichnung oder Person).
+ */
+function bl_mqtt_namen($cfg, $tags)
+{
+    $aus = array();
+    $zeile = function ($thema, $info, $wer = '') use ($cfg, &$aus) {
+        $stamm = bl_thema_stamm($thema);
+        $v2 = '';
+        if ($thema === 'server/ok') { $v2 = 'N'; }
+        if ($stamm === 'button') { $v2 = 'R'; }
+        $aus[] = array('thema' => $thema, 'name' => bl_vi_name($thema, $cfg), 'text' => $info['art'] === 'text',
+                       'retained' => bl_retain_fuer($thema), 'v2' => $v2, 'muster' => false,
+                       'min' => isset($info['min']) ? $info['min'] : 0, 'max' => isset($info['max']) ? $info['max'] : 0,
+                       's' => $info['s'], 'wer' => $wer);
+    };
+    foreach (bl_allgemeine_themen() as $k => $info) {
+        $zeile($k, $info);
+    }
+    $grund = array_merge(bl_status_themen(), bl_zusatzthemen($cfg));
+    $scanner = trim((string) bl_cfg($cfg, 'scanner_name', ''));
+    foreach ($tags as $tag) {
+        if (!isset($tag['aktiv']) || $tag['aktiv'] !== '1') {
+            continue;
+        }
+        $t = bl_thema($tag);
+        $wer = $tag['name'] !== '' ? $tag['name'] : $tag['kennung'];
+        $alle = array_merge($grund, bl_sensor_themen($tag['kennung']));
+        if (isset($tag['opt']['batt']) && $tag['opt']['batt'] === '1' && !isset($alle['battery'])) {
+            $alle['battery'] = array('s' => 'THEMA.BATTERY', 'art' => 'analog', 'min' => -1, 'max' => 100, 'einheit' => '%');
+        }
+        $alle['kalibrierung'] = array('s' => 'THEMA.KALIBRIERUNG', 'art' => 'analog', 'min' => -255, 'max' => 0,
+                                      'einheit' => 'dBm');
+        foreach ($alle as $k => $info) {
+            $zeile($t . '/' . $k, $info, $wer);
+        }
+        if (bl_cfg($cfg, 'bthome', '0') === '1' && bl_cfg($cfg, 'beacon', '1') === '1') {
+            $zeile($t . '/button', array('s' => 'THEMA.BUTTON', 'art' => 'text'), $wer);
+        }
+    }
+    $personen = bl_personen($tags);
+    if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
+        foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) {
+            if (!in_array($paar[1], $personen, true)) { $personen[] = $paar[1]; }
+        }
+    }
+    foreach ($personen as $pn) {
+        foreach (bl_zweig_themen() as $k => $info) {
+            if (strpos($k, 'person/<P>/') !== 0) {
+                continue;
+            }
+            $info['min'] = substr($k, -15) === 'anwesend_gesamt' ? -1 : 0;
+            $info['max'] = $info['art'] === 'analog' ? 2147483647 : 1;
+            $zeile(str_replace('<P>', $pn, $k), $info, $pn);
+        }
+    }
+    if (bl_cfg($cfg, 'scanner_themen', '0') === '1') {
+        $zeile('scanner/' . ($scanner !== '' ? $scanner : '<S>') . '/status/zaehler',
+               array('s' => 'THEMA.SC_ZAEHLER', 'art' => 'analog', 'min' => 0, 'max' => 999));
+    }
+    // Musterprojekt (Entwurf 2.5): 21 Haken mit den Musternamen; mit E5 Kalibrierung 22.
+    $muster = bl_muster_themen();
+    foreach ($aus as $i => $z) {
+        $aus[$i]['muster'] = in_array($z['thema'], $muster, true);
+    }
+    return $aus;
+}
+
+/**
+ * Die Themen des Musterprojekts (Praefix-frei; Musternamen schluessel1, thermometer_wohnzimmer, Person1, Person2) -
+ * Entwurf 2.5 und Abschnitt 9: Seite 1 (7), Tags (9 + Kalibrierung E5), Messwerte (5) = 22 Haken.
+ * Mit eigenen Namen rechnet bl_bausteinliste_ersatz() dieselbe Ersetzung wie in der Bausteinliste.
+ */
+function bl_muster_themen()
+{
+    return array('server/online', 'status/zaehler', 'server/ok', 'summary/present', 'summary/tags',
+                 'person/Person1/anwesend_gesamt', 'person/Person2/anwesend_gesamt',
+                 'schluessel1/present', 'schluessel1/level', 'schluessel1/rssi_avg', 'schluessel1/last_seen',
+                 'schluessel1/distance', 'schluessel1/battery', 'person/Person1/quelle', 'summary/names',
+                 'schluessel1/raum', 'schluessel1/kalibrierung',
+                 'thermometer_wohnzimmer/present', 'thermometer_wohnzimmer/sensor/temperatur',
+                 'thermometer_wohnzimmer/sensor/feuchte', 'thermometer_wohnzimmer/sensor/batterie',
+                 'thermometer_wohnzimmer/last_seen');
+}
+
+/** Die Musterthemen mit den eigenen Namen (Praefix ohne, Alias und Personen wie bl_bausteinliste_ersatz()). */
+function bl_muster_themen_eigen($cfg, $tags)
+{
+    $e = bl_bausteinliste_ersatz($cfg, $tags);
+    $ersatz = array('Person1' => $e['Person1'], 'Person2' => $e['Person2'], 'schluessel1' => $e['schluessel1'],
+                    'thermometer_wohnzimmer' => $e['thermometer_wohnzimmer']);
+    $aus = array();
+    foreach (bl_muster_themen() as $t) {
+        $aus[] = strtr($t, $ersatz);
+    }
+    return $aus;
+}
+
+/* ---------------- Befehle fuer Loxone (Entwurf 3.2, 3.7; Musterprojekt Abschnitt 6) ---------------- */
+
+/** Der UDP-Eingang des MQTT-Gateways (general.json Mqtt.Udpinport), sonst 11884. */
+function bl_udp_eingang()
+{
+    $h = bl_paths()['home'];
+    $g = $h !== '' ? @json_decode((string) @file_get_contents($h . '/config/system/general.json'), true) : null;
+    $m = (is_array($g) && isset($g['Mqtt']) && is_array($g['Mqtt'])) ? $g['Mqtt'] : array();
+    $port = isset($m['Udpinport']) && is_numeric($m['Udpinport']) ? (int) $m['Udpinport'] : 0;
+    return ($port >= 1 && $port <= 65535) ? $port : 11884;
+}
+
+/** Rechnername fuer /dev/udp/<LoxBerry>/<Port> - ohne Port aus der Adresszeile. */
+function bl_host()
+{
+    $h = isset($_SERVER['HTTP_HOST']) ? (string) $_SERVER['HTTP_HOST'] : '';
+    $h = preg_replace('/:\d+$/', '', preg_replace('/[^A-Za-z0-9\.\-:\[\]]/', '', $h));
+    if ($h === '') {
+        $h = (string) (@gethostname() ?: 'loxberry');
+    }
+    return $h;
+}
+
+/**
+ * Die Befehle fuer Loxone - EINE Quelle fuer die Tabelle im Reiter Einbindung und die Vorlage MQTT-Befehle:
+ * je AKTIVEM Tag "BLE-Scanner NG: Testmodus <Name>" und "BLE-Scanner NG: Kalibrieren <Name>" (Nutzlast = Zweig des
+ * Tags), dazu "BLE-Scanner NG: Batterielauf" (1). Kein Titel gleicht einem Gateway-Eingang (die heissen
+ * <praefix>_..., hier "BLE-Scanner NG: ..."). Je Zeile: titel, name (Bruecke), wert, eingreifend.
+ */
+function bl_mqtt_befehle($cfg, $tags)
+{
+    $aus = array();
+    foreach ($tags as $tag) {
+        if (!isset($tag['aktiv']) || $tag['aktiv'] !== '1') {
+            continue;
+        }
+        $wer = $tag['name'] !== '' ? $tag['name'] : bl_thema($tag);
+        $aus[] = array('titel' => 'BLE-Scanner NG: Testmodus ' . $wer, 'name' => 'testmodus', 'wert' => bl_thema($tag),
+                       'eingreifend' => false);
+        $aus[] = array('titel' => 'BLE-Scanner NG: Kalibrieren ' . $wer, 'name' => 'kalibrierung',
+                       'wert' => bl_thema($tag), 'eingreifend' => false);
+    }
+    $aus[] = array('titel' => 'BLE-Scanner NG: Batterielauf', 'name' => 'batterie', 'wert' => '1', 'eingreifend' => true);
+    return $aus;
+}
+
+function bl_xml_virtual_out($kopf, $cmds)
+{
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    // Reihenfolge und Felder wie die massgebliche Ausfuhr aus Loxone Config (Bauart db_xml_virtual_out, Dashboard).
+    $o .= '<VirtualOut HintText="" Title="' . bl_x($kopf['title']) . '" Comment="' . bl_x($kopf['comment'])
+        . '" Address="' . bl_x($kopf['address']) . '" CmdInit="" CloseAfterSend="true" CmdSep=";">' . $crlf;
+    $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
+    foreach ($cmds as $c) {
+        $o .= "\t" . '<VirtualOutCmd Title="' . bl_x($c['title']) . '" Comment="' . bl_x($c['comment'])
+            . '" CmdOnMethod="GET" CmdOffMethod="GET" CmdOn="' . bl_x($c['on']) . '" CmdOnHTTP="" CmdOnPost="" '
+            . 'CmdOff="" CmdOffHTTP="" CmdOffPost="" CmdAnswer="" Analog="false" Repeat="0" RepeatRate="0" HintText=""/>'
+            . $crlf;
+    }
+    $o .= '</VirtualOut>' . $crlf;
+    return $o;
+}
+
+/**
+ * Vorlage "MQTT-Befehle" (Entwurf 3.7): ein Virtueller Ausgang an /dev/udp/<LoxBerry>/<UDP-Eingang des Gateways>,
+ * CloseAfterSend, je Zeile aus bl_mqtt_befehle() "publish <praefix>/befehl/<name> <wert>" (nie retain).
+ * Rueckgabe array(Dateiname, Inhalt).
+ */
+function bl_vorlage_mqtt_out($cfg, $tags)
+{
+    $praefix = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    $cmds = array();
+    foreach (bl_mqtt_befehle($cfg, $tags) as $b) {
+        $cmds[] = array('title' => $b['titel'], 'comment' => bl_kuerzen(substr($b['titel'], strlen('BLE-Scanner NG: ')), 40),
+                        'on' => 'publish ' . $praefix . '/befehl/' . $b['name'] . ' ' . $b['wert']);
+    }
+    return array('VQ_BLE-Scanner-NG_MQTT.xml', bl_xml_virtual_out(array(
+        'title' => 'BLE-Scanner NG Befehle (MQTT)',
+        'address' => '/dev/udp/' . bl_host() . '/' . bl_udp_eingang(),
+        'comment' => bl_kuerzen(sprintf(bl_t('VORLAGE.FUSS'), date('d.m.Y')), 40),
+    ), $cmds));
+}
+
+/* ---------------- Befehlsbruecke: die Seite der Linie (Entwurf 3.3-3.5) ---------------- */
+
+/** Einstellungen fuer die Bruecke (bl_config_read() liest jedes Mal - ein Haken wirkt ohne Neustart). */
+function bl_bb_einstellungen()
+{
+    list($c) = bl_config_read();
+    return array('praefix' => (string) bl_cfg($c, 'themenpraefix', 'blescanner'),
+                 'annehmen' => bl_cfg($c, 'befehle_mqtt_ein', '0') === '1',
+                 'eingreifend' => bl_cfg($c, 'befehle_eingreifend_ein', '0') === '1',
+                 'mqtt_ein' => bl_cfg($c, 'mqtt', '1') === '1');
+}
+
+/**
+ * Protokoll der Befehlsbruecke: <logdir>/befehlsbruecke.log, angehaengt unter flock, "YYYY-MM-DD HH:MM:SS STUFE text",
+ * gekappt wie log_kappung_kb (die zweite Haelfte bleibt). Der Reiter Logdateien listet die Datei von selbst.
+ * Kein Kennwort - die Stammfassung gibt keins weiter.
+ */
+function bl_bb_protokoll($stufe, $text)
+{
+    $p = bl_paths();
+    if ($p['home'] === '' || !is_dir($p['logdir'])) {
+        return;
+    }
+    $f = $p['logdir'] . '/befehlsbruecke.log';
+    $zeile = date('Y-m-d H:i:s') . ' ' . strtoupper((string) $stufe) . ' '
+           . str_replace(array("\r", "\n"), ' ', (string) $text) . "\n";
+    $fh = @fopen($f, 'a+');
+    if ($fh === false) {
+        return;
+    }
+    if (@flock($fh, LOCK_EX)) {
+        list($c) = bl_config_read();
+        $grenze = max(16, (int) bl_cfg($c, 'log_kappung_kb', '500')) * 1024;
+        $st = @fstat($fh);
+        if ($st && $st['size'] > $grenze) {
+            @fseek($fh, (int) ($st['size'] / 2));
+            $rest = (string) @stream_get_contents($fh);
+            $nl = strpos($rest, "\n");
+            $rest = $nl === false ? '' : substr($rest, $nl + 1);
+            @ftruncate($fh, 0);
+            @fseek($fh, 0);
+            @fwrite($fh, $rest);
+        }
+        @fseek($fh, 0, SEEK_END);
+        @fwrite($fh, $zeile);
+        @flock($fh, LOCK_UN);
+    }
+    @fclose($fh);
+}
+
+/** Upgrade-Marke data/plugins/<ordner>.upgrade_laeuft: liegt sie und ist hoechstens 3600 s alt? (wie daemon, Waechter) */
+function bl_upgrade_laeuft()
+{
+    $p = bl_paths();
+    if ($p['home'] === '') {
+        return false;
+    }
+    $m = $p['datadir'] . '.upgrade_laeuft';
+    return is_file($m) && (time() - (int) @filemtime($m)) < 3600;
+}
+
+/**
+ * Ein Befehl der Befehlsbruecke (tun() in bin/befehle_zuordnung.php). $name testmodus | kalibrierung | batterie, $wert
+ * der von der Bruecke gepruefte Wert (Text = Zweig des Tags, bzw. 1). Reihenfolge (Entwurf 3.4): Upgrade-Marke ->
+ * AKTUALISIERUNG; Dienst laeuft nicht -> DIENST_AUS; Zweig -> Kennung (TAG_UNBEKANNT/TAG_INAKTIV) bzw. Batterielauf
+ * moeglich (BATTERIE_AUS); dann bl_steuern(..., true) - die Auftragsdatei, wartend bis sie frei ist (BELEGT).
+ * Kein HTTP, kein Kindprozess. Rueckgabe array(bool ok, Grund ASCII).
+ */
+function bl_bb_tun($name, $wert)
+{
+    $name = (string) $name;
+    $wert = trim((string) $wert);
+    if (bl_upgrade_laeuft()) {
+        return array(false, 'AKTUALISIERUNG');
+    }
+    if (bl_dienst_pid() <= 0) {
+        return array(false, 'DIENST_AUS');
+    }
+    list($cfg, $tags) = bl_config_read();
+    if ($name === 'testmodus' || $name === 'kalibrierung') {
+        $treffer = null;
+        foreach ($tags as $t) {
+            if (bl_thema($t) === $wert) {
+                $treffer = $t;
+                if ($t['aktiv'] === '1') { break; }
+            }
+        }
+        if ($treffer === null) {
+            return array(false, 'TAG_UNBEKANNT');
+        }
+        if ($treffer['aktiv'] !== '1') {
+            return array(false, 'TAG_INAKTIV');
+        }
+        $grund = bl_steuern($name, $treffer['kennung'], $name === 'testmodus' ? 60 : 10, true);
+    } elseif ($name === 'batterie') {
+        $mit = false;
+        foreach ($tags as $t) {
+            if ($t['aktiv'] === '1' && isset($t['opt']['batt']) && $t['opt']['batt'] === '1') { $mit = true; }
+        }
+        if (bl_cfg($cfg, 'batterie', '0') !== '1' || !$mit) {
+            return array(false, 'BATTERIE_AUS');
+        }
+        $grund = bl_steuern('batterie', '', 0, true);
+    } else {
+        return array(false, 'UNBEKANNT');
+    }
+    return $grund === '' ? array(true, '') : array(false, $grund);
+}
+
+/** Wo liegt eine Datei unter bin/? Installiert bin/plugins/<ordner>/, im Archiv <wurzel>/bin/. '' = fehlt. */
+function bl_bin_datei($name)
+{
+    foreach (array(bl_paths()['bindir'] . '/' . $name, dirname(dirname(__DIR__)) . '/bin/' . $name) as $k) {
+        if (@is_file($k)) {
+            return $k;
+        }
+    }
+    return '';
+}
+
+/** Die Bruecke als Bibliothek laden (BB_NUR_LADEN: kein Hauptteil). */
+function bl_bruecke_laden()
+{
+    if (function_exists('bb_waechter')) {
+        return true;
+    }
+    $f = bl_bin_datei('befehlsbruecke.php');
+    if ($f === '') {
+        return false;
+    }
+    if (!defined('BB_NUR_LADEN')) {
+        define('BB_NUR_LADEN', true);
+    }
+    require_once $f;
+    return function_exists('bb_waechter');
+}
+
+/**
+ * Direktstart bzw. -stopp der Bruecke nach dem Speichern (Bauart sp_/db_bruecke_schalten): befehlsbruecke.sh start
+ * startet nur nach --soll, nie als root, nie waehrend eines Updates, nie doppelt; der Waechter in cron.01min startet
+ * hoechstens alle 600 s neu. $neustart: Praefix gewechselt (stop, dann start). Haengt NICHT am Neustart des Dienstes.
+ * Rueckgabe array(''|'ein'|'aus'|'start_fehl'|'stop_fehl', Ausgabe).
+ */
+function bl_bruecke_schalten($neustart = false)
+{
+    if (DIRECTORY_SEPARATOR === '\\' || bl_paths()['home'] === '' || !bl_bruecke_laden()) {
+        return array('', '');
+    }
+    $p = bb_pfade();
+    if (!$p) {
+        return array('', '');
+    }
+    $e = bl_bb_einstellungen();
+    $laeuft = (bool) bb_dienste();
+    if ($e['annehmen']) {
+        if ($laeuft && !$neustart) {
+            return array('', '');
+        }
+        if ($laeuft) {
+            bb_sh($p, 'stop');
+        }
+        list($rc, $aus) = bb_sh($p, 'start');
+        return array(($rc === 0 && bb_dienste()) ? 'ein' : 'start_fehl', $aus);
+    }
+    if (!$laeuft) {
+        return array('', '');
+    }
+    list($rc, $aus) = bb_sh($p, 'stop');
+    return array(($rc === 0 && !bb_dienste()) ? 'aus' : 'stop_fehl', $aus);
+}
+
+/** Ein Satz zum Ergebnis von bl_bruecke_schalten() ('' = nichts zu sagen), unmaskiert. */
+function bl_bruecke_satz(array $r)
+{
+    $a = $r[1] !== '' ? trim((string) $r[1]) : '-';
+    switch ($r[0]) {
+        case 'ein':
+            return sprintf(bl_t('BEFEHL.M_GESTARTET'), $a);
+        case 'aus':
+            return sprintf(bl_t('BEFEHL.M_ANGEHALTEN'), $a);
+        case 'start_fehl':
+            return sprintf(bl_t('BEFEHL.M_START_FEHL'), $a);
+        case 'stop_fehl':
+            return sprintf(bl_t('BEFEHL.M_STOP_FEHL'), $a);
+    }
+    return '';
+}
+
+/* ---------------- Pruefzeilen der Umstellung (Reiter Test; Entwurf 3.5) ----------------
+ * Rueckgabe je array(Zustand, Anmerkung) fuer bl_zeile(): true in Ordnung, false Befund, null Hinweis/keine Aussage. */
+
+/** Laeuft die Befehlsbruecke? Zustand und letzte Quittung aus ihrer zustand.json. Haken aus ist grau. */
+function bl_pruef_bruecke($cfg)
+{
+    if (!bl_bruecke_laden()) {
+        return array(false, bl_t('BEFEHL.T_FEHLT'));
+    }
+    list($z, $fehler) = bb_zuordnung_laden(bl_bin_datei('befehle_zuordnung.php'));
+    if ($z === null) {
+        return array(false, sprintf(bl_t('BEFEHL.T_DEFEKT'), $fehler));
+    }
+    list($f) = bb_zuordnung_pruefen($z);
+    if ($f) {
+        return array(false, sprintf(bl_t('BEFEHL.T_DEFEKT'), $f[0]));
+    }
+    if (bl_cfg($cfg, 'befehle_mqtt_ein', '0') !== '1') {
+        return array(null, bl_t('BEFEHL.T_AUS'));
+    }
+    if (DIRECTORY_SEPARATOR === '\\' || bl_paths()['home'] === '' || !bb_pfade()) {
+        return array(null, bl_t('BEFEHL.T_ARCHIV'));
+    }
+    $zu = bb_zustand_lesen();
+    $alter = ($zu && isset($zu['ts'])) ? time() - (int) $zu['ts'] : null;
+    if (!bb_dienste()) {
+        return array(false, bl_t('BEFEHL.T_STEHT'));
+    }
+    if ($alter === null || $alter > BB_WACHE_GRENZE) {
+        return array(false, sprintf(bl_t('BEFEHL.T_HAENGT'), (int) $alter));
+    }
+    if (empty($zu['abo'])) {
+        return array(false, sprintf(bl_t('BEFEHL.T_OHNE_ABO'), isset($zu['fehler']) ? (string) $zu['fehler'] : ''));
+    }
+    $zl = (isset($zu['zaehler']) && is_array($zu['zaehler'])) ? $zu['zaehler'] : array();
+    $letzte = (!empty($zu['letzter']) && is_array($zu['letzter']))
+        ? (string) $zu['letzter']['name'] . ': ' . (string) $zu['letzter']['ergebnis'] . ' (vor '
+          . max(0, time() - (int) $zu['letzter']['zeit']) . ' s)' : '-';
+    return array(true, sprintf(bl_t('BEFEHL.T_LAEUFT'),
+        date('d.m.Y H:i', isset($zu['start']) ? (int) $zu['start'] : time()),
+        isset($zl['angenommen']) ? (int) $zl['angenommen'] : 0,
+        isset($zl['abgelehnt']) ? (int) $zl['abgelehnt'] : 0, $letzte));
+}
+
+/** "befehlsbruecke.php --pruefen" (mosquitto_sub/_pub = mosquitto-clients, Zuordnung) als EINE Zeile. */
+function bl_pruef_bruecke_einrichtung($cfg)
+{
+    if (!bl_bruecke_laden()) {
+        return array(false, bl_t('BEFEHL.T_FEHLT'));
+    }
+    ob_start();
+    bb_pruefen();
+    $aus = array_values(array_filter(explode("\n", (string) ob_get_clean()), 'strlen'));
+    if (!$aus) {
+        return array(null, bl_t('BEFEHL.T_UNKLAR'));
+    }
+    $fehl = array_values(preg_grep('/^\[FEHL\]/', $aus));
+    if ($fehl) {
+        // Fehlende mosquitto-clients bei ausgeschaltetem Haken: ein Hinweis, kein Kreuz.
+        return array(bl_cfg($cfg, 'befehle_mqtt_ein', '0') === '1' ? false : null,
+                     implode(' | ', $fehl) . ' ' . bl_t('BEFEHL.T_EINRICHTUNG'));
+    }
+    return array(true, implode(' | ', array($aus[0], end($aus))));
+}
+
+/** Taugt das Praefix fuer die Bruecke (bb_praefix_gueltig)? Die eigene Regel ([A-Za-z0-9_-]+) ist enger in der Form,
+ *  aber nicht in der Laenge (Bruecke: hoechstens 40 je Ebene). */
+function bl_pruef_praefix_bruecke($cfg)
+{
+    $p = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    $ok = bl_bruecke_laden() && function_exists('bb_praefix_gueltig') ? bb_praefix_gueltig($p)
+        : (bool) preg_match('#^[A-Za-z0-9_\-]{1,40}(/[A-Za-z0-9_\-]{1,40}){0,4}\z#', $p);
+    return array($ok, sprintf(bl_t($ok ? 'BEFEHL.T_PRAEFIX' : 'BEFEHL.T_PRAEFIX_FALSCH'), $p));
+}
+
+/** F2: traegt ein Tag einen reservierten Alias (status, befehl ...)? Rot mit Satz "Alias umbenennen" - keine stille
+ *  Umbenennung (Regeln/07: bestehende Themen werden nicht umbenannt). */
+function bl_pruef_reserviert($tags)
+{
+    $fehl = array();
+    foreach ($tags as $t) {
+        $a = isset($t['opt']['alias']) ? strtolower(bl_saeubern($t['opt']['alias'])) : '';
+        if ($a !== '' && in_array($a, bl_reservierte_zweige(), true)) {
+            $fehl[] = $t['opt']['alias'] . ' (' . ($t['name'] !== '' ? $t['name'] : $t['kennung']) . ')';
+        }
+    }
+    return $fehl ? array(false, sprintf(bl_t('TEST.ALIAS_RESERVIERT_DA'), implode(', ', $fehl)))
+                 : array(true, implode(', ', bl_reservierte_zweige()));
+}
+
+/** Lebenszeichen status/zaehler im Abbild (zaehler) - zaehlt es? Nur mit gueltigem Abbild eine Aussage. */
+function bl_pruef_lebenszeichen($status, $gilt, $grund)
+{
+    if (!$gilt || !is_array($status)) {
+        return array(null, $grund);
+    }
+    if (!isset($status['zaehler'])) {
+        return array(null, bl_t('TEST.ZAEHLER_ALT'));
+    }
+    return array(true, sprintf(bl_t('TEST.ZAEHLER'), (int) $status['zaehler']));
+}
+
+/** Auftragsdatei frei? (E3: liegt sie laenger als 2 x intervall + 1 s, nimmt der Dienst nichts an) */
+function bl_pruef_auftrag($cfg)
+{
+    $f = bl_paths()['steuer'];
+    if (!is_file($f)) {
+        return array(true, bl_t('TEST.AUFTRAG_FREI'));
+    }
+    $alter = time() - (int) @filemtime($f);
+    $grenze = 2 * max(2, (int) bl_cfg($cfg, 'intervall', '5')) + 1;
+    return array($alter <= $grenze ? null : false, sprintf(bl_t('TEST.AUFTRAG_LIEGT'), $alter));
+}
+
+/** V1: IRK - Haken, Weg (cryptography oder rein), Schluessel je irk-Tag. */
+function bl_pruef_irk($cfg, $tags, $status)
+{
+    $irk_tags = array();
+    foreach ($tags as $t) {
+        if ($t['art'] === 'irk' && $t['aktiv'] === '1') { $irk_tags[] = substr($t['kennung'], 4); }
+    }
+    if (bl_cfg($cfg, 'irk_aufloesen', '0') !== '1') {
+        return array(null, bl_t($irk_tags ? 'TEST.IRK_AUS_MIT_TAGS' : 'TEST.IRK_AUS'));
+    }
+    $tab = bl_irk_lesen();
+    $fehlt = array();
+    foreach ($irk_tags as $n) {
+        if (!isset($tab[$n])) { $fehlt[] = $n; }
+    }
+    $weg = is_array($status) && isset($status['irk']['weg']) ? (string) $status['irk']['weg'] : '?';
+    if ($fehlt) {
+        return array(false, sprintf(bl_t('TEST.IRK_FEHLT'), implode(', ', $fehlt)));
+    }
+    $f = bl_irk_datei();
+    $rechte = is_file($f) ? substr(sprintf('%o', @fileperms($f)), -3) : '-';
+    if (is_file($f) && DIRECTORY_SEPARATOR !== '\\' && $rechte !== '600') {
+        return array(false, sprintf(bl_t('TEST.IRK_RECHTE'), $rechte));
+    }
+    return array(true, sprintf(bl_t('TEST.IRK_OK'), count($irk_tags), $weg));
+}
+
+/** V6-V8/V12: Haus-Themen - Haken, Sollstand und eigene Themen aus dem Abbild. */
+function bl_pruef_haus($cfg, $tags, $status, $gilt)
+{
+    $tag_haus = 0;
+    foreach ($tags as $t) {
+        if ($t['aktiv'] === '1' && isset($t['opt']['haus']) && $t['opt']['haus'] === '1') { $tag_haus++; }
+    }
+    if (bl_cfg($cfg, 'haus_anwesenheit', '0') !== '1' && !$tag_haus) {
+        return array(null, bl_t('TEST.HAUS_AUS'));
+    }
+    if (!$gilt || !is_array($status) || !isset($status['haus'])) {
+        return array(null, bl_t('TEST.HAUS_UNKLAR'));
+    }
+    $th = (array) $status['haus']['themen'];
+    // Dieselbe Namensregel in zwei Sprachen (Nr. 15): jede Person der aktiven Tags muss unter dem Namen im Abbild
+    // stehen, den bl_haus_name() hier rechnet (haus_name() im Dienst). Gleichnamige (_2 ...) sind hier nicht nachgerechnet.
+    $fehlt = array();
+    if (bl_cfg($cfg, 'haus_anwesenheit', '0') === '1') {
+        foreach (bl_personen($tags) as $pn) {
+            $soll = 'haus/anwesenheit/' . bl_haus_name($pn);
+            if (!in_array($soll, $th, true)) { $fehlt[] = $soll; }
+        }
+    }
+    if ($fehlt) {
+        return array(false, sprintf(bl_t('TEST.HAUS_NAMEN'), implode(', ', $fehlt)));
+    }
+    return array(true, sprintf(bl_t('TEST.HAUS_OK'), count($th), implode(', ', array_slice($th, 0, 6)),
+                               (int) $status['haus']['zaehler']));
+}
+
+/** Jeder Name der Namenstabelle entsteht aus seinem Thema nach der Gateway-Regel, und jeder Stamm steht im Sendecode. */
+function bl_pruef_namen($cfg, $tags, $namen = null)
+{
+    if (!is_array($namen)) { $namen = bl_mqtt_namen($cfg, $tags); }
+    $p = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    $gesendet = bl_gesendete_themen();
+    $fehl = array();
+    foreach ($namen as $z) {
+        $soll = str_replace(array('/', '%', ' '), '_', $p . '/' . $z['thema']);
+        if ($z['name'] !== $soll) {
+            $fehl[] = $z['name'];
+            continue;
+        }
+        if (is_array($gesendet)) {
+            $stamm = bl_thema_stamm($z['thema']);
+            $da = false;
+            foreach ($gesendet as $g) {
+                if (bl_thema_stamm($g) === $stamm) { $da = true; break; }
+            }
+            if (!$da) { $fehl[] = $z['thema']; }
+        }
+    }
+    return $fehl ? array(false, sprintf(bl_t('TEST.NAMEN_FEHL'), implode(', ', $fehl)))
+                 : array(true, sprintf(bl_t('TEST.NAMEN'), count($namen)));
+}
+
+/** Kein Befehlstitel der Vorlage MQTT-Befehle gleicht einem Gateway-Namen; die Vorlage laedt als XML. */
+function bl_pruef_vorlage_mqtt($cfg, $tags)
+{
+    list(, $xml) = bl_vorlage_mqtt_out($cfg, $tags);
+    $namen = array();
+    foreach (bl_mqtt_namen($cfg, $tags) as $z) { $namen[] = $z['name']; }
+    $gleich = array();
+    foreach (bl_mqtt_befehle($cfg, $tags) as $b) {
+        if (in_array($b['titel'], $namen, true)) { $gleich[] = $b['titel']; }
+    }
+    if ($gleich) {
+        return array(false, sprintf(bl_t('TEST.VORLAGE_GLEICH'), implode(', ', $gleich)));
+    }
+    if (!function_exists('simplexml_load_string')) {
+        return array(null, bl_t('TEST.KEIN_SIMPLEXML'));
+    }
+    $alt = libxml_use_internal_errors(true);
+    $x = simplexml_load_string((string) $xml);
+    libxml_clear_errors();
+    libxml_use_internal_errors($alt);
+    if ($x === false) {
+        return array(false, bl_t('TEST.VORLAGE_KAPUTT'));
+    }
+    return array(true, sprintf(bl_t('TEST.VORLAGE_MQTT'), count(bl_mqtt_befehle($cfg, $tags))));
 }

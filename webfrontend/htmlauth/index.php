@@ -268,6 +268,16 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
         $opt = array();
         foreach ($erlaubt as $k) {
             $wert_roh = isset($_POST['tag_' . $k][$i]) ? $_POST['tag_' . $k][$i] : '';
+            // E2 (Gruppe 13): auch ",", "=" und "|" - bl_optionen_schreiben() entfernte sie bis 1.3.27 still
+            // ("Anna,Bert" wurde "AnnaBert" und verschob den Loxone-Eingang person/<P>/...).
+            if (is_string($wert_roh) && !bl_unzulaessige_zeichen($wert_roh) && preg_match('/[,=|]/', $wert_roh)) {
+                $bean[$i][] = $k;
+                $mangel[] = sprintf(bl_t('MANGEL.TRENNZEICHEN'), $kennung . ' / ' . $k, bl_saubere_eingabe($wert_roh),
+                                    isset($vopt[$k]) ? $vopt[$k] : '-');
+                if (isset($vopt[$k])) { $opt[$k] = $vopt[$k]; }
+                if ($vorher === null) { $zeile_ok = false; }
+                continue;
+            }
             if (!is_string($wert_roh) || bl_unzulaessige_zeichen($wert_roh)) {
                 $bean[$i][] = $k;
                 $mangel[] = sprintf(bl_t('MANGEL.ANFUEHRUNG'), $kennung . ' / ' . $k,
@@ -316,6 +326,25 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
         if (isset($opt['batt'])) {
             $opt['batt'] = ($opt['batt'] === '1') ? '1' : '';
             if ($opt['batt'] === '') { unset($opt['batt']); }
+        }
+        if (isset($opt['haus'])) {      // V12 (Gruppe 13): Haken "an andere Plugins melden"
+            $opt['haus'] = ($opt['haus'] === '1') ? '1' : '';
+            if ($opt['haus'] === '') { unset($opt['haus']); }
+        }
+        // B24 (Gruppe 13): EINE Pruefung - am Ende dieselbe Regel wie bl_tag_pruefen() (Sicherung, Rueckweg nach
+        // dem Suchlauf). Was dort verworfen wuerde, wird hier beanstandet: eine bestehende Zeile behaelt ihre
+        // Werte und traegt die Beanstandung (Speichern unterbleibt, Entscheidung 16), eine neue entfaellt.
+        if ($zeile_ok) {
+            list($bl_tp, $bl_tg) = bl_tag_pruefen(array('kennung' => $kennung, 'aktiv' => !empty($aktiv[$i]) ? '1' : '0',
+                                                        'name' => (string) $name, 'opt' => $opt));
+            if ($bl_tp === null) {
+                $bl_feld = strpos($bl_tg, 'opt.') === 0 ? substr($bl_tg, 4) : $bl_tg;
+                if (!in_array($bl_feld, isset($bean[$i]) ? $bean[$i] : array(), true)) {
+                    $mangel[] = sprintf(bl_t('MANGEL.TAG_PRUEFUNG'), $kennung, $bl_feld);
+                    $bean[$i][] = $bl_feld;
+                }
+                if ($vorher === null) { $zeile_ok = false; }
+            }
         }
         if (!$zeile_ok) {
             continue;
@@ -381,7 +410,9 @@ if ($bl_ist_post && isset($_POST['download'])) {
         $bl_error = bl_t('TEXT.VORLAGE_OHNE_TAG');
         $bl_tab = 'tab-loxone';
     } else {
-        list($name, $inhalt, $anzahl, $weg) = bl_vorlage($bl_cfg, $bl_tags);
+        // Gruppe 13 (E12): statt der HTTP-Vorlage die Vorlage MQTT-Befehle (Virtueller Ausgang, UDP-Eingang
+        // des MQTT-Gateways).
+        list($name, $inhalt) = bl_vorlage_mqtt_out($bl_cfg, $bl_tags);
         header('Content-Type: application/x-download');
         header('Content-Disposition: attachment; filename="' . $name . '"');
         header('Content-Length: ' . strlen($inhalt));
@@ -539,6 +570,10 @@ if ($bl_ist_post && isset($_POST['save'])) {
 
     // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026, ab Werk aus).
     $neu['wlan_kopplung'] = isset($_POST['wlan_kopplung']) ? '1' : '0';
+    // Gruppe 13: Haus-Themen (V6-V8), BTHome (V2), IRK (V1) - alle Schalter, ab Werk 0
+    $neu['haus_anwesenheit'] = isset($_POST['haus_anwesenheit']) ? '1' : '0';
+    $neu['bthome']           = isset($_POST['bthome']) ? '1' : '0';
+    $neu['irk_aufloesen']    = isset($_POST['irk_aufloesen']) ? '1' : '0';
     $zu_roh = isset($_POST['wlan_zuordnung']) ? $_POST['wlan_zuordnung'] : '';
     list($ok, $w) = bl_wert_pruefen('wlan_zuordnung', $zu_roh);
     if ($ok) {
@@ -567,7 +602,13 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $bl_merk('rssi_nah', 'rssi_mittel');
 
     $tags = bl_tags_aus_post($bl_fehler, $bl_tags, $bl_bean_tags);
+    list($bl_irk_neu, $bl_irk_anders) = bl_irk_aus_post($bl_fehler, $tags, $bl_bean_tags);
     $bl_merk('tags');
+    // B19 (Gruppe 13): wirkungslose Altoptionen (min, raum) fallen beim Speichern weg - einmal gesagt.
+    $bl_alt_weg = array();
+    foreach ($bl_tags as $bl_ta) {
+        if (!empty($bl_ta['altopt'])) { $bl_alt_weg[] = ($bl_ta['name'] !== '' ? $bl_ta['name'] : $bl_ta['kennung']) . ' (' . implode(', ', $bl_ta['altopt']) . ')'; }
+    }
 
     // Entscheidung 16 (30.09.2026): bei einer Beanstandung wird NICHTS
     // gespeichert, auch nicht die uebrigen richtigen Felder, und der Dienst
@@ -578,6 +619,9 @@ if ($bl_ist_post && isset($_POST['save'])) {
         $bl_eingaben_form = 'settings';
     } elseif (bl_config_write($neu, $tags)) {
         $bl_saved = true;
+        if ($bl_irk_anders && !bl_irk_schreiben($bl_irk_neu)) {
+            $bl_error = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_e(bl_irk_datei()));
+        }
         require_once __DIR__ . '/bl_test.php';
         // Neu starten nur, wenn der Dienst auch lief. Bis 1.2.10 startete
         // jedes Speichern ihn ungefragt - auch wenn er bewusst angehalten war.
@@ -587,6 +631,9 @@ if ($bl_ist_post && isset($_POST['save'])) {
                                           : bl_t('TEXT.DIENST_LAEUFT_NICHT');
         } else {
             $bl_hinweis = bl_t('TEXT.DIENST_WAR_AUS');
+        }
+        if ($bl_alt_weg) {
+            $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.ALTOPTION_WEG'), implode('; ', $bl_alt_weg));
         }
         list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
     } else {
@@ -599,7 +646,11 @@ if ($bl_ist_post && isset($_POST['save'])) {
  * Laedt den Bestand und fasst AUSSCHLIESSLICH die MQTT-Werte an. */
 if ($bl_ist_post && isset($_POST['save_mqtt'])) {
     list($neu, $bestand_tags, ) = bl_config_read();
+    $bl_vorher = $neu;
     $neu['mqtt'] = isset($_POST['mqtt']) ? '1' : '0';
+    // Gruppe 13 (3.5): die Haken der Befehlsbruecke
+    $neu['befehle_mqtt_ein'] = isset($_POST['befehle_mqtt_ein']) ? '1' : '0';
+    $neu['befehle_eingreifend_ein'] = isset($_POST['befehle_eingreifend_ein']) ? '1' : '0';
     $praefix_roh = isset($_POST['themenpraefix']) ? $_POST['themenpraefix'] : '';
     $praefix = is_string($praefix_roh) ? trim($praefix_roh) : '';
     if ($praefix === '') {
@@ -630,7 +681,13 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
                 $bl_gescheitert[] = sprintf(bl_t('TEXT.ABO_DATEI_FEHLER'), $bl_abo_pfad);
             }
         }
-        if (bl_dienst_pid() > 0) {
+        // Gruppe 13 (3.5): die Haken der Bruecke allein starten den Dienst NICHT neu - nur MQTT und Praefix.
+        $bl_dienst_betroffen = $neu['mqtt'] !== $bl_vorher['mqtt'] || $neu['themenpraefix'] !== $bl_vorher['themenpraefix'];
+        $bl_br = bl_bruecke_schalten($neu['themenpraefix'] !== $bl_vorher['themenpraefix']);
+        $bl_br_satz = bl_bruecke_satz($bl_br);
+        if (!$bl_dienst_betroffen) {
+            $bl_hinweis = $bl_br_satz !== '' ? $bl_br_satz : bl_t('BEFEHL.M_GESPEICHERT');
+        } elseif (bl_dienst_pid() > 0) {
             bl_dienst('restart');
             // Wie im Handler "Einstellungen": die Wirkung fragen, nicht den
             // Aufruf melden (seit 1.3.20, Pruefung 29.09.2026, C10).
@@ -638,6 +695,9 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
                                           : bl_t('TEXT.DIENST_LAEUFT_NICHT');
         } else {
             $bl_hinweis = bl_t('TEXT.DIENST_WAR_AUS');
+        }
+        if ($bl_dienst_betroffen && $bl_br_satz !== '') {
+            $bl_hinweis .= ' ' . $bl_br_satz;
         }
         list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
     } else {
@@ -772,7 +832,15 @@ if ($bl_ist_post) {
 if (is_array($bl_eingetippt) && $bl_eingetippt) {
     $bl_tags = array();
     foreach ($bl_eingetippt as $bl_t_roh) {
-        list($bl_t_gut, ) = bl_tag_pruefen(is_array($bl_t_roh) ? $bl_t_roh : null);
+        list($bl_t_gut, $bl_t_grund) = bl_tag_pruefen(is_array($bl_t_roh) ? $bl_t_roh : null);
+        if ($bl_t_gut === null) {
+            // B24 (Gruppe 13): bis 1.3.27 fiel eine solche Zeile still weg - und das naechste Speichern
+            // loeschte den Tag (Probe b19_b24: abw=3, "Anna,Bert"). Jetzt bleibt sie mit Beanstandung stehen.
+            $bl_t_gut = bl_tag_beanstandet($bl_t_roh, $bl_t_grund);
+            if ($bl_t_gut !== null) {
+                $bl_fehler[] = sprintf(bl_t('MANGEL.TAG_PRUEFUNG'), $bl_t_gut['kennung'], $bl_t_gut['_bean'][0]);
+            }
+        }
         if ($bl_t_gut !== null) {
             $bl_tags[] = $bl_t_gut;
         }
@@ -1031,6 +1099,11 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 &nbsp; <?= bl_e(bl_t('FELD.ABW_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_abw[<?= (int) $i ?>]" value="<?= bl_e(isset($o['abw']) ? $o['abw'] : '') ?>"<?= bl_tag_markierung($tag, 'abw') ?> size="5">
 &nbsp; <?= bl_e(bl_t('FELD.REF_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_ref[<?= (int) $i ?>]" value="<?= bl_e(isset($o['ref']) ? $o['ref'] : '') ?>"<?= bl_tag_markierung($tag, 'ref') ?> size="5">
 &nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_batt[<?= (int) $i ?>]" value="1"<?= (isset($o['batt']) && $o['batt'] === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BATT_JE_TAG')) ?></label>
+&nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_haus[<?= (int) $i ?>]" value="1"<?= (isset($o['haus']) && $o['haus'] === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HAUS_JE_TAG')) ?></label>
+<?php if ($tag['art'] === 'irk') { ?>
+<br><?= bl_e(bl_t('FELD.IRK')) ?>: <input data-role="none" type="password" autocomplete="off" name="tag_irk[<?= (int) $i ?>]" value="" size="34" placeholder="<?= bl_e(bl_irk_anzeige(substr($tag['kennung'], 4))) ?>"<?= bl_tag_markierung($tag, 'irk') ?>>
+<div class="sm-hilfe"><?= bl_e(bl_t('TEXT.IRK_HILFE')) ?></div>
+<?php } ?>
 <div class="sm-hilfe"><?= bl_e(bl_t('TEXT.ALIAS_HILFE')) ?></div>
 </div>
 </details></td>
@@ -1190,6 +1263,12 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="beacon" value="1"<?= bl_eingabe_an('settings', 'beacon', bl_cfg($bl_cfg, 'beacon', '1') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BEACON')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BEACON_HILFE')) ?></p></div>
 <div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="bthome" value="1"<?= bl_eingabe_an('settings', 'bthome', bl_cfg($bl_cfg, 'bthome', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BTHOME')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BTHOME_HILFE')) ?></p></div>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="irk_aufloesen" value="1"<?= bl_eingabe_an('settings', 'irk_aufloesen', bl_cfg($bl_cfg, 'irk_aufloesen', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.IRK_AUFLOESEN')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.IRK_AUFLOESEN_HILFE')) ?></p></div>
+<div class="sm-feld">
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="entfernung" value="1"<?= bl_eingabe_an('settings', 'entfernung', bl_cfg($bl_cfg, 'entfernung', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.ENTFERNUNG')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ENTFERNUNG_HILFE')) ?></p></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.DAEMPFUNG')) ?></label>
@@ -1233,6 +1312,10 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.WLAN_ZUORDNUNG')) ?></label>
 <input data-role="none" type="text" name="wlan_zuordnung" value="<?= bl_e(bl_eingabe('settings', 'wlan_zuordnung', bl_cfg($bl_cfg, 'wlan_zuordnung', ''))) ?>"<?= bl_markierung('wlan_zuordnung') ?> placeholder="Anna_Handy=Anna, Bernd=Bernd">
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.WLAN_ZUORDNUNG_HILFE')) ?></p></div>
+<?php /* Gruppe 13 (V6-V8/V12): Anwesenheit fuer andere Plugins ueber haus/... (Regeln/07 Nr. 15), ab Werk aus. */ ?>
+<h2><?= bl_e(bl_t('TEXT.HAUS_UEBERSCHRIFT')) ?></h2>
+<div class="sm-feld"><label style="font-weight:400;"><input data-role="none" type="checkbox" name="haus_anwesenheit" value="1"<?= bl_eingabe_an('settings', 'haus_anwesenheit', bl_cfg($bl_cfg, 'haus_anwesenheit', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HAUS_ANWESENHEIT')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HAUS_HILFE')) ?></p></div>
 
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
@@ -1291,6 +1374,12 @@ if ($bl_sich_warn) { ?>
 <label><?= bl_e(bl_t('FELD.THEMENPRAEFIX')) ?></label>
 <input data-role="none" type="text" name="themenpraefix" value="<?= bl_e(bl_eingabe('mqtt', 'themenpraefix', $bl_praefix)) ?>"<?= bl_markierung('themenpraefix') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.PRAEFIX_HILFE')) ?></p>
+</div>
+<?php /* Gruppe 13 (3.5): Befehle aus Loxone ueber die Befehlsbruecke - beide Haken ab Werk aus. */ ?>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="befehle_mqtt_ein" value="1"<?= bl_eingabe_an('mqtt', 'befehle_mqtt_ein', bl_cfg($bl_cfg, 'befehle_mqtt_ein', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BEFEHLE_MQTT')) ?></label>
+<br><label style="font-weight:400;"><input data-role="none" type="checkbox" name="befehle_eingreifend_ein" value="1"<?= bl_eingabe_an('mqtt', 'befehle_eingreifend_ein', bl_cfg($bl_cfg, 'befehle_eingreifend_ein', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BEFEHLE_EINGREIFEND')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BEFEHLE_HILFE')) ?></p>
 </div>
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save_mqtt" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
@@ -1356,33 +1445,91 @@ if ($bl_sich_warn) { ?>
 <h2><?= bl_e(bl_t('TEXT.LOX_SCHRITT_FUER_SCHRITT')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOX_EINLEITUNG')) ?></p>
 
+<?php /* Gruppe 13 (1.3.28, Entwurf 2.5-2.7, 3.7; E11/E12): die Werte kommen ueber das MQTT-Gateway in einfache Virtuelle
+   Eingaenge (Namenstabelle), Befehle ueber MQTT (Befehlsbruecke). Die Vorlage mit Virtuellen HTTP-Eingaengen ist
+   entfallen. Eine Quelle fuer Tabelle, Kopierknopf, Reiter Test und Pruefzeile: bl_mqtt_namen(). */
+$bl_namen = bl_mqtt_namen($bl_cfg, $bl_tags);
+$bl_befehle = bl_mqtt_befehle($bl_cfg, $bl_tags); ?>
+<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.LOX_KOPF')) ?></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S1')) ?></b><br><br><?= bl_e(bl_t('LOX.S1_TEXT')) ?></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S2')) ?></b><br><br><?= bl_abo_text() ?>
-<div class="sm-mono" style="margin-top:6px;padding:8px;border:1px solid #ccc;background:#f4f4f4;"><?= bl_e($bl_praefix) ?>/#</div></div>
+<div class="sm-mono" style="margin-top:6px;padding:8px;border:1px solid #ccc;background:#f4f4f4;"><?= bl_e($bl_praefix) ?>/#</div>
+<p class="sm-hilfe"><?= bl_e(bl_t('LOX.S2_TEXT')) ?></p></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S3')) ?></b><br><br><?= bl_e(bl_t('LOX.S3_TEXT')) ?></div>
+
+<h2><?= bl_e(bl_t('TEXT.NAMENSTABELLE')) ?></h2>
+<?php if (!$bl_aktiv) { ?>
+<div class="sm-fehler"><?= bl_e(bl_t('TEXT.VORLAGE_OHNE_TAG')) ?></div>
+<?php } ?>
+<div class="sm-breit">
+<table class="sm-tbl" id="bl-namen">
+<tr><th style="width:30%;"><?= bl_e(bl_t('TEXT.SP_GATEWAYNAME')) ?></th><th style="width:7%;"><?= bl_e(bl_t('TEXT.SP_ART')) ?></th>
+<th style="width:8%;"><?= bl_e(bl_t('TEXT.SP_RETAIN')) ?></th><th style="width:5%;">V2</th>
+<th style="width:9%;"><?= bl_e(bl_t('TEXT.SP_MUSTER')) ?></th><th><?= bl_e(bl_t('TEXT.SP_BEDEUTUNG')) ?></th></tr>
+<?php $bl_muster_eigen = bl_muster_themen_eigen($bl_cfg, $bl_tags);
+foreach ($bl_namen as $bl_nz) { ?>
+<tr><td><span class="sm-mono bl-gwname"><?= bl_e($bl_nz['name']) ?></span><br><span class="sm-klein sm-mono"><?= bl_e($bl_praefix . '/' . $bl_nz['thema']) ?></span></td>
+<td><?= bl_e(bl_t($bl_nz['text'] ? 'TEXT.ART_TEXT' : 'TEXT.ART_ZAHL')) ?></td>
+<td class="<?= $bl_nz['retained'] ? 'sm-an' : '' ?>"><?= bl_e(bl_t($bl_nz['retained'] ? 'TEXT.RETAIN_JA' : 'TEXT.RETAIN_NEIN')) ?></td>
+<td><?= bl_e($bl_nz['v2']) ?></td>
+<td><?= in_array($bl_nz['thema'], $bl_muster_eigen, true) ? bl_e(bl_t('TEXT.JA')) : '' ?></td>
+<td><?= bl_e(bl_t($bl_nz['s'])) ?><?= $bl_nz['wer'] !== '' ? ' <span class="sm-klein">(' . bl_e($bl_nz['wer']) . ')</span>' : '' ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.NAMENSTABELLE_HILFE')) ?></p>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="button" id="bl-namen-kopieren"><?= bl_e(bl_t('KNOPF.NAMEN_KOPIEREN')) ?></button>
+<span class="sm-klein" id="bl-namen-kopiert"></span>
+</div>
+<script>
+(function () {
+    var k = document.getElementById('bl-namen-kopieren');
+    if (!k) { return; }
+    k.addEventListener('click', function () {
+        var n = [];
+        document.querySelectorAll('#bl-namen .bl-gwname').forEach(function (e) { n.push(e.textContent); });
+        var t = n.join('\n');
+        var fertig = function () { document.getElementById('bl-namen-kopiert').textContent = <?= json_encode(bl_t('TEXT.KOPIERT')) ?>; };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(t).then(fertig, function () { window.prompt('', t); });
+        } else {
+            window.prompt('', t);
+        }
+    });
+})();
+</script>
+
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S4')) ?></b><br><br><?= bl_e(bl_t('LOX.S4_TEXT')) ?></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S5')) ?></b><br><br><?= bl_e(bl_t('LOX.S5_TEXT')) ?></div>
 <div class="sm-step"><b><?= bl_e(bl_t('LOX.S6')) ?></b><br><br><?= bl_e(bl_t('LOX.S6_TEXT')) ?></div>
 
-<h2><?= bl_e(bl_t('TEXT.ALLES_AUF_EINMAL')) ?></h2>
-<?php if (!$bl_aktiv) { ?>
-<div class="sm-fehler"><?= bl_e(bl_t('TEXT.VORLAGE_OHNE_TAG')) ?></div>
-<?php } else {
-    list($_vn, $_vi, $bl_vanzahl, $bl_vweg) = bl_vorlage($bl_cfg, $bl_tags); ?>
-<p class="sm-hilfe"><?= sprintf(bl_e(bl_t('TEXT.VORLAGE_ANZAHL')), (int) $bl_aktiv, (int) $bl_vanzahl) ?></p>
-<?php if ($bl_vweg) { ?>
-<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.VORLAGE_OHNE_TEXT')) ?>
-<span class="sm-mono"><?= bl_e(implode(', ', array_slice($bl_vweg, 0, 8))) ?></span></p>
+<h2><?= bl_e(bl_t('LOX.S7')) ?></h2>
+<p class="sm-hilfe"><?= bl_e(bl_t('LOX.S7_TEXT')) ?></p>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th style="width:34%;"><?= bl_e(bl_t('TEXT.SP_BEFEHLSTITEL')) ?></th><th><?= bl_e(bl_t('TEXT.SP_BEFEHL_EIN')) ?></th>
+<th style="width:26%;"><?= bl_e(bl_t('TEXT.SP_HAKEN')) ?></th></tr>
+<?php foreach ($bl_befehle as $bl_bf) { ?>
+<tr><td><?= bl_e($bl_bf['titel']) ?></td><td><span class="sm-mono">publish <?= bl_e($bl_praefix . '/befehl/' . $bl_bf['name'] . ' ' . $bl_bf['wert']) ?></span></td>
+<td><?= bl_e(bl_t($bl_bf['eingreifend'] ? 'TEXT.HAKEN_BEIDE' : 'TEXT.HAKEN_EINER')) ?></td></tr>
 <?php } ?>
-<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.VORLAGE_IMPORT_HINWEIS')) ?></div>
-<?php } ?>
+</table>
+</div>
+<div class="sm-warnung"><?= bl_e(bl_t('TEXT.BEFEHLE_HEIMNETZ')) ?></div>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BEFEHLE_GATEWAY')) ?></p>
 <form method="post" action="index.php">
   <?php echo bl_fmt(); ?>
 <input data-role="none" type="hidden" name="activetab" value="tab-loxone">
 <div class="sm-knopfreihe">
-<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="download" value="1"><?= bl_e(bl_t('KNOPF.VORLAGE')) ?></button>
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="download" value="1"><?= bl_e(bl_t('KNOPF.VORLAGE_MQTT')) ?></button>
 </div>
 </form>
+
+<details>
+<summary><?= bl_e(bl_t('TEXT.HTTP_BESTAND_TITEL')) ?></summary>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HTTP_BESTAND_TEXT')) ?></p>
+</details>
 
 <h2><?= bl_e(bl_t('TEXT.BAUSTEINLISTE')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BAUSTEIN_EINLEITUNG')) ?></p>
@@ -1604,6 +1751,55 @@ if (is_array($bl_zeilen)) {
     $k['ergebnis'] === null ? '?' : (int) $k['ergebnis']) ?></div>
 <?php } ?>
 
+<?php /* V11 (Gruppe 13): Testmodus-Werte live. Der Dienst schreibt jede Einzelmessung des Tags im Testmodus ins Abbild
+   (testwerte, hoechstens 400) und seit 1.3.28 testmodus {kennung, bis}. Ohne Messwerte unsichtbar; der 3-s-Abruf
+   (bl_live.php) erneuert den Kasten ueber window.blTestmodus(). Damit stimmt TEST.TESTMODUS_LAEUFT (E3). */
+$bl_tm_namen = array();
+foreach ($bl_tags as $bl_tmt) {
+    $bl_tm_namen[$bl_tmt['kennung']] = $bl_tmt['name'] !== '' ? $bl_tmt['name'] : bl_thema($bl_tmt);
+}
+$bl_tm_s = ($bl_status && $bl_abbild_gilt) ? $bl_status : array(); ?>
+<div class="sm-hinweis" id="bl-testmodus"<?= empty($bl_tm_s['testwerte']) ? ' style="display:none;"' : '' ?>>
+<b><?= bl_e(bl_t('TEXT.TESTMODUS_KASTEN')) ?></b> <span id="bl-tm-kopf"></span>
+<div class="sm-breit"><table class="sm-tbl" style="margin-top:6px;">
+<tr><th style="width:120px;"><?= bl_e(bl_t('TEXT.SP_UHRZEIT')) ?></th><th><?= bl_e(bl_t('TEXT.SP_DBM')) ?></th></tr>
+<tbody id="bl-tm-zeilen"></tbody></table></div>
+</div>
+<script>
+(function () {
+    var namen = <?= json_encode($bl_tm_namen, JSON_UNESCAPED_UNICODE) ?>;
+    var kopfText = <?= json_encode(bl_t('TEXT.TESTMODUS_KOPF'), JSON_UNESCAPED_UNICODE) ?>;
+    function zwei(n) { return (n < 10 ? '0' : '') + n; }
+    window.blTestmodus = function (s) {
+        var kasten = document.getElementById('bl-testmodus');
+        if (!kasten) { return; }
+        var w = (s && s.testwerte) ? s.testwerte : [];
+        if (!w.length) { kasten.style.display = 'none'; return; }
+        kasten.style.display = '';
+        var tm = (s.testmodus && s.testmodus.length) ? s.testmodus[0] : null;
+        var rest = tm ? Math.max(0, tm.bis - Math.floor(Date.now() / 1000)) : 0;
+        var r = w.map(function (x) { return x.rssi; }).slice().sort(function (a, b) { return a - b; });
+        var median = r.length % 2 ? r[(r.length - 1) / 2] : Math.round((r[r.length / 2 - 1] + r[r.length / 2]) / 2);
+        var kopf = kopfText.replace('%1', tm ? (namen[tm.kennung] || tm.kennung) : '-').replace('%2', rest)
+            .replace('%3', w.length).replace('%4', median).replace('%5', r[0]).replace('%6', r[r.length - 1]);
+        document.getElementById('bl-tm-kopf').textContent = kopf;
+        var tb = document.getElementById('bl-tm-zeilen');
+        while (tb.firstChild) { tb.removeChild(tb.firstChild); }
+        w.slice(-20).reverse().forEach(function (x) {
+            var d = new Date(x.zeit * 1000);
+            var tr = document.createElement('tr');
+            var a = document.createElement('td');
+            a.textContent = zwei(d.getHours()) + ':' + zwei(d.getMinutes()) + ':' + zwei(d.getSeconds());
+            var b = document.createElement('td');
+            b.textContent = x.rssi;
+            tr.appendChild(a); tr.appendChild(b); tb.appendChild(tr);
+        });
+    };
+    window.blTestmodus(<?= json_encode(array('testwerte' => isset($bl_tm_s['testwerte']) ? $bl_tm_s['testwerte'] : array(),
+                                            'testmodus' => isset($bl_tm_s['testmodus']) ? $bl_tm_s['testmodus'] : array()),
+                                      JSON_UNESCAPED_UNICODE) ?>);
+})();
+</script>
 <?php if ($bl_test_titel !== '') { ?>
 <h2><?= bl_e($bl_test_titel) ?></h2>
 <div class="sm-log"><?= bl_e($bl_test_text) ?></div>
@@ -1716,7 +1912,10 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
                     setze('bl-k-aussage', d.gilt ? '' : (d.grund || ''));
                     var kasten = document.getElementById('bl-kein-dienst');
                     if (kasten) { kasten.style.display = d.pid > 0 ? 'none' : ''; }
-                    setze('bl-k-tags', s.aktiv != null ? s.aktiv : 0);
+                    // B26 (Gruppe 13): ohne Abbild ("status":null) bleibt der Wert des Servers stehen - bis 1.3.27
+                    // sprang die Kachel nach 3 s von 2 auf 0.
+                    if (s.aktiv != null) { setze('bl-k-tags', s.aktiv); }
+                    if (window.blTestmodus) { window.blTestmodus(d.gilt ? s : {}); }
                     setze('bl-k-stille', d.stille < 0 ? '?' : d.stille);
                     setze('bl-k-alter', d.alter < 0 ? '?' : d.alter);
                 })

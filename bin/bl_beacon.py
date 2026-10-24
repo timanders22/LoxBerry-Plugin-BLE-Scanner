@@ -70,6 +70,10 @@ GRENZEN = {
     "druck": (500.0, 1200.0),
     "batterie": (0.0, 100.0),
     "batterie_mv": (500.0, 4500.0),
+    # Gruppe 13 (V2, BTHome): Beleuchtungsstaerke bis 120 000 lx (pralle Sonne), Kontakte 0/1.
+    "helligkeit": (0.0, 120000.0),
+    "fenster": (0.0, 1.0),
+    "bewegungsmelder": (0.0, 1.0),
 }
 
 
@@ -365,7 +369,16 @@ def mibeacon(sdata, absender=""):
         if absender and mac != str(absender).upper():
             return None
     if rahmen & MI_CAPABILITY:
+        # B14 (Gruppe 13): das Capability-Byte lesen; ist darin 0x20 (I/O-Capability)
+        # gesetzt, folgt EIN weiteres Byte (wie xiaomi-ble parser.py und ble_monitor
+        # xiaomi.py, Pruefbericht B14). Bis 1.3.27 blieb es stehen, das Satzraster
+        # verrutschte, und die Werte gingen verloren.
+        if len(roh) < i + 1:
+            return None
+        cap = roh[i]
         i += 1
+        if cap & 0x20:
+            i += 1
 
     if rahmen & MI_VERSCHLUESSELT:
         out["hinweis"] = "verschluesselt"
@@ -408,7 +421,104 @@ def mibeacon(sdata, absender=""):
 # Zusammenfuehrung
 # ---------------------------------------------------------------------------
 
-def deuten(mdata, sdata, absender=""):
+# ---------------------------------------------------------------------------
+# BTHome v2 (Gruppe 13, 1.3.28, V2) - Shelly BLU und andere
+# ---------------------------------------------------------------------------
+#
+# Quelle: https://bthome.io/format/ (gelesen am 24.10.2026). Service Data unter
+# der UUID 0xFCD2 (auf dem Draht D2 FC). Erstes Byte "BTHome Device Information":
+# Bit 0 verschluesselt, Bit 2 ereignisgesteuert (unregelmaessig), Bit 5-7 Version
+# (010 = v2). Danach Objekte als ID + Wert, Ids aufsteigend; "A BTHome receiver
+# will stop parsing object ids as soon as it finds an object id that isn't
+# supported" - die Laenge eines unbekannten Objekts steht nirgends, also endet
+# das Lesen dort (die bis dahin gelesenen Werte bleiben).
+#
+# Abgebildet (Id: Groesse, Datentyp, Faktor - Beispiel der Spezifikation):
+#   0x00 Paket-Id    uint8           (0009 -> 9)         nur fuer das Entprellen der Taster
+#   0x01 batterie    uint8  %  1     (0161 -> 97)
+#   0x02 temperatur  sint16 C  0,01  (02CA09 -> 25,06)
+#   0x03 feuchte     uint16 %  0,01  (03BF13 -> 50,55)
+#   0x05 helligkeit  uint24 lx 0,01  (05138A14 -> 13460,67)
+#   0x0C batterie_mv uint16 V  0,001 (0C020C -> 3,074 V = 3074 mV)
+#   0x21 bewegungsmelder uint8 0/1   (2100 -> 0 = frei; NICHT "bewegung", das ist bei Ruuvi ein Zaehler)
+#   0x2D fenster     uint8 0/1       (2D01 -> 1 = offen)
+#   0x2E feuchte     uint8  %  1     (2E23 -> 35)
+#   0x45 temperatur  sint16 C  0,1   (451101 -> 27,3)
+#   0x3A taster      Ereignis        (3A01 -> press; 00 None, 02 double_press, 03 triple_press,
+#                                     04 long_press, 05 long_double_press, 06 long_triple_press, 80 hold_press)
+# Verschluesselt (Bit 0): wie MiBeacon nur der Hinweis, keine Werte.
+
+BTHOME_UUID = "0000fcd2-0000-1000-8000-00805f9b34fb"
+BTHOME_TASTER = {0x01: "press", 0x02: "double_press", 0x03: "triple_press", 0x04: "long_press",
+                 0x05: "long_double_press", 0x06: "long_triple_press", 0x80: "hold_press"}
+# Id -> (Laenge, mit Vorzeichen). Die Umrechnung steht ausgeschrieben in bthome() - je Groesse ein
+# _sammle()-Aufruf, damit die Pruefzeile "FORMAT_GROESSEN gegen Dekoder" (bl_test.php) sie sieht.
+BTHOME_OBJEKTE = {0x00: (1, False), 0x01: (1, False), 0x02: (2, True), 0x03: (2, False), 0x05: (3, False),
+                  0x0C: (2, False), 0x21: (1, False), 0x2D: (1, False), 0x2E: (1, False), 0x3A: (1, False),
+                  0x45: (2, True)}
+
+
+def bthome(sdata):
+    """BTHome v2 aus ServiceData[0000fcd2-...]. Rueckgabe dict oder None.
+
+    Zusaetzlich zu den gemeinsamen Feldern: "paket_id" (oder None) und
+    "ereignis" (Text des Tasters oder ""). Beides sind KEINE Messwerte und
+    stehen deshalb nicht unter "werte"."""
+    roh = (sdata or {}).get(BTHOME_UUID)
+    if not roh or len(roh) < 1:
+        return None
+    info = roh[0]
+    if (info >> 5) & 0x07 != 2:
+        return None
+    out = {"art": "bthome", "kennung": "", "ref_1m": None, "werte": {},
+           "paket_id": None, "ereignis": ""}
+    if info & 0x01:
+        out["hinweis"] = "verschluesselt"
+        return out
+    obj = {}
+    i = 1
+    letzte = -1
+    while i < len(roh):
+        oid = roh[i]
+        art = BTHOME_OBJEKTE.get(oid)
+        if art is None or oid < letzte:
+            break                   # unbekannte Id: Laenge unbekannt (Spezifikation)
+        laenge, vorzeichen = art
+        daten = roh[i + 1:i + 1 + laenge]
+        if len(daten) < laenge:
+            break
+        i += 1 + laenge
+        letzte = oid
+        obj.setdefault(oid, int.from_bytes(daten, "little", signed=vorzeichen))
+    w = out["werte"]
+    if 0x00 in obj:
+        out["paket_id"] = obj[0x00]
+    if 0x3A in obj:
+        out["ereignis"] = BTHOME_TASTER.get(obj[0x3A], "")
+    if 0x01 in obj:
+        _sammle(w, "batterie", float(obj[0x01]))
+    if 0x02 in obj:
+        _sammle(w, "temperatur", round(obj[0x02] * 0.01, 2))
+    elif 0x45 in obj:
+        _sammle(w, "temperatur", round(obj[0x45] * 0.1, 1))
+    if 0x03 in obj:
+        _sammle(w, "feuchte", round(obj[0x03] * 0.01, 2))
+    elif 0x2E in obj:
+        _sammle(w, "feuchte", float(obj[0x2E]))
+    if 0x05 in obj:
+        _sammle(w, "helligkeit", round(obj[0x05] * 0.01, 2))
+    if 0x0C in obj:
+        _sammle(w, "batterie_mv", obj[0x0C])          # Faktor 0,001 V = mV
+    if 0x21 in obj:
+        _sammle(w, "bewegungsmelder", 1 if obj[0x21] else 0)
+    if 0x2D in obj:
+        _sammle(w, "fenster", 1 if obj[0x2D] else 0)
+    if not w and out["paket_id"] is None and not out["ereignis"]:
+        return None
+    return out
+
+
+def deuten(mdata, sdata, absender="", bthome_an=True):
     """Alle Dekoder der Reihe nach. Rueckgabe: dict oder None.
 
     Ergebnis:
@@ -424,11 +534,21 @@ def deuten(mdata, sdata, absender=""):
     fremde Werte einem Tag zugeschrieben. Wer den Absender nicht kennt, laesst
     das Feld leer - dann entfaellt die Pruefung, und das steht hier, damit es
     eine Entscheidung ist und kein Versehen.
+
+    bthome_an (Gruppe 13, V2): BTHome v2 nur mit der Einstellung "bthome" (der Dienst
+    reicht sie durch; die Geraetesuche zeigt das Format immer an).
     """
     for fn, arg in ((ibeacon, mdata), (ruuvi, mdata),
                     (eddystone, sdata), (atc, sdata)):
         try:
             erg = fn(arg)
+        except (struct.error, IndexError, TypeError, ValueError):
+            erg = None
+        if erg:
+            return erg
+    if bthome_an:
+        try:
+            erg = bthome(sdata)
         except (struct.error, IndexError, TypeError, ValueError):
             erg = None
         if erg:
@@ -497,6 +617,10 @@ SENSORTHEMEN = {
     "laufzeit_s":  ("Betriebszeit", "s", 0, 4294967295),
     "bewegung":    ("Bewegungszähler", "", 0, 255),
     "folge":       ("Folgenummer", "", 0, 65535),
+    # Gruppe 13 (V2, BTHome v2)
+    "helligkeit":  ("Beleuchtungsstärke", "lx", 0, 120000),
+    "fenster":     ("Fensterkontakt", "", 0, 1),
+    "bewegungsmelder": ("Bewegungsmelder", "", 0, 1),
 }
 
 # Welches Format kann WELCHE Groessen liefern? Fuer die Loxone-Vorlage.
@@ -525,12 +649,17 @@ SENSORTHEMEN = {
 # Abgeleitet aus den _sammle()-Aufrufen der fuenf Dekoder; eine Pruefzeile im
 # Reiter "Test" haelt beides zusammen, damit die Tabelle nicht von den
 # Dekodern wegdriftet.
+# B15 (Gruppe 13): eddystone und ruuvi schreiben vier Groessen direkt (out["werte"][...] =), nicht ueber
+# _sammle() - die Pruefzeile war fuer sie blind, die Tabelle unvollstaendig. Die Zaehler gehen ohnehin
+# hinaus (SENSORTHEMEN); aufgenommen wie "folge" bei mibeacon. bthome neu (V2).
 FORMAT_GROESSEN = {
     "ibeacon":   (),
-    "eddystone": ("temperatur", "batterie_mv"),
+    "eddystone": ("temperatur", "batterie_mv", "pakete", "laufzeit_s"),
     "atc":       ("temperatur", "feuchte", "batterie", "batterie_mv"),
-    "ruuvi":     ("temperatur", "feuchte", "druck", "batterie_mv"),
+    "ruuvi":     ("temperatur", "feuchte", "druck", "batterie_mv", "bewegung", "folge"),
     "mibeacon":  ("temperatur", "feuchte", "batterie", "folge"),
+    "bthome":    ("temperatur", "feuchte", "batterie", "batterie_mv", "helligkeit", "fenster",
+                  "bewegungsmelder"),
 }
 
 
@@ -656,6 +785,57 @@ def eichung():
     #     Ueber den Verteiler, mit Absender.
     erg = deuten({}, {MIBEACON_UUID: mi}, "AA:BB:CC:DD:EE:FF")
     pruefe("MiBeacon ueber deuten()", erg and erg["art"], "mibeacon")
+
+    # --- B14 (Gruppe 13): MiBeacon mit Capability-Byte. Rahmen 0x2070 (Draht 7020) = 0x2050 + MI_CAPABILITY 0x20;
+    #     Capability 0x01 ohne I/O-Byte, 0x21 MIT einem I/O-Byte (xiaomi-ble/ble_monitor: 1 Byte).
+    #     Nimmt man das Lesen des Capability-Bytes heraus, wird die Zeile "0x21 + IO" rot.
+    mic1 = bytes.fromhex("7020AA0183FFEEDDCCBBAA01" "0D10040A01E201")
+    erg = mibeacon({MIBEACON_UUID: mic1}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon Capability 0x01", erg and erg["werte"].get("temperatur"), 26.6)
+    mic2 = bytes.fromhex("7020AA0183FFEEDDCCBBAA2100" "0D10040A01E201")
+    erg = mibeacon({MIBEACON_UUID: mic2}, "AA:BB:CC:DD:EE:FF")
+    pruefe("MiBeacon Capability 0x21 + IO-Byte", erg and erg["werte"].get("temperatur"), 26.6)
+    pruefe("MiBeacon Capability ohne Byte (Laenge)",
+           mibeacon({MIBEACON_UUID: bytes.fromhex("7020AA0183FFEEDDCCBBAA")}, "AA:BB:CC:DD:EE:FF"), None)
+
+    # --- V2 (Gruppe 13): BTHome v2, Beispiele aus https://bthome.io/format/ (gelesen 24.10.2026).
+    #     Beispielpaket der Seite: 40 02C409 03BF13 -> 25,00 GradC, 50,55 %.
+    bt = bytes.fromhex("4002C40903BF13")
+    erg = bthome({BTHOME_UUID: bt})
+    pruefe("BTHome Beispiel Temperatur", erg and erg["werte"].get("temperatur"), 25.0)
+    pruefe("BTHome Beispiel Feuchte", erg and erg["werte"].get("feuchte"), 50.55)
+    #     Tabellenbeispiele: 02CA09 -> 25,06; 0161 -> 97 %; 0C020C -> 3,074 V; 05138A14 -> 13460,67 lx;
+    #     2D01 -> offen; 2100 -> frei; 451101 -> 27,3; 2E23 -> 35 %.
+    erg = bthome({BTHOME_UUID: bytes.fromhex("4000090161" "02CA09" "05138A14" "0C020C" "2100" "2D01")})
+    pruefe("BTHome Paket-Id", erg and erg.get("paket_id"), 9)
+    pruefe("BTHome Batterie", erg and erg["werte"].get("batterie"), 97.0)
+    pruefe("BTHome Temperatur 0x02", erg and erg["werte"].get("temperatur"), 25.06)
+    pruefe("BTHome Helligkeit", erg and erg["werte"].get("helligkeit"), 13460.67)
+    pruefe("BTHome Spannung mV", erg and erg["werte"].get("batterie_mv"), 3074)
+    pruefe("BTHome Bewegungsmelder", erg and erg["werte"].get("bewegungsmelder"), 0)
+    pruefe("BTHome Fenster", erg and erg["werte"].get("fenster"), 1)
+    erg = bthome({BTHOME_UUID: bytes.fromhex("402E23451101")})
+    pruefe("BTHome Feuchte 0x2E", erg and erg["werte"].get("feuchte"), 35.0)
+    pruefe("BTHome Temperatur 0x45", erg and erg["werte"].get("temperatur"), 27.3)
+    #     Taster: 3A01 -> press, 3A80 -> hold_press; mit Paket-Id (Entprellen im Dienst).
+    erg = bthome({BTHOME_UUID: bytes.fromhex("4400130161" "3A01")})
+    pruefe("BTHome Taster press", erg and erg.get("ereignis"), "press")
+    pruefe("BTHome Taster Paket-Id", erg and erg.get("paket_id"), 0x13)
+    erg = bthome({BTHOME_UUID: bytes.fromhex("44000E3A80")})
+    pruefe("BTHome Taster hold_press", erg and erg.get("ereignis"), "hold_press")
+    #     Verschluesselt (Bit 0): Hinweis, keine Werte.
+    erg = bthome({BTHOME_UUID: bytes.fromhex("4102C409AABBCCDD")})
+    pruefe("BTHome verschluesselt erkannt", erg and erg.get("hinweis"), "verschluesselt")
+    pruefe("BTHome verschluesselt ohne Werte", erg and erg["werte"], {})
+    #     Unbekannte Objekt-Id: Lesen endet dort (Laenge unbekannt); davor gelesenes bleibt.
+    erg = bthome({BTHOME_UUID: bytes.fromhex("40F0010203BF13")})
+    pruefe("BTHome unbekannte Id zuerst -> nichts", erg, None)
+    erg = bthome({BTHOME_UUID: bytes.fromhex("4002C409F0010203BF13")})
+    pruefe("BTHome unbekannte Id -> Rest verworfen", erg and sorted(erg["werte"]), ["temperatur"])
+    #     Falsche Version (Bit 5-7 = 1): kein BTHome v2.
+    pruefe("BTHome Version 1 abgewiesen", bthome({BTHOME_UUID: bytes.fromhex("2002C409")}), None)
+    pruefe("BTHome ueber deuten()", (deuten({}, {BTHOME_UUID: bt}) or {}).get("art"), "bthome")
+    pruefe("BTHome aus (bthome_an=False)", deuten({}, {BTHOME_UUID: bt}, "", False), None)
 
     # --- Beschriftung: der Grund muss in der Anzeige ankommen.
     pruefe("Beschriftung mit Geraet",

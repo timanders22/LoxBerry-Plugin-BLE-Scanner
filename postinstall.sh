@@ -2,7 +2,8 @@
 
 # To use important variables from command line use the following code:
 COMMAND=$0    # Zero argument is shell command
-PTEMPDIR=$1   # First argument is temp folder during install
+PTEMPDIR=$1   # NICHT der Auspackordner: $1 ist eine zehnstellige Zufallskennung; der Ordner steht in $6
+              # bzw. im Arbeitsverzeichnis (Regeln/06 Z. 276-277; Gruppe 13, E4). Unbenutzt.
 PSHNAME=$2    # Second argument is Plugin-Name for scipts etc.
 PDIR=$3       # Third argument is Plugin installation folder
 PVERSION=$4   # Forth argument is Plugin version
@@ -24,10 +25,24 @@ LBPBIN="$BASE/bin/plugins"
 # ohne diese Unterordner, wurden sie dort angelegt (in WSL gemessen,
 # Pruefung-BLE-Scanner-1.3.19, Faelle H1 bis H3). Jetzt: warnen statt
 # vollziehen.
-if [ -z "$PDIR" ] || [ ! -d "$LBPCONFIG" ] || [ ! -d "$LBPDATA" ] \
-   || [ "$LBPCONFIG" = "/config/plugins" ] || [ "$LBPDATA" = "/data/plugins" ]; then
-    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Konfiguration"
-    echo "<WARNING> '$LBPCONFIG', Daten '$LBPDATA') - dieses Skript tut nichts."
+# --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh aus dem Auspackordner -----------------
+# $6 ist der Auspackordner und zugleich das Arbeitsverzeichnis (plugininstall.pl: cd "$tempfolder" && ...);
+# $1 ist nur eine zehnstellige Zufallskennung. Fehlt die Datei oder ist sie defekt, bricht postinstall.sh
+# ab: lieber kein Update als eines ohne Sicherung und Zweitschrift.
+BLH="${6:-$(pwd)}/bin/bl_haken.sh"
+if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$BLH" 2>/dev/null; then
+    BL_HAKEN_LADEN=1
+    . "$BLH"
+else
+    echo "<ERROR> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - postinstall.sh bricht ab."
+    exit 1
+fi
+# B7 (Gruppe 13): dieselbe Torbedingung wie preinstall.sh - auch config/system/general.json und ein Ordnername
+# ohne "/" und "..". Bis 1.3.27 genuegten hier config/plugins und data/plugins; in einem Pruefbaum ohne
+# general.json legte preinstall nichts beiseite, postinstall spielte aber die Zweitschrift zurueck.
+if ! bl_wurzel_gilt "$BASE" "$PDIR"; then
+    echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Wurzel '$BASE', general.json"
+    echo "<WARNING> noetig) - dieses Skript tut nichts."
     exit 0
 fi
 
@@ -50,6 +65,9 @@ chown loxberry:loxberry "$PLOG/ble_scanner_ng_start.log" 2>/dev/null
 # --- BLE-Scanner NG ---------------------------------------------------------
 # Ausfuehrbar machen. Ohne das startet der Daemon beim Systemstart nicht.
 chmod 755 "$LBPBIN/$PDIR"/*.py 2>/dev/null
+# Gruppe 13: die Befehlsbruecke und die gemeinsamen Hilfen. KEIN Start der Bruecke hier - der Waechter in
+# cron.01min startet sie binnen einer Minute, wenn "Befehle ueber MQTT annehmen" an ist.
+chmod 755 "$LBPBIN/$PDIR/befehlsbruecke.sh" "$LBPBIN/$PDIR/bl_haken.sh" 2>/dev/null
 
 # --- Gemeinsame Hilfen ------------------------------------------------------
 #
@@ -61,37 +79,8 @@ chmod 755 "$LBPBIN/$PDIR"/*.py 2>/dev/null
 # 13.09.2026. Bis 1.3.11 stand genau das in postupgrade.sh: der Neustart nach
 # einem Update hat deshalb NIE funktioniert, und weil die Zeile ihre Ausgabe
 # umleitete, stand darueber auch nichts im Protokoll.
-# BERICHTIGT IN 1.3.17: die Suche verlangte nur IRGENDEIN Argument, das auf
-# "/ble_scanner_ng.py" endet - Interpreter, Zahl der Argumente und Benutzer
-# blieben ungeprueft, und der Dienst einer ZWEITEN Installation zaehlte mit.
-# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
-# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
-# Benutzer mit der Nummer $2 gehoeren. Dieselbe Funktion steht in
-# preupgrade.sh, postupgrade.sh, uninstall und daemon.
-bl_dienste_finden() {
-    for bl_d in /proc/[0-9]*; do
-        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
-        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
-        bl_n=0
-        bl_treffer=0
-        while IFS= read -r bl_arg; do
-            bl_n=$((bl_n + 1))
-            if [ "$bl_n" = 1 ]; then
-                case "${bl_arg##*/}" in
-                    python|python3|python3.*) ;;
-                    *) break ;;
-                esac
-            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
-                bl_treffer=1
-            fi
-        done <<BL_ARGUMENTE
-$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
-BL_ARGUMENTE
-        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
-            echo "${bl_d#/proc/}"
-        fi
-    done
-}
+# bl_dienste_finden() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 # Dieses Skript laeuft als loxberry (sudo -n -u loxberry), der Dienst auch -
 # deshalb ist die eigene Nummer der richtige Rueckfall, wenn es den Benutzer
@@ -170,7 +159,10 @@ done
 if [ -z "$BTCONF" ]; then
     echo "<INFO> Keine D-Bus-Richtlinie fuer BlueZ gefunden. Ist bluez vollstaendig"
     echo "<INFO> installiert? Ohne sie kann der Dienst org.bluez nicht ansprechen."
-elif grep -q 'context="default"' "$BTCONF" && grep -q 'send_destination="org.bluez"' "$BTCONF"; then
+# B5 (Gruppe 13): ob <allow send_destination="org.bluez"/> INNERHALB von <policy context="default"> steht -
+# wortgleich in postupgrade.sh. Bis 1.3.27 genuegten zwei getrennte greps, und ein <deny .../> im default-Block
+# meldete "erlaubt den Zugriff jedem Benutzer" (Probe deny.conf).
+elif awk '/<policy context="default">/{d=1} d&&/<allow send_destination="org.bluez"/{a=1} /<\/policy>/{d=0} END{exit !a}' "$BTCONF"; then
     echo "<OK> $BTCONF erlaubt den Zugriff auf org.bluez jedem Benutzer"
     echo "<OK> (<policy context=\"default\">) - eine Gruppenmitgliedschaft ist unnoetig."
 elif grep -q 'group="bluetooth"' "$BTCONF"; then
@@ -248,20 +240,8 @@ NETZ_BASE="$BASE"
 NETZ_PDIR="${3:-ble_scanner_ng}"
 NETZ_CFG="$NETZ_BASE/config/plugins/$NETZ_PDIR"
 
-# NEU IN 1.3.18. Die GROESSE beantwortet die Frage "ist die Datei brauchbar?"
-# nicht: eine abgeschnittene Datei ist nicht leer. Gefragt wird deshalb nach
-# dem, was das Plugin selbst liest - Abschnittskopf [CONFIG], mindestens eine
-# vollstaendige Zeile "schluessel=wert", und ein Zeilenumbruch als letztes
-# Byte. Wortgleich in preupgrade.sh; wer eine anfasst, fasst beide an.
-# Die Pruefung gehoert zu ble_scanner_ng.cfg - netz_zurueck() wird nur damit
-# aufgerufen (die Zeile steht unter dieser Funktion).
-bl_cfg_traegt_inhalt() {
-    [ -s "$1" ] || return 1
-    grep -q '^[[:space:]]*\[CONFIG\][[:space:]]*$' "$1" 2>/dev/null || return 1
-    grep -q '^[[:space:]]*[A-Za-z_][A-Za-z0-9_.]*[[:space:]]*=' "$1" 2>/dev/null || return 1
-    [ "$(tail -c 1 "$1" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
-    return 0
-}
+# bl_cfg_traegt_inhalt() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 netz_zurueck() {
     datei=$1; soll=$2
@@ -296,6 +276,9 @@ netz_zurueck() {
         if cp -p "$zweit" "$ziel.neu" 2>/dev/null \
            && cmp -s "$zweit" "$ziel.neu" \
            && mv "$ziel.neu" "$ziel" 2>/dev/null; then
+            # B8 (Gruppe 13): 0640 wie die Oberflaeche (bl_config_write) - cp -p uebernahm den Modus der
+            # Zweitschrift, und eine aus der Zeit vor 1.3.18 trug 0644.
+            chmod 0640 "$ziel" 2>/dev/null
             echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
         else
             rm -f "$ziel.neu" 2>/dev/null
@@ -304,7 +287,26 @@ netz_zurueck() {
         fi
     fi
 }
-netz_zurueck "ble_scanner_ng.cfg" "1310ac7910fdf451128de437f2b5b345e3a225924ba180c03f92c303503c1c68"
+# Gruppe 13: die Summe der Paket-cfg 1.3.28 (neue Schluessel befehle_mqtt_ein, befehle_eingreifend_ein,
+# haus_anwesenheit, bthome=1, irk_aufloesen) - mitgezogen wie verlangt (B18).
+netz_zurueck "ble_scanner_ng.cfg" "2426aeb33f82210a94d87326b9ca80816aab512532085417bb9a4fb724b515a8"
+# V1 (Gruppe 13): irk.json liefert das Paket nicht mit. Fehlt sie nach dem Kopierschritt und liegt eine Zweitschrift,
+# kommt sie zurueck - mit 0600. Eine vorhandene wird nie ueberschrieben (postupgrade.sh spielt die Sicherung danach
+# ohnehin vollstaendig zurueck).
+NETZ_IRK="$NETZ_CFG/irk.json"
+NETZ_IRK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
+if [ ! -e "$NETZ_IRK" ] && [ -s "$NETZ_IRK_ZWEIT" ] && [ "$(head -c 1 "$NETZ_IRK_ZWEIT" 2>/dev/null)" = "{" ]; then
+    if cp "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" 2>/dev/null \
+       && chmod 0600 "$NETZ_IRK.neu" 2>/dev/null \
+       && cmp -s "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" \
+       && mv "$NETZ_IRK.neu" "$NETZ_IRK" 2>/dev/null; then
+        echo "<OK> irk.json aus der Zweitschrift wiederhergestellt (0600)."
+    else
+        rm -f "$NETZ_IRK.neu" 2>/dev/null
+        echo "<WARNING> irk.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_IRK_ZWEIT."
+    fi
+fi
+[ -f "$NETZ_IRK" ] && chmod 0600 "$NETZ_IRK" 2>/dev/null
 
 # --- Den Dienst starten, wenn dies eine NEUINSTALLATION ist -----------------
 #

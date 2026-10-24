@@ -6,7 +6,8 @@
 # weggeraeumt, was AUSSERHALB davon liegt: der laufende Dienst, die Dateien
 # auf der Ramdisk und die Zweitschrift der Konfiguration.
 
-PTEMPDIR=$1
+PTEMPDIR=$1   # NICHT der Auspackordner: $1 ist eine zehnstellige Zufallskennung; der Ordner steht in $6
+              # bzw. im Arbeitsverzeichnis (Regeln/06 Z. 276-277; Gruppe 13, E4). Unbenutzt.
 PSHNAME=$2
 PDIR=$3
 PVERSION=$4
@@ -53,6 +54,10 @@ fi
 # meldete "Kein laufender Dienst gefunden" - eine Falschaussage - und der
 # Dienst lief nach der Deinstallation weiter.
 PDIR="${PDIR:-ble_scanner_ng}"
+# B7 (Gruppe 13): ein Ordnername mit "/" oder ".." - nichts anfassen (wie preinstall.sh).
+case "$PDIR" in
+    ''|*/*|*..*) echo "<WARNING> Unzulaessiger Ordnername '$PDIR' - nichts entfernt."; exit 0 ;;
+esac
 
 # Ohne Wurzel wird NICHTS angefasst, und es wird gesagt, was liegenbleibt.
 # In der Zweitschrift stehen MAC-Adressen und die Klarnamen der ueberwachten
@@ -75,85 +80,83 @@ fi
 PDATA="$BASE/data/plugins/$PDIR"
 PIDDATEI="$PDATA/dienst.pid"
 
-# --- Dienst beenden ---------------------------------------------------------
-#
-# BERICHTIGT IN 1.3.17. Bis 1.3.16 entschied hier eine TEILZEICHENKETTE ueber
-# die ganze Befehlszeile: "grep -q ble_scanner_ng\.py" traf jeden Prozess, in
-# dessen Befehlszeile der Name irgendwo vorkam. In WSL gemessen (18.09.2026):
-#
-#   f1  die Nummer in dienst.pid gehoerte einem "tail -f <dienst>"  -> getoetet
-#   f2  ohne PID-Datei fand die Suche denselben tail                -> getoetet
-#   f2b der Dienst einer ZWEITEN Installation (anderer Ordner)      -> getoetet
-#   f2c ein "python3 -c" mit dem Namen im Text                      -> getoetet
-#   f4  von ZWEI eigenen Diensten blieb einer stehen ("break")
-#
-# Ein Treffer hat jetzt GENAU zwei Argumente: einen python-Interpreter und den
-# vollen Dienstpfad DIESER Installation ($1); dazu muss der Prozess dem
-# Benutzer mit der Nummer $2 gehoeren. Behandelt werden ALLE Treffer, und vor
-# dem -9 wird NEU gesucht statt angenommen.
-bl_dienste_finden() {
-    for bl_d in /proc/[0-9]*; do
-        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
-        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
-        bl_n=0
-        bl_treffer=0
-        while IFS= read -r bl_arg; do
-            bl_n=$((bl_n + 1))
-            if [ "$bl_n" = 1 ]; then
-                case "${bl_arg##*/}" in
-                    python|python3|python3.*) ;;
-                    *) break ;;
-                esac
-            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
-                bl_treffer=1
-            fi
-        done <<BL_ARGUMENTE
-$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
-BL_ARGUMENTE
-        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
-            echo "${bl_d#/proc/}"
+# --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh ---------------------------------------
+# Fehlt die Datei oder ist sie defekt: Warnung und eine Minimalform (nur nach der PID-Datei) - keine stille
+# Luecke, aber auch kein Abbruch.
+BLH="$BASE/bin/plugins/$PDIR/bl_haken.sh"
+if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$BLH" 2>/dev/null; then
+    BL_HAKEN_LADEN=1
+    . "$BLH"
+else
+    echo "<WARNING> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - es gilt die Minimalform (PID-Datei)."
+    bl_dienste_finden() {
+        bl_p=$(cat "$PIDDATEI" 2>/dev/null)
+        case "$bl_p" in ''|*[!0-9]*) return 0 ;; esac
+        grep -qaF "$1" "/proc/$bl_p/cmdline" 2>/dev/null && echo "$bl_p"
+        return 0
+    }
+    bl_dienste_beenden() {
+        BL_UEBRIG=""
+        bl_pids=$(bl_dienste_finden "$1" "$2")
+        BL_GEFUNDEN=$(echo $bl_pids | wc -w | tr -d ' ')
+        [ -n "$bl_pids" ] && kill $bl_pids 2>/dev/null && sleep 2
+        BL_UEBRIG=$(bl_dienste_finden "$1" "$2")
+    }
+fi
+
+
+# Die Befehlsbruecke (seit 1.3.28, Gruppe 13; Bauart Dashboard 0.9.37). Erst befehlsbruecke.sh stop, dann nachzaehlen: ein Bruecken-Dienst
+# dieses Ordners (php, genau zwei Argumente, argv[1] der eigene Pfad) und ein mosquitto_sub mit der eigenen
+# Optionsdatei werden hart beendet. Die Optionsdateien tragen das Broker-Kennwort - vor dem Loeschen ueberschreiben,
+# dann den Ordner befehle/ entfernen. Im Broker bleibt
+# nichts: Quittungen und status/befehle sind nie retained. Bauart Sprachsteuerung 0.12.7.
+UN_PBIN="$BASE/bin/plugins/$PDIR"
+UN_PBIN_P=$(cd "$UN_PBIN" 2>/dev/null && pwd -P)
+BBSH="$UN_PBIN/befehlsbruecke.sh"
+BBPHP="$UN_PBIN/befehlsbruecke.php"
+BBDIR="$BASE/data/plugins/$PDIR/befehle"
+if [ -f "$BBSH" ] && command -v bash >/dev/null 2>&1; then
+    echo "<INFO> Befehlsbruecke: $(timeout 40 bash "$BBSH" stop 2>&1 9>&- | head -n 1)"
+fi
+BB_REST=0
+for bb_d in /proc/[0-9]*; do
+    grep -qaF "befehlsbruecke.php" "$bb_d/cmdline" 2>/dev/null || continue
+    bb_a0=$(tr '\0' '\n' < "$bb_d/cmdline" 2>/dev/null | sed -n 1p)
+    bb_a1=$(tr '\0' '\n' < "$bb_d/cmdline" 2>/dev/null | sed -n 2p)
+    bb_n=$(tr '\0' '\n' < "$bb_d/cmdline" 2>/dev/null | grep -c '')
+    case "${bb_a0##*/}" in php|php[0-9]*) ;; *) continue ;; esac
+    if [ "$bb_n" = 2 ] && { [ "$bb_a1" = "$BBPHP" ] || { [ -n "$UN_PBIN_P" ] && [ "$bb_a1" = "$UN_PBIN_P/befehlsbruecke.php" ]; }; }; then
+        kill -9 "${bb_d#/proc/}" 2>/dev/null && BB_REST=$((BB_REST + 1))
+    fi
+done
+BB_ABOS=0
+for bb_d in /proc/[0-9]*; do
+    [ "$(cat "$bb_d/comm" 2>/dev/null)" = "mosquitto_sub" ] || continue
+    if tr '\0' '\n' < "$bb_d/environ" 2>/dev/null | grep -qxF "XDG_CONFIG_HOME=$BBDIR/mosquitto"; then
+        kill -9 "${bb_d#/proc/}" 2>/dev/null && BB_ABOS=$((BB_ABOS + 1))
+    fi
+done
+[ "$BB_REST" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_REST Dienst(e) erst mit kill -9 beendet."
+[ "$BB_ABOS" -gt 0 ] && echo "<WARNING> Befehlsbruecke: $BB_ABOS mosquitto_sub erst mit kill -9 beendet."
+if [ -d "$BBDIR" ] && [ ! -L "$BBDIR" ]; then
+    for bb_f in "$BBDIR/mosquitto/mosquitto_sub" "$BBDIR/mosquitto/mosquitto_pub"; do
+        if [ -f "$bb_f" ] && [ ! -L "$bb_f" ]; then
+            bb_n=$(stat -c %s "$bb_f" 2>/dev/null || echo 64)
+            head -c "$bb_n" /dev/zero > "$bb_f" 2>/dev/null
         fi
     done
-}
+    case "$BBDIR" in
+        */data/plugins/?*/befehle) rm -rf "${BBDIR:?}" ;;
+    esac
+fi
+if [ -e "$BBDIR/mosquitto/mosquitto_sub" ] || [ -e "$BBDIR/mosquitto/mosquitto_pub" ]; then
+    echo "<WARNING> Befehlsbruecke: Optionsdateien liegen noch unter $BBDIR/mosquitto - von Hand entfernen."
+fi
 
-# Beendet alle Treffer mit Geduld: TERM, bis zu zehn Sekunden warten, dann KILL
-# fuer den Rest - und danach wird NEU gesucht, nicht angenommen. Ergebnis:
-# BL_GEFUNDEN (Zahl der Treffer) und BL_UEBRIG (leer, wenn hinterher keiner
-# mehr laeuft, sonst die Nummern).
-bl_dienste_beenden() {
-    BL_GEFUNDEN=0
-    BL_UEBRIG=""
-    bl_pids=$(bl_dienste_finden "$1" "$2")
-    for bl_p in $bl_pids; do
-        BL_GEFUNDEN=$((BL_GEFUNDEN + 1))
-    done
-    [ -n "$bl_pids" ] || return 0
-    echo "<INFO> Halte den BLE-Scanner NG an (PID$(for bl_p in $bl_pids; do printf ' %s' "$bl_p"; done))."
-    kill $bl_pids 2>/dev/null
-    bl_i=0
-    while [ $bl_i -lt 20 ]; do
-        bl_lebt=0
-        for bl_p in $bl_pids; do
-            kill -0 "$bl_p" 2>/dev/null && bl_lebt=1
-        done
-        [ "$bl_lebt" = 0 ] && break
-        sleep 0.5
-        bl_i=$((bl_i + 1))
-    done
-    # kill -9 NUR fuer das, was JETZT noch laeuft und immer noch unserer ist.
-    # Bis 1.2.10 folgte das -9 bedingungslos - auch wenn der Prozess laengst
-    # beendet war und die Nummer inzwischen ein fremder Prozess trug.
-    bl_rest=$(bl_dienste_finden "$1" "$2")
-    if [ -n "$bl_rest" ]; then
-        echo "<WARNING> Der Dienst reagierte nicht auf SIGTERM - er wird abgeschossen."
-        kill -9 $bl_rest 2>/dev/null
-        sleep 1
-        bl_rest=$(bl_dienste_finden "$1" "$2")
-    fi
-    for bl_p in $bl_rest; do
-        BL_UEBRIG="$BL_UEBRIG $bl_p"
-    done
-}
+# --- Dienst beenden ---------------------------------------------------------
+#
+# bl_dienste_finden() und bl_dienste_beenden() steht seit 1.3.28 in bin/bl_haken.sh (Gruppe 13, V9; oben eingebunden) - bis 1.3.27 wortgleich in
+# mehreren Hakenskripten.
 
 # Die Deinstallation laeuft als root, der Dienst als loxberry: nur Prozesse von
 # loxberry. Gibt es den Benutzer nicht, wird NICHT geraten - dann bleibt der
@@ -256,6 +259,11 @@ ZWEIT="$BASE/config/plugins/$PDIR.backup.ble_scanner_ng.cfg"
 if [ -f "$ZWEIT" ]; then
     rm -f "$ZWEIT" && echo "<OK> Zweitschrift der Konfiguration entfernt ($ZWEIT)."
 fi
+# V1 (Gruppe 13): die Zweitschrift von irk.json (Identitaetsschluessel) ebenso.
+ZWEIT_IRK="$BASE/config/plugins/$PDIR.backup.irk.json"
+if [ -f "$ZWEIT_IRK" ]; then
+    rm -f "$ZWEIT_IRK" && echo "<OK> Zweitschrift der IRK-Schluessel entfernt ($ZWEIT_IRK)."
+fi
 
 # --- Der Helfer fuer das Einschalten von Bluetooth --------------------------
 #
@@ -271,8 +279,19 @@ fi
 #
 # Laeuft dieses Skript nicht als root, misslingt das rm - dann wird es gesagt
 # statt verschwiegen.
+# B23 (Gruppe 13): steht noch eine zweite Installation (config/plugins/ble_scanner_ng*), bleibt der Helfer fuer
+# sie liegen - ihre sudo-Regel faellt beim Deinstallieren zwar mit (gleicher NAME), kommt aber mit ihrem naechsten
+# Einspielen wieder, und dann braucht sie den Helfer.
 HELFER=/usr/local/sbin/ble_scanner_ng_bluetooth
-if [ -f "$HELFER" ]; then
+BL_ANDERE=""
+for bl_o in "$BASE"/config/plugins/ble_scanner_ng*; do
+    [ -d "$bl_o" ] || continue
+    [ "${bl_o##*/}" = "$PDIR" ] && continue
+    BL_ANDERE="${bl_o##*/}"
+done
+if [ -f "$HELFER" ] && [ -n "$BL_ANDERE" ]; then
+    echo "<INFO> Helfer bleibt fuer $BL_ANDERE ($HELFER); nach dessen naechstem Einspielen ist die Regel wieder da."
+elif [ -f "$HELFER" ]; then
     if rm -f "$HELFER" 2>/dev/null && [ ! -f "$HELFER" ]; then
         echo "<OK> Helfer fuer Bluetooth entfernt ($HELFER)."
     else
@@ -312,6 +331,8 @@ if [ -n "$BASE" ] && [ -d "$BASE/data/plugins" ]; then
     # dem Datenordner. Blieben sie liegen, hielte ein "0" aus dieser
     # Installation eine spaetere an.
     rm -f "$BASE/data/plugins/$PDIR.soll_laufen" 2>/dev/null
+    # Merkliste der eigenen Haus-Themen (Gruppe 13): --mqtt-leeren hat sie oben abgeraeumt und nachgelesen.
+    rm -f "$BASE/data/plugins/$PDIR.haus_themen" "$BASE/data/plugins/$PDIR.haus_themen.neu" 2>/dev/null
     rm -f "$BASE/data/plugins/$PDIR.waechter" "$BASE/data/plugins/$PDIR.waechter.neu."* 2>/dev/null
 fi
 

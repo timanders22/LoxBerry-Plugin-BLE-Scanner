@@ -19,3 +19,8 @@ bluez
 python3-dbus
 python3-gi
 python3-paho-mqtt
+# Gruppe 13 (1.3.28): gebraucht von der Befehlsbruecke (mosquitto_sub/mosquitto_pub); der Dienst selbst spricht paho.
+# python3-cryptography steht bewusst NICHT hier: die IRK-Aufloesung (V1, ab Werk aus) nimmt es, wenn es da ist,
+# und rechnet sonst AES-128 in reinem Python (bl_common.py, gegen FIPS-197 und den Testvektor der
+# Bluetooth-Spezifikation geeicht) - ein Paket, das am Geraet niemand nachgemessen hat, waere die groessere Gefahr.
+mosquitto-clients

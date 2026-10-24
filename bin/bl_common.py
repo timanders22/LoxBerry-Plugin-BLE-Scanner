@@ -16,6 +16,7 @@ Grundlage ist das Plugin BLE-Scanner von Christian Woerstenfeld (2021.2.3,
 Apache-Lizenz 2.0). Die Aenderungen stehen in NOTICE.
 """
 
+import json
 import os
 import re
 import socket
@@ -353,16 +354,31 @@ VORGABEN = {
     #    dem Update nichts Neues. Die Zuordnung "<WLAN-Name>=<Person>, ...".
     "wlan_kopplung": "0",
     "wlan_zuordnung": "",
+    # -- Gruppe 13 (1.3.28): Befehlsbruecke (beide Haken ab Werk aus - jeder im Heimnetz kann ueber den
+    #    UDP-Eingang des MQTT-Gateways senden), Haus-Themen nach Nr. 15 (ab Werk aus), BTHome v2 (ab Werk 0;
+    #    die mitgelieferte Paket-cfg traegt 1, also nur eine Neuinstallation an), IRK-Aufloesung (ab Werk aus).
+    "befehle_mqtt_ein": "0",
+    "befehle_eingreifend_ein": "0",
+    "haus_anwesenheit": "0",
+    "bthome": "0",
+    "irk_aufloesen": "0",
 }
 
 # Erlaubte Schluessel der Zusatzangaben je Tag (viertes Feld der Tag-Zeile).
-TAG_OPTIONEN = ("abw", "min", "ref", "alias", "person", "batt", "raum")
+# B19 (Gruppe 13): "min" und "raum" las der Dienst nie (nur _tagzahl(..., "abw", ...); "raum" ist der
+# globale Schalter). Sie sind ALTOPTIONEN: beim Lesen als Zusatzangabe erkannt (damit die Zeile nicht als
+# Kommentar missdeutet wird), sonst uebergangen; die Oberflaeche verwirft sie beim Speichern mit Hinweis.
+# V12: "haus" (=1) gibt den Tag fuer haus/tag/<name>/da frei.
+TAG_OPTIONEN = ("abw", "ref", "alias", "person", "batt", "haus")
+ALTOPTIONEN = ("min", "raum")
 
 # Zweignamen, die der Themenbaum selbst belegt. Ein Tag-Alias darf NICHT so
 # heissen, sonst kollidiert "<alias>/present" mit "summary/present" und die
 # Retain-Tabelle unten ordnet das Thema dem falschen Stamm zu. Die Oberflaeche
 # weist einen solchen Alias ab und sagt es.
-RESERVIERTE_ZWEIGE = ("server", "summary", "person", "scanner", "sensor")
+# F2 (Gruppe 13): "status" (status/zaehler, status/befehle) und "befehl" (die Befehlsbruecke abonniert
+# <praefix>/befehl/#; ein Tag mit dem Alias "befehl" saehe dort wie Befehle aus).
+RESERVIERTE_ZWEIGE = ("server", "summary", "person", "scanner", "sensor", "status", "befehl")
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +488,14 @@ RETAIN = {
     #    retained Thema; die Zahl derselben Sache (summary/present) ist der
     #    retained Weg und ist nie leer.
     "summary/names": False,
+    # -- Gruppe 13 (1.3.28): das neue Lebenszeichen fuer Loxone (hoechstens alle 30 s, 0-999, laeuft um) -
+    #    NIE retained, wie server/ts; je Scanner zusaetzlich scanner/<name>/status/zaehler (E9).
+    "status/zaehler":  False,
+    "scanner/zaehler": False,
+    # -- Ereignisse und Einmalwerte: ein BTHome-Taster (V2) und das Ergebnis einer Kalibrierung (E5)
+    #    sind kein Zustand. Zurueckbehalten loeste ein alter Tastendruck nach jedem Neustart erneut aus.
+    "button":          False,
+    "kalibrierung":    False,
 }
 
 
@@ -494,7 +518,7 @@ def thema_stamm(unterthema):
         return ""
     if "sensor" in teile:
         return "sensor"
-    if teile[0] in ("server", "summary"):
+    if teile[0] in ("server", "summary", "status"):
         return teile[0] + "/" + (teile[1] if len(teile) > 1 else "")
     if teile[0] in ("person", "scanner"):
         return teile[0] + "/" + teile[-1]
@@ -625,8 +649,10 @@ def anwesenheit_gesamt(ble, wlan):
 
     ble, wlan: 1 da, 0 weg, None ohne Aussage (WiFi-Scanner schweigt, Person
     ohne aktiven Tag). 1, wenn eine Quelle "da" sagt; 0, wenn alle Quellen mit
-    Aussage "weg" sagen; "-" ohne jede Aussage. quelle nennt die Quellen, die
-    das Ergebnis tragen.
+    Aussage "weg" sagen; -1 ohne jede Aussage (Gruppe 13, E6: ein Zahlenthema sendet bei
+    fehlendem Wert -1 - ein analoger Eingang laese "-" als 0 = "weg", genau die falsche
+    Aussage bei schweigenden Quellen). quelle nennt die Quellen, die das Ergebnis tragen;
+    ohne Aussage "-" (Text, Entscheidung 5 vom 29.09.2026).
     """
     da = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 1]
     weg = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 0]
@@ -634,7 +660,209 @@ def anwesenheit_gesamt(ble, wlan):
         return 1, "+".join(da)
     if weg:
         return 0, "+".join(weg)
-    return "-", "-"
+    return -1, "-"
+
+
+# ---------------------------------------------------------------------------
+# V1 (Gruppe 13, 1.3.28): wechselnde Adressen (RPA) ueber einen IRK aufloesen
+# ---------------------------------------------------------------------------
+#
+# Ein Telefon oder eine Uhr wirbt mit einer "aufloesbaren Zufallsadresse"
+# (Resolvable Private Address, RPA), die sich alle paar Minuten aendert. Wer
+# den Identitaetsschluessel (IRK, 16 Byte) des Geraets kennt, kann jede neue
+# Adresse ihm zuordnen: die oberen drei Byte der Adresse sind prand, die
+# unteren drei der hash, und es gilt hash = ah(IRK, prand).
+#
+# Quelle: Bluetooth Core Specification, Vol 3, Part H, Abschnitt 2.2.2
+# ("Random Address Hash function ah"): ah(k, r) = e(k, r') mod 2^24, r' = 104
+# Null-Bit || r, e = AES-128 mit dem hoechstwertigen Byte zuerst.
+# Abschnitt 1.3.2.2 der Vol 6 Part B: die zwei hoechsten Bit einer RPA sind 01.
+# Testvektor (Beispieldaten der Spezifikation, Anhang D.7), gegengelesen am
+# Selbsttest des Linux-Kernels net/bluetooth/smp.c test_ah() - dort in
+# Byte-Reihenfolge klein zuerst: IRK ec0234a357c8ad05341010a60a397d9b,
+# prand 708194 -> hash 0dfbaa (bl_selbsttest.py, Gruppe "IRK").
+#
+# Der Schluessel liegt NICHT in ble_scanner_ng.cfg (0640), sondern in
+# irk.json (0600) daneben: {"<name>": "<32 Hex>"}. Nie im Protokoll, nie in
+# der Oberflaeche - dort nur "hinterlegt" und die letzten vier Hex.
+# BlueZ-Kopplung (Bond) wird NICHT angefasst: sie veraenderte fremde Geraete.
+#
+# AES ohne neues Paket: Python hat kein AES in der Standardbibliothek.
+# python3-cryptography wird benutzt, WENN es da ist; sonst rechnet
+# _aes128_rein() unten (FIPS-197, nur Verschluesseln eines Blocks) - eine
+# Abhaengigkeit, die am Geraet nicht nachzumessen ist, waere schlechter als
+# ein gemessener Rueckfall (Bericht Gruppe 13: 5000 Bloecke in Python rein).
+
+IRK_DATEI = os.path.join(CONFIG_DIR, "irk.json")
+IRK_NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+
+_SBOX = None
+
+
+def _sbox():
+    global _SBOX
+    if _SBOX is None:
+        # S-Box aus der Inversen in GF(2^8) und der affinen Abbildung
+        # (FIPS-197, 5.1.1) - gerechnet statt abgetippt.
+        p = q = 1
+        s = [0] * 256
+        s[0] = 0x63
+        while True:
+            p = p ^ ((p << 1) & 0xFF) ^ (0x1B if p & 0x80 else 0)
+            q ^= q << 1
+            q ^= q << 2
+            q ^= q << 4
+            q &= 0xFF
+            if q & 0x80:
+                q ^= 0x09
+            x = q ^ (((q << 1) | (q >> 7)) & 0xFF) ^ (((q << 2) | (q >> 6)) & 0xFF) \
+                ^ (((q << 3) | (q >> 5)) & 0xFF) ^ (((q << 4) | (q >> 4)) & 0xFF)
+            s[p] = (x ^ 0x63) & 0xFF
+            if p == 1:
+                break
+        _SBOX = s
+    return _SBOX
+
+
+def _xt(a):
+    return ((a << 1) ^ 0x1B) & 0xFF if a & 0x80 else a << 1
+
+
+def _aes128_rein(schluessel, block):
+    """AES-128, ein Block, nur Verschluesseln (FIPS-197). bytes -> bytes."""
+    s = _sbox()
+    w = list(schluessel)
+    rc = 1
+    for i in range(16, 176, 4):
+        t = w[i - 4:i]
+        if i % 16 == 0:
+            t = [s[t[1]] ^ rc, s[t[2]], s[t[3]], s[t[0]]]
+            rc = _xt(rc)
+        w.extend(w[i - 16 + j] ^ t[j] for j in range(4))
+    z = [block[i] ^ w[i] for i in range(16)]
+    for runde in range(1, 11):
+        z = [s[b] for b in z]
+        z = [z[(i + 4 * (i % 4)) % 16] for i in range(16)]       # ShiftRows
+        if runde != 10:
+            neu = []
+            for c in range(4):
+                a = z[4 * c:4 * c + 4]
+                t = a[0] ^ a[1] ^ a[2] ^ a[3]
+                neu.extend(a[j] ^ t ^ _xt(a[j] ^ a[(j + 1) % 4]) for j in range(4))
+            z = neu
+        z = [z[i] ^ w[16 * runde + i] for i in range(16)]
+    return bytes(z)
+
+
+def aes128(schluessel, block):
+    """AES-128 eines Blocks - python3-cryptography, wenn vorhanden, sonst rein."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        enc = Cipher(algorithms.AES(bytes(schluessel)), modes.ECB()).encryptor()
+        return enc.update(bytes(block)) + enc.finalize()
+    except Exception:        # noqa: BLE001  (fehlt, alte Fassung, eingeschraenkt)
+        return _aes128_rein(bytes(schluessel), bytes(block))
+
+
+def aes_weg():
+    """Welcher AES-Weg traegt? "cryptography" oder "rein" (fuer den Reiter Test)."""
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes  # noqa: F401
+        return "cryptography"
+    except Exception:        # noqa: BLE001
+        return "rein"
+
+
+def ah(irk, prand):
+    """Random Address Hash (Core Vol 3 Part H 2.2.2): 3 Byte hash zu 3 Byte prand."""
+    return aes128(irk, bytes(13) + bytes(prand))[-3:]
+
+
+def rpa_aufloesbar(mac):
+    """Ist diese Adresse eine aufloesbare Zufallsadresse (obere zwei Bit 01)?"""
+    m = mac_normieren(mac)
+    return bool(m) and (int(m[0:2], 16) >> 6) == 0b01
+
+
+def rpa_passt(mac, irk):
+    """Gehoert die Adresse zu diesem IRK? mac in der Form AA:BB:..., irk 16 Byte."""
+    m = mac_normieren(mac)
+    if not m or not rpa_aufloesbar(m) or len(irk) != 16:
+        return False
+    roh = bytes.fromhex(m.replace(":", ""))
+    return ah(irk, roh[0:3]) == roh[3:6]
+
+
+def irk_lesen(pfad=None):
+    """irk.json lesen: {name: 16 Byte}. Ungueltige Eintraege fallen weg."""
+    pfad = pfad or IRK_DATEI
+    try:
+        with open(pfad, "r", encoding="utf-8") as fh:
+            roh = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    aus = {}
+    if not isinstance(roh, dict):
+        return aus
+    for name, wert in roh.items():
+        if IRK_NAME.match(str(name)) and re.fullmatch(r"[0-9A-Fa-f]{32}", str(wert or "")):
+            aus[str(name)] = bytes.fromhex(str(wert))
+    return aus
+
+
+# ---------------------------------------------------------------------------
+# V6/V7/V8/V12 (Gruppe 13, 1.3.28): Haus-Themen nach Regeln/07 Nr. 15
+# ---------------------------------------------------------------------------
+#
+# Anbieterseite: haus/anwesenheit/<person>, haus/anwesenheit/jemand (retained,
+# 1/0, ohne Aussage "-"), haus/anwesenheit/zaehler (0-999 alle 30 s, NIE
+# retained - das Lebenszeichen des Anbieters; ein retained "1" ueberlebte einen
+# Absturz, der Letzte Wille sitzt auf <praefix>/server/online), haus/tag/<name>/da
+# (retained, nur Tags mit der Zusatzangabe haus=1). Ab Werk aus. Ohne Praefix.
+# Die eigenen Themen merkt sich der Dienst in HAUS_MERKER (neben dem
+# Datenordner, uebersteht ein Update); fremde haus/... fasst er nie an.
+
+HAUS_MERKER = DATA_DIR.rstrip("/\\") + ".haus_themen"
+
+
+def haus_name(text):
+    """<name> nach Nr. 15: klein, ae/oe/ue/ss, jedes andere Zeichen ausser a-z
+    und 0-9 wird "_", hoechstens 40 Zeichen. "Gäste-Zimmer Süd" -> gaeste_zimmer_sued."""
+    t = str(text or "").lower()
+    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        t = t.replace(alt, neu)
+    t = re.sub(r"[^a-z0-9]", "_", t)
+    return t[:40]
+
+
+def haus_namen(liste):
+    """Je Eintrag den Haus-Namen; gleiche Namen bekommen _2, _3 ... in der Reihenfolge
+    der Liste (Nr. 15: "gleiche Namen bekommen _<nummer>"). Leer bleibt leer."""
+    aus = []
+    gesehen = {}
+    for x in liste:
+        n = haus_name(x)
+        if n == "":
+            aus.append("")
+            continue
+        if n in gesehen:
+            gesehen[n] += 1
+            n2 = (n[:40 - len(str(gesehen[n])) - 1] + "_" + str(gesehen[n]))
+            aus.append(n2)
+        else:
+            gesehen[n] = 1
+            aus.append(n)
+    return aus
+
+
+def haus_jemand(werte):
+    """1, sobald eine Person 1 ist; 0, wenn alle mit Aussage 0 sind; sonst "-"."""
+    w = list(werte)
+    if any(x == 1 for x in w):
+        return 1
+    if w and all(x == 0 for x in w):
+        return 0
+    return "-"
 
 
 def mac_normieren(wert):
@@ -681,8 +909,14 @@ def ibeacon_normieren(wert):
 def kennung_lesen(wert):
     """Erstes Feld einer Tag-Zeile deuten.
 
-    Rueckgabe: (art, kennung) mit art in ("mac", "ibeacon") - oder ("", "").
+    Rueckgabe: (art, kennung) mit art in ("mac", "ibeacon", "irk") - oder ("", "").
+
+    "irk" (Gruppe 13, V1): IRK:<name> - ein Geraet mit wechselnder Adresse, dessen
+    Identitaetsschluessel unter <name> in irk.json (0600) steht.
     """
+    m = re.match(r"(?i)^irk:([A-Za-z0-9_-]{1,40})$", (wert or "").strip())
+    if m:
+        return "irk", "IRK:" + m.group(1)
     ib = ibeacon_normieren(wert)
     if ib:
         return "ibeacon", ib
@@ -744,7 +978,7 @@ def thema_der_kennung(art, kennung, alias=""):
 # diese Pruefung waere der Kommentar auf "Schluessel" gekuerzt, also genau
 # der Fehler, den 1.2.0 fuer den dritten Strich behoben hat, nur eine
 # Stelle weiter rechts. Gemessen in bl_selbsttest.py, Fall 2.
-OPTIONSFORM = re.compile(r"(?i)^\s*(" + "|".join(TAG_OPTIONEN) + r")\s*=")
+OPTIONSFORM = re.compile(r"(?i)^\s*(" + "|".join(TAG_OPTIONEN + ALTOPTIONEN) + r")\s*=")
 
 
 def sind_optionen(text):
@@ -1152,6 +1386,8 @@ def bluez_zugriff_hinweis():
 # und bl_test.php (bl_bt_helfer()). Die Selbstpruefung haelt sie gegeneinander;
 # ohne das driftet einer davon beim naechsten Umbau weg.
 BT_HELFER = "/usr/local/sbin/ble_scanner_ng_bluetooth"
+# Gruppe 13 (E1): Kennung der Meldung "kein Battery Service" (batterie_lesen()).
+KEIN_BATTERY_SERVICE = "[kein Battery Service] "
 
 
 def bt_schalter_lage():
@@ -1651,16 +1887,30 @@ class BlueZ:
         nur die GEAENDERTEN Werte, meist also nur RSSI. Adresse und
         Werbedaten muessen dann einmal nachgeholt werden.
         """
+        roh = self.roh_eigenschaften(pfad)
+        if not roh:
+            return None, None
+        return self.geraet_lesen(pfad, roh)
+
+    def roh_eigenschaften(self, pfad):
+        """Nur das GetAll (Gruppe 13, B9): das Roh-Abbild (dict) eines Pfades oder None.
+
+        Der Signalbetrieb haelt es je Pfad vor und mischt die Werte aus
+        PropertiesChanged hinein; ausgelesen wird beides mit geraet_lesen().
+        """
         try:
             import dbus
             obj = self.bus.get_object(BLUEZ, pfad)
             props = dbus.Interface(obj, PROPS_IF)
-            return self.geraet_lesen(pfad, props.GetAll(DEVICE_IF))
+            return dict(props.GetAll(DEVICE_IF))
         except Exception:  # noqa: BLE001
-            return None, None
+            return None
 
     def batterie_lesen(self, pfad, zeitgrenze=12):
         """Batteriestand ueber GATT lesen. Rueckgabe: (prozent, meldung).
+
+        Gruppe 13 (E1): die Meldung "kein Battery Service" beginnt mit KEIN_BATTERY_SERVICE -
+        nur sie macht einen Tag "unmoeglich"; Zeitgrenze und "nicht erreichbar" nicht.
 
         BlueZ bildet nach einer Verbindung org.bluez.Battery1 mit der
         Eigenschaft Percentage auf das Geraeteobjekt ab, WENN das Geraet den
@@ -1701,7 +1951,7 @@ class BlueZ:
         except Exception as fehler:  # noqa: BLE001
             text = str(fehler)
             if "Battery1" in text or "UnknownInterface" in text or "InvalidArgs" in text:
-                return None, ("Das Gerät bietet keinen Battery Service (0x180F) an. "
+                return None, (KEIN_BATTERY_SERVICE + "Das Gerät bietet keinen Battery Service (0x180F) an. "
                               "Die meisten Beacons sind nicht verbindungsfähig.")
             return None, text
         finally:

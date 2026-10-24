@@ -25,10 +25,12 @@
 # nur damit darf er ohne Argumente gerufen werden (sudoers(5)).
 
 COMMAND=$0
-PTEMPDIR=$1
+PTEMPDIR=$1   # NICHT der Auspackordner (Zufallskennung, Regeln/06 Z. 276-277; Gruppe 13, E4). Unbenutzt.
 PSHNAME=$2
 PDIR=$3
 PVERSION=$4
+# B2 (Gruppe 13): EINE Wurzel wie in den uebrigen Skripten - $5 zuerst, sonst LBHOMEDIR.
+BASE="${5:-$LBHOMEDIR}"
 
 HELFER=/usr/local/sbin/ble_scanner_ng_bluetooth
 
@@ -100,7 +102,8 @@ done
 # /sys/class/bluetooth fehlt (ConditionPathIsDirectory). Vor dem modprobe
 # waere der Start also wirkungslos - und haette "started" gemeldet.
 i=0
-while [ $i -lt 10 ] && [ ! -d /sys/class/bluetooth ]; do
+# B2 (Gruppe 13): ein angelegter, aber LEERER Ordner heisst "noch kein Adapter" - weiter warten.
+while [ $i -lt 10 ] && [ -z "$(ls -A /sys/class/bluetooth 2>/dev/null)" ]; do
     sleep 1
     i=$((i + 1))
 done
@@ -109,7 +112,7 @@ systemctl start bluetooth 2>&1
 echo "bluetooth.service: $(systemctl is-active bluetooth 2>/dev/null)"
 
 echo "--- nachher ---"
-if [ -d /sys/class/bluetooth ]; then
+if [ -n "$(ls -A /sys/class/bluetooth 2>/dev/null)" ]; then
     ls /sys/class/bluetooth
 else
     echo "kein /sys/class/bluetooth - es ist kein Bluetooth-Geraet angemeldet"
@@ -152,7 +155,7 @@ fi
 # <home>/system/sudoers/$PSHNAME, was dasselbe Verzeichnis wie
 # /etc/sudoers.d ist - am Geraet ueber die Inode-Nummer nachgemessen) und
 # entfernt sie beim Deinstallieren wieder. Hier wird sie nur nachgesehen.
-if [ -f "$LBHOMEDIR/system/sudoers/$PSHNAME" ] \
+if [ -f "$BASE/system/sudoers/$PSHNAME" ] \
    || [ -f "/etc/sudoers.d/$PSHNAME" ]; then
     echo "<INFO> Die sudo-Regel fuer diesen Helfer ist eingerichtet."
 else

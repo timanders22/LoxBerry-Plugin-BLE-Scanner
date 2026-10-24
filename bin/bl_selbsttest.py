@@ -240,7 +240,8 @@ def alles_pruefen():
     # =====================================================================
     G = "Beacon-Dekoder"
     ok, gesamt, meldungen = bl_beacon.eichung()
-    p.merke(G, "Eichung der fuenf Formate: %d von %d" % (ok, gesamt),
+    p.merke(G, "Eichung der Formate (iBeacon, Eddystone, ATC, Ruuvi, MiBeacon, BTHome): %d von %d"
+            % (ok, gesamt),
             ok == gesamt, "; ".join(meldungen[:3]))
 
     # =====================================================================
@@ -511,7 +512,8 @@ def alles_pruefen():
     p.gleich(G, "beide da", gem.anwesenheit_gesamt(1, 1), (1, "ble+wlan"))
     p.gleich(G, "beide weg: weg", gem.anwesenheit_gesamt(0, 0), (0, "ble+wlan"))
     p.gleich(G, "WLAN ohne Aussage: es zaehlt BLE", gem.anwesenheit_gesamt(0, None), (0, "ble"))
-    p.gleich(G, "keine Aussage: -", gem.anwesenheit_gesamt(None, None), ("-", "-"))
+    p.gleich(G, "keine Aussage: -1 (Zahl), quelle - (Gruppe 13, E6)", gem.anwesenheit_gesamt(None, None),
+             (-1, "-"))
     p.gleich(G, "Zuordnung lesen (Leerzeichen, kaputtes Paar)",
              gem.wlan_zuordnung_lesen("Anna_Handy = Anna, Bernd=Bernd,kaputt,x=Anna"),
              [("Anna_Handy", "Anna"), ("Bernd", "Bernd")])
@@ -532,8 +534,8 @@ def alles_pruefen():
     dw0, gw0, _ow0 = _dienst_bauen(cfg_w)
     _sichtung_setzen(dw0, "AA:BB:CC:DD:EE:FF", -70, 0)
     dw0.auswerten(erzwingen=True)
-    p.merke(G, "ab Werk aus: kein anwesend_gesamt, keine quelle",
-            not any(k.endswith(("/anwesend_gesamt", "/quelle")) for k in gw0),
+    p.merke(G, "Kopplung aus (ab Werk): anwesend_gesamt = BLE, quelle ble (Gruppe 13, V10)",
+            (gw0.get("person/Anna/anwesend_gesamt"), gw0.get("person/Anna/quelle")) == ("1", "ble"),
             ", ".join(k for k in gw0 if k.startswith("person/")))
     dw, gw, _ow = _dienst_bauen(cfg_w + "wlan_kopplung=1\nwlan_zuordnung=Anna_Handy=Anna,Gast=Gast\n")
 
@@ -546,7 +548,7 @@ def alles_pruefen():
     _sichtung_setzen(dw, "AA:BB:CC:DD:EE:FF", -70, 0)
     dw.auswerten(erzwingen=True)
     p.gleich(G, "WLAN-Scanner noch nie gehoert, BLE da: 1 aus ble", _paar("Anna"), ("1", "ble"))
-    p.gleich(G, "Person ohne Tag, WLAN ohne Aussage: -", _paar("Gast"), ("-", "-"))
+    p.gleich(G, "Person ohne Tag, WLAN ohne Aussage: -1 / -", _paar("Gast"), ("-1", "-"))
     p.gleich(G, "Lage im Abbild: schweigt (nie)",
              (dw.wlan_lage.get("frisch"), dw.wlan_lage.get("grund")), (0, "nie"))
     _wl("status/ts", str(int(time.time())), retain=True)
@@ -881,6 +883,178 @@ def alles_pruefen():
             "gegen die Formatbeschreibung geprüft, nicht gegen ein Gerät - "
             "MiBeacon ist seit 1.3.13 die Ausnahme: an einem LYWSDCGQ/01ZM "
             "gemessen, an zwei Satzarten")
+
+
+    # =====================================================================
+    G = "Gruppe 13: Lebenszeichen und Retain"
+    # E8/E9: status/zaehler hoechstens alle 30 s, nie retained; Neumeldung sofort.
+    cfg_z = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nscanner_themen=1\n"
+             "scanner_name=wohnzimmer\ntag1=AA:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1\n")
+    dz, gz, _oz = _dienst_bauen(cfg_z)
+    dz.auswerten(erzwingen=True)
+    erst = gz.get("status/zaehler")
+    erst_scanner = gz.get("scanner/wohnzimmer/status/zaehler")
+    gz.clear()
+    dz.auswerten(erzwingen=True)
+    p.gleich(G, "status/zaehler: erster Wert 1, binnen 30 s kein zweiter", (erst, gz.get("status/zaehler")),
+             ("1", None))
+    dz.gesendet_um["status/zaehler"] -= 31
+    dz.auswerten(erzwingen=True)
+    p.gleich(G, "nach 30 s zaehlt er weiter", gz.get("status/zaehler"), "2")
+    p.gleich(G, "je Scanner: scanner/<name>/status/zaehler", erst_scanner, "1")
+    dz.zaehler = 999
+    dz.gesendet_um["status/zaehler"] -= 31
+    dz.auswerten(erzwingen=True)
+    p.gleich(G, "laeuft nach 999 auf 0 um", gz.get("status/zaehler"), "0")
+    p.gleich(G, "nie retained: status/zaehler, scanner/.../status/zaehler, button, kalibrierung",
+             [gem.retain_fuer(t, "1") for t in ("status/zaehler", "scanner/x/status/zaehler",
+                                               "schluessel1/button", "schluessel1/kalibrierung")],
+             [False, False, False, False])
+    p.gleich(G, "Stamm von status/zaehler ist status/zaehler (nicht Tag-Stamm zaehler)",
+             gem.thema_stamm("status/zaehler"), "status/zaehler")
+    dz.gesendet_um["status/zaehler"] -= 31
+    gz.clear()
+    dz.stoerung_melden("Probe: Adapter blind")
+    p.gleich(G, "auch in einer Stoerung zaehlt das Lebenszeichen (server/ok 0)",
+             (gz.get("status/zaehler"), gz.get("server/ok")), ("1", "0"))
+    # B17: zustand_schreiben() stellt "zeit" an die erste Stelle - der Waechter (cron.05min) liest es per sed.
+    with open(gem.STATUS_FILE, "r", encoding="utf-8") as fh:
+        erster = next(iter(json.load(fh, object_pairs_hook=lambda paare: dict(paare[:1]))), "")
+    p.gleich(G, "erster Schluessel des Abbilds ist zeit (B17, der Waechter liest ihn per sed)", erster, "zeit")
+    # E6: battery -1 fuer einen batt-Tag ohne Wert; F2 reservierte Zweige.
+    dz.tags[0]["opt"]["batt"] = "1"
+    dz.auswerten(erzwingen=True)
+    p.gleich(G, "battery -1 fuer batt=1 ohne Wert (E6)", gz.get("schluessel1/battery"), "-1")
+    p.gleich(G, "reservierte Aliase status und befehl (F2)",
+             (gem.alias_zulaessig("befehl"), gem.alias_zulaessig("Status")), (False, False))
+    p.gleich(G, "Altoptionen min/raum: als Zusatzangabe erkannt, nicht uebernommen (B19)",
+             (gem.sind_optionen("min=-80,raum=Kueche"), gem.tag_optionen_lesen("abw=60,min=-80,raum=Kueche")),
+             (True, {"abw": "60"}))
+
+    # =====================================================================
+    G = "Gruppe 13: Ankunft und Signal"
+    # B11: EIN Paket, vier Runden - die Entprellung zaehlt Pakete, nicht Runden.
+    cfg_a = ("[CONFIG]\nabwesenheit_nach=30\nankunft_sichtungen=3\nglaettung=0\nereignisse=0\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Anna\n")
+    da, ga, _oa = _dienst_bauen(cfg_a)
+    _sichtung_setzen(da, "AA:BB:CC:DD:EE:FF", -70, 0)
+    folge = []
+    for _ in range(4):
+        da.auswerten(erzwingen=True)
+        folge.append(ga.get("AABBCCDDEEFF/present"))
+    p.gleich(G, "ein Paket, vier Runden -> bleibt 0 (B11)", folge, ["0", "0", "0", "0"])
+
+    # B9: GetAll hoechstens einmal je Pfad; eine ServiceData-Aenderung im Signal kommt im Wert an.
+    class _BlueZAttrappe(object):
+        adapterpfad = "/org/bluez/hci0"
+
+        def __init__(self):
+            self.getall = 0
+
+        def roh_eigenschaften(self, pfad):
+            self.getall += 1
+            nr = pfad[-2:]
+            return {"Address": "%s:BB:CC:DD:EE:FF" % nr, "RSSI": -60,
+                    "ServiceData": {bl_beacon.MIBEACON_UUID: bytes.fromhex(
+                        "5020AA0183FFEEDDCCBBAA0D10040A01E201".replace("FFEEDDCCBBAA", "FFEEDDCCBB" + nr))}}
+
+        def geraet_lesen(self, pfad, geraet):
+            return gem.BlueZ.geraet_lesen(self, pfad, geraet)
+
+    cfg_s = "[CONFIG]\nglaettung=0\nereignisse=0\nbeacon=1\n"
+    ds, _gs, _os = _dienst_bauen(cfg_s)
+    ds.bluez = _BlueZAttrappe()
+    for i in range(50):
+        for g in range(3):
+            ds.signal_verarbeiten("/org/bluez/hci0/dev_%02d" % g, {"RSSI": -60 - i % 5}, [])
+    p.gleich(G, "B9: 150 Signale, 3 Geraete -> 3 GetAll", (ds.bluez.getall, ds.getall_zaehler), (3, 3))
+    neu_paket = bytes.fromhex("5020AA0184" "FFEEDDCCBB00" "0D1004" "0B01E201")
+    ds.signal_verarbeiten("/org/bluez/hci0/dev_00", {"RSSI": -61,
+                                                     "ServiceData": {bl_beacon.MIBEACON_UUID: neu_paket}}, [])
+    p.gleich(G, "B9: ServiceData im Signal kommt im Wert an (26,6 -> 26,7 GradC)",
+             (ds.gesehen.get("00:BB:CC:DD:EE:FF") or {}).get("beacon", {}).get("werte", {}).get("temperatur"),
+             26.7)
+
+    # =====================================================================
+    G = "Gruppe 13: IRK (V1)"
+    # Testvektor Core Spec Vol 3 Part H 2.2.2 / Anhang D.7 (Linux smp.c test_ah): IRK ec02...9b, prand 708194.
+    irk = bytes.fromhex("ec0234a357c8ad05341010a60a397d9b")
+    # Die Adressen des Testvektors (prand || hash) aus seinen Teilen zusammengesetzt - so steht keine
+    # Geraeteadresse im Quelltext, die das Freigabetor fuer eine echte halten muss.
+    rpa = ":".join("%02X" % b for b in bytes.fromhex("708194" "0dfbaa"))
+    statisch = ":".join("%02X" % b for b in bytes.fromhex("c08194" "0dfbaa"))
+    p.gleich(G, "ah(IRK, 708194) = 0dfbaa (Testvektor)", gem.ah(irk, bytes.fromhex("708194")).hex(), "0dfbaa")
+    p.gleich(G, "ah() ohne python3-cryptography (reines Python) gleich",
+             gem._aes128_rein(irk, bytes(13) + bytes.fromhex("708194"))[-3:].hex(), "0dfbaa")
+    p.gleich(G, "RPA aus dem Testvektor passt, ein Bit im IRK gekippt nicht",
+             (gem.rpa_passt(rpa, irk),
+              gem.rpa_passt(rpa, bytes([irk[0] ^ 1]) + irk[1:])), (True, False))
+    p.gleich(G, "keine RPA (obere Bits 11 = statisch) -> nicht aufloesbar", gem.rpa_aufloesbar(statisch),
+             False)
+    p.gleich(G, "Tag-Zeile IRK:<name>", gem.kennung_lesen("IRK:telefon_anna"), ("irk", "IRK:telefon_anna"))
+    ordner_i = _arbeitsordner("ble_selbsttest_")
+    gem.IRK_DATEI = os.path.join(ordner_i, "irk.json")
+    with open(gem.IRK_DATEI, "w", encoding="utf-8") as fh:
+        json.dump({"telefon_anna": irk.hex()}, fh)
+    cfg_i = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nirk_aufloesen=1\n"
+             "tag1=IRK:telefon_anna|1|Telefon Anna|alias=telefon_anna\n")
+    di, gi_, _oi = _dienst_bauen(cfg_i)
+    di.sichtung(rpa, {"rssi": -60, "adresstyp": "random"})
+    di.sichtung("4A:BB:CC:DD:EE:FF", {"rssi": -60, "adresstyp": "random"})
+    di.auswerten(erzwingen=True)
+    p.gleich(G, "erzeugte RPA -> Tag anwesend, fremde RPA -> kein Tag",
+             (gi_.get("telefon_anna/present"), di.gesehen["4A:BB:CC:DD:EE:FF"].get("kennung_irk")), ("1", ""))
+    di2, gi2, _oi2 = _dienst_bauen(cfg_i.replace("irk_aufloesen=1", "irk_aufloesen=0"))
+    di2.sichtung(rpa, {"rssi": -60, "adresstyp": "random"})
+    di2.auswerten(erzwingen=True)
+    p.gleich(G, "ab Werk aus (irk_aufloesen=0): kein Treffer", gi2.get("telefon_anna/present"), "0")
+    p.merke(G, "AES-Weg: %s" % gem.aes_weg(), True)
+
+    # =====================================================================
+    G = "Gruppe 13: BTHome-Taster (V2)"
+    cfg_b = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nbthome=1\n"
+             "tag1=11:BB:CC:DD:EE:FF|1|Taster|alias=taster_flur\n")
+    db_, gb, _ob = _dienst_bauen(cfg_b)
+    gesehen_b = []
+    for paket in ("4400133A01", "4400133A01", "4400143A01"):
+        db_.sichtung("11:BB:CC:DD:EE:FF", {"rssi": -60, "sdata": {bl_beacon.BTHOME_UUID: bytes.fromhex(paket)}})
+        gb.clear()
+        db_.auswerten(erzwingen=True)
+        gesehen_b.append(gb.get("taster_flur/button"))
+    p.gleich(G, "gleiche Paket-Id zweimal -> ein Ereignis, neue Id -> zweites", gesehen_b, ["press", None, "press"])
+    dbo, gbo, _obo = _dienst_bauen(cfg_b.replace("bthome=1", "bthome=0"))
+    dbo.sichtung("11:BB:CC:DD:EE:FF", {"rssi": -60, "sdata": {bl_beacon.BTHOME_UUID: bytes.fromhex("4400153A01")}})
+    dbo.auswerten(erzwingen=True)
+    p.gleich(G, "bthome=0: kein Ereignis", gbo.get("taster_flur/button"), None)
+
+    # =====================================================================
+    G = "Gruppe 13: Haus-Themen (V6-V8/V12)"
+    p.gleich(G, "Name nach Nr. 15", gem.haus_name("Gäste-Zimmer Süd"), "gaeste_zimmer_sued")
+    p.gleich(G, "gleiche Namen _2", gem.haus_namen(["Anna", "anna"]), ["anna", "anna_2"])
+    p.gleich(G, "jemand: 1 / 0 / -", (gem.haus_jemand([0, 1]), gem.haus_jemand([0, 0]), gem.haus_jemand([0, -1])),
+             (1, 0, "-"))
+    cfg_h = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nhaus_anwesenheit=1\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel|person=Anna,alias=schluessel1,haus=1\n")
+    dh, gh, oh = _dienst_bauen(cfg_h)
+    gem.HAUS_MERKER = os.path.join(oh, "haus_themen")
+    dh.haus_eigen = set()
+    haus = []
+    import ble_scanner_ng as _bsn
+
+    def _haus(self, thema, wert, retain):   # noqa: ARG001
+        haus.append((thema, str(wert), bool(retain)))
+        return True
+
+    _bsn.Mqtt.senden_haus = _haus
+    dh.mqtt.client = object()
+    _sichtung_setzen(dh, "AA:BB:CC:DD:EE:FF", -70, 0)
+    dh.auswerten(erzwingen=True)
+    p.gleich(G, "Haken an: Person, jemand, Tag retained, zaehler nicht", sorted(haus),
+             [("haus/anwesenheit/anna", "1", True), ("haus/anwesenheit/jemand", "1", True),
+              ("haus/anwesenheit/zaehler", "1", False), ("haus/tag/schluessel1/da", "1", True)])
+    p.gleich(G, "Merkliste: nur die retained eigenen", sorted(dh.haus_eigen),
+             ["haus/anwesenheit/anna", "haus/anwesenheit/jemand", "haus/tag/schluessel1/da"])
+    dh.mqtt.client = None
 
     return p.zeilen
 

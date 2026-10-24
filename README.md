@@ -1,11 +1,42 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.27
+Version 1.3.28
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.28
+
+Das Plugin sendet seine Werte wie bisher selbst über MQTT; das Musterprojekt und der Reiter *Einbindung in Loxone*
+nehmen sie jetzt über das MQTT-Gateway in **einfache Virtuelle Eingänge** (Namenstabelle mit Kopierknopf,
+V2-Hakenliste). Die Vorlage mit Virtuellen HTTP-Eingängen an `http://localhost` ist entfallen.
+
+- **Lebenszeichen** `status/zaehler`: zählt höchstens alle 30 s eins weiter (0–999), nie retained; mit
+  zweitem Themenzweig je Scanner zusätzlich `scanner/<name>/status/zaehler`. `server/ts` bleibt für den Bestand.
+- **Befehle aus Loxone** über die gemeinsame Befehlsbrücke: `<präfix>/befehl/testmodus <Zweig>`,
+  `…/kalibrierung <Zweig>` und `…/batterie 1` (eingreifend, zweiter Haken, höchstens einmal je Stunde). Beide
+  Haken ab Werk aus; Quittung unter `<präfix>/befehl/<Name>/quittung`. Neues Paket `mosquitto-clients`, Wächter
+  in `cron.01min`. Das Ergebnis einer Kalibrierung kommt einmal als `<Tag>/kalibrierung`.
+- **`person/<P>/anwesend_gesamt` kommt immer** – ohne WLAN-Kopplung als BLE-Anwesenheit (Quelle `ble`);
+  „keine Aussage“ ist jetzt `-1` statt `-`. `battery` sendet `-1` für Tags mit „Batterie lesen“ ohne Wert.
+- **Wechselnde Adressen (IRK)**, ab Werk aus: Tag `IRK:<Name>`, Schlüssel in `irk.json` (0600).
+- **BTHome v2** (Shelly BLU u. a., unverschlüsselt), bei Neuinstallation an: Messwerte und Taster
+  (`<Tag>/button`, je Druck einmal).
+- **Anwesenheit für andere Plugins** über `haus/anwesenheit/<person>`, `haus/anwesenheit/jemand`,
+  `haus/anwesenheit/zaehler` und `haus/tag/<name>/da` (Hausregel Haus-Themen), ab Werk aus.
+- **Testmodus live** im Reiter *Test*.
+- Berichtigt: ein Signal kostet kein D-Bus-GetAll mehr (B9), der Takt folgt einem neuen Intervall (B10), die
+  Ankunfts-Entprellung zählt Pakete statt Runden (B11 – ein einzelnes Paket schaltet nicht mehr an), Raumdaten
+  unter Sperre (B12), der Batterielauf sperrt abwesende Tags nicht mehr bis zum Neustart und „Batterie sofort“
+  wirkt auch vor der Sollzeit (B13/E1/F4), MiBeacon mit Capability-Byte (B14), vollständige Formattabelle (B15),
+  Altoptionen `min`/`raum` werden mit Hinweis verworfen (B19), ein Suchlauf verliert keine Tag-Zeile mehr und
+  Trennzeichen werden beanstandet statt still entfernt (B24/E2), Fassung aus `pluginversion()`/`plugin.cfg` (B21),
+  Kachel „aktive Tags“ (B26), Themenanzeige vollständig (B25), Sprachvergleich über alle Abschnitte (B22),
+  Hakenskripte mit gemeinsamer `bin/bl_haken.sh` und einheitlicher Wurzelprüfung (V9, B7), Rechte 0640 nach dem
+  Zurückspielen (B8), D-Bus-Richtlinie richtig gelesen (B5), Helfer und Wurzel in `postroot.sh` (B2), Helfer
+  bleibt für eine Zweitinstallation (B23), Texte zu „Dienst anhalten“, MiBeacon und Testmodus (B20, B28, E3).
 
 ## Neu in 1.3.27
 

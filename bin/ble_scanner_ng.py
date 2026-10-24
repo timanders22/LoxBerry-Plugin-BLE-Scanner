@@ -450,7 +450,7 @@ def mqtt_leeren():
         alt = ""
     if alt and alt != praefix:
         praefixe.append(alt)
-    rc_gesamt = 0
+    rc_gesamt = haus_leeren()
     for p in praefixe:
         erg = broker_leeren(p, lambda rest: gem.stamm_der_linie(rest, scanner) != "")
         if erg["rc"] == 2:
@@ -469,6 +469,36 @@ def mqtt_leeren():
         else:
             print("<OK> MQTT: unter {0}/ stand nichts zurueckbehalten (nachgelesen).".format(p))
     return rc_gesamt
+
+
+def haus_leeren():
+    """Fuer --mqtt-leeren (Deinstallation, Gruppe 13): die EIGENEN Haus-Themen (Merkliste
+    gem.HAUS_MERKER) am Broker loeschen und nachlesen - Regeln/07 Nr. 15. Fremde haus/...
+    bleiben stehen. Rueckgabe 0 erledigt/nichts zu tun, 1 Reste, 2 nicht moeglich."""
+    try:
+        with open(gem.HAUS_MERKER, "r", encoding="utf-8") as fh:
+            eigen = {z.strip() for z in fh if z.strip().startswith("haus/")}
+    except OSError:
+        eigen = set()
+    if not eigen:
+        print("<OK> MQTT: keine eigenen Haus-Themen gemerkt.")
+        return 0
+    erg = broker_leeren("haus", lambda rest: ("haus/" + rest) in eigen)
+    if erg["rc"] == 2:
+        print("<INFO> MQTT: eigene Haus-Themen nicht geleert - {0}. Von Hand: "
+              "mosquitto_pub -r -n -t <thema> fuer {1}".format(erg["grund"], ", ".join(sorted(eigen))))
+        return 2
+    if erg["rest"]:
+        print("<WARNING> MQTT: {0} eigene Haus-Themen stehen nach dem Loeschen noch im Broker: {1}"
+              .format(len(erg["rest"]), ", ".join(erg["rest"])))
+        return 1
+    print("<OK> MQTT: {0} eigene Haus-Themen geloescht und nachgelesen (fremde haus/... "
+          "unberuehrt).".format(len(erg["geleert"])))
+    try:
+        os.unlink(gem.HAUS_MERKER)
+    except OSError:
+        pass
+    return 0
 
 
 class Mqtt:
@@ -623,6 +653,18 @@ class Mqtt:
         self.gesendet += 1
         self.letzter_erfolg = int(time.time())
         return True
+
+    def senden_haus(self, thema, wert, retain):
+        """Ein Haus-Thema OHNE Praefix senden (Gruppe 13, V6-V8/V12, Regeln/07 Nr. 15).
+        Retain entscheidet der Aufrufer nach Nr. 15, nicht die Praefix-Tabelle."""
+        if not self.client:
+            return False
+        try:
+            erg = self.client.publish(thema, str(wert), qos=0, retain=bool(retain))
+        except Exception as fehler:  # noqa: BLE001
+            log.error("MQTT-Veröffentlichung fehlgeschlagen: %s", fehler)
+            return False
+        return getattr(erg, "rc", 0) == 0
 
     def loeschen(self, unterthema):
         """Ein retained Thema aus dem Broker entfernen.
@@ -835,6 +877,28 @@ class Dienst:
         self.wlan_sperre = threading.Lock()
         self.wlan = {"ts_empfang": 0.0, "ts": 0, "ok": "", "intervall": 0, "personen": {}}
         self.wlan_lage = {"an": 0}
+        # -- Gruppe 13 (1.3.28)
+        # Lebenszeichen status/zaehler (0-999, hoechstens alle 30 s, E8)
+        self.zaehler = 0
+        self.zaehler_scanner = 0
+        # B9: Roh-Abbild je D-Bus-Pfad, GetAll nur beim ersten Signal eines Pfades
+        self.roh_abbild = {}
+        self.getall_zaehler = 0
+        # F4: "Batterie sofort" ueberspringt die Sollzeit EINMAL
+        self.batterie_sofort = False
+        # V1: IRK je Name (nur mit irk_aufloesen=1 und nur fuer konfigurierte irk-Tags)
+        self.irk = {}
+        self.irk_fehlt_gemeldet = set()
+        self.irk_laden()
+        # V2: Taster-Ereignisse je Tag, entprellt ueber die Paket-Id
+        # V6-V8/V12: Haus-Themen - zuletzt gesendet, Sollstand, eigene (Merkliste)
+        self.haus_stand = {}
+        self.haus_soll = {}
+        self.haus_eigen = self._haus_merker_lesen()
+        self.haus_zaehler = 0
+        self.haus_anstoss = 0.0
+        # V11: Kalibrierungsergebnis einmal senden (E5)
+        self.kalibrierung_gesendet = None
 
     # -- Aufraeumen am Broker (seit 1.3.19) ---------------------------------
 
@@ -969,11 +1033,12 @@ class Dienst:
                     personen.add(gem.thema_saeubern(pn))
             # Personen der WLAN-Kopplung (Verbesserungsbau 30.09.2026): ihre
             # Themen anwesend_gesamt/quelle bleiben nur, solange die Kopplung
-            # an ist und die Zuordnung sie fuehrt.
-            gekoppelt = set()
+            # an ist und die Zuordnung sie fuehrt. Seit Gruppe 13 (V10) kommen
+            # beide fuer JEDE Person - die Personen der aktiven Tags zaehlen mit.
+            gekoppelt = set(personen)
             if self.cfg.get("wlan_kopplung", "0") == "1":
-                gekoppelt = {pn for _wn, pn in
-                             gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
+                gekoppelt |= {pn for _wn, pn in
+                              gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
         altlast = not self.altlast_erledigt
         entfall = not self.entfallen_erledigt
 
@@ -1025,7 +1090,113 @@ class Dienst:
                     log.info("MQTT: %d zurueckbehaltene Altwert(e) bzw. Thema/Themen "
                              "entfernter oder abgehakter Tags geloescht und nachgelesen: %s",
                              len(erg["geleert"]), ", ".join(erg["geleert"]))
+        # 4. Eigene Haus-Themen (Gruppe 13, Nr. 15), die nicht mehr gesollt sind: Einstellung aus, Person
+        #    oder haus=1 entfernt. Nur aus der Merkliste - fremde haus/... bleiben unberuehrt.
+        if not self._haus_abraeumen():
+            offen = True
         self.aufraeumen_offen = offen
+
+    # -- Haus-Themen nach Regeln/07 Nr. 15 (Gruppe 13, V6-V8/V12) ----------
+    #
+    # Anbieterseite fuer Abnehmer, die NUR haus/... lesen duerfen (Abfahrts-Assistent,
+    # Chromecast4lox, Midea2Lox, WOLF ISM NG, MGiSmart - deren Seite folgt in einer
+    # eigenen Gruppe). Retained nach Nr. 15, ohne Aussage "-"; das Lebenszeichen
+    # haus/anwesenheit/zaehler nie retained (ein retained "1" ueberlebte einen Absturz).
+
+    def _haus_merker_lesen(self):
+        return {z for z in self._merker_lesen(gem.HAUS_MERKER).splitlines()
+                if z.startswith("haus/")}
+
+    def _haus_merker_schreiben(self):
+        self._merker_schreiben(gem.HAUS_MERKER, "\n".join(sorted(self.haus_eigen)))
+
+    def haus_sollstand(self, personen):
+        """Die retained Haus-Themen, die JETZT gelten sollen: {thema: wert}."""
+        soll = {}
+        namen = set(personen)
+        if self.cfg.get("wlan_kopplung", "0") == "1":
+            # Personen nur aus der WLAN-Zuordnung haben ebenfalls anwesend_gesamt (wlan_zusammenfuehren).
+            namen |= {pn for _wn, pn in gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
+        if self.cfg.get("haus_anwesenheit", "0") == "1" and namen:
+            namen = sorted(namen)
+            werte = []
+            for name, hname in zip(namen, gem.haus_namen(namen)):
+                if not hname:
+                    continue
+                gesamt = self.letzter_stand.get("person/{0}/anwesend_gesamt".format(name))
+                try:
+                    w = int(gesamt)
+                except (TypeError, ValueError):
+                    w = -1
+                werte.append(w)
+                soll["haus/anwesenheit/" + hname] = w if w in (0, 1) else "-"
+            soll["haus/anwesenheit/jemand"] = gem.haus_jemand(werte)
+        haus_tags = [t for t in self.tags
+                     if t.get("aktiv") == "1" and str((t.get("opt") or {}).get("haus", "")) == "1"]
+        for tag, hname in zip(haus_tags, gem.haus_namen([self._zweig(t) for t in haus_tags])):
+            if not hname:
+                continue
+            w = self.letzter_stand.get("{0}/present".format(self._zweig(tag)))
+            soll["haus/tag/" + hname + "/da"] = int(w) if w in ("0", "1") else "-"
+        return soll
+
+    def haus_senden(self, personen, erzwingen=False):
+        """Am Ende von auswerten(): retained Haus-Themen bei Aenderung, Lebenszeichen alle 30 s."""
+        soll = self.haus_sollstand(personen)
+        self.haus_soll = soll
+        # Erst nach dem ersten Sollstand darf mqtt_aufraeumen() abraeumen - sonst loeschte der
+        # Aufraeumfaden nach der Anmeldung alle eigenen Themen, bevor auswerten() lief.
+        self.haus_bereit = True
+        if self.cfg.get("mqtt", "1") != "1" or not self.mqtt.client:
+            return
+        neu_eigen = False
+        for thema, wert in sorted(soll.items()):
+            w = str(wert)
+            if not erzwingen and self.haus_stand.get(thema) == w:
+                continue
+            if self.mqtt.senden_haus(thema, w, retain=True):
+                self.haus_stand[thema] = w
+                if thema not in self.haus_eigen:
+                    self.haus_eigen.add(thema)
+                    neu_eigen = True
+        if neu_eigen:
+            self._haus_merker_schreiben()
+        if soll:
+            zuletzt = self.gesendet_um.get("\0haus/zaehler")
+            if zuletzt is None or time.monotonic() - zuletzt >= 30 or self.neumeldung_laeuft:
+                if self.mqtt.senden_haus("haus/anwesenheit/zaehler",
+                                         (self.haus_zaehler + 1) % 1000, retain=False):
+                    self.haus_zaehler = (self.haus_zaehler + 1) % 1000
+                    self.gesendet_um["\0haus/zaehler"] = time.monotonic()
+        # Eigene Themen, die nicht mehr gelten: mit Nachlesen abraeumen (mqtt_aufraeumen, Schritt 4),
+        # hoechstens einmal je Minute anstossen.
+        if self.haus_eigen - set(soll) and self.mqtt.verbunden \
+                and time.time() - self.haus_anstoss >= 60:
+            self.haus_anstoss = time.time()
+            self.mqtt_aufraeumen_anstossen()
+
+    def _haus_abraeumen(self):
+        """Eigene, nicht mehr gesollte Haus-Themen am Broker loeschen und nachlesen.
+        Rueckgabe False, wenn es offen bleibt (neuer Versuch stuendlich)."""
+        if not getattr(self, "haus_bereit", False):
+            return True
+        with self.sperre:
+            weg = set(self.haus_eigen) - set(self.haus_soll)
+        if not weg:
+            return True
+        erg = broker_leeren("haus", lambda rest: ("haus/" + rest) in weg)
+        if erg["rc"] == 2 or erg["rest"]:
+            log.warning("MQTT: eigene Haus-Themen nicht abgeraeumt (%s) - neuer Versuch in einer Stunde.",
+                        erg["grund"] or ", ".join(erg["rest"]))
+            return False
+        with self.sperre:
+            self.haus_eigen -= weg
+            for thema in weg:
+                self.haus_stand.pop(thema, None)
+        self._haus_merker_schreiben()
+        log.info("MQTT: %d eigene Haus-Thema/Themen abgeraeumt und nachgelesen: %s",
+                 len(weg), ", ".join(sorted(weg)))
+        return True
 
     # -- Hilfen -------------------------------------------------------------
 
@@ -1066,7 +1237,7 @@ class Dienst:
         """
         return self.tagzustand.setdefault(
             kennung, {"anwesend": 0, "stufe": 0, "seit_mono": None,
-                      "seit_zeit": 0, "ankunft": 0, "batterie": None,
+                      "seit_zeit": 0, "ankunft": 0, "ankunft_mono": None, "batterie": None,
                       "batterie_zeit": 0, "raum": "", "raum_seit": 0})
 
     def _zweig(self, tag):
@@ -1127,12 +1298,28 @@ class Dienst:
                 # Der Absender wird MITGEGEBEN: MiBeacon traegt die MAC des
                 # messenden Geraets im Paket, und nur wenn beide gleich sind,
                 # gehoert der Wert diesem Tag.
+                # V2 (Gruppe 13): BTHome nur mit der Einstellung "bthome".
                 gedeutet = bl_beacon.deuten(werte.get("mdata"),
-                                            werte.get("sdata"), mac)
+                                            werte.get("sdata"), mac,
+                                            self._zahl("bthome", 0) == 1)
                 if gedeutet:
                     eintrag["beacon"] = gedeutet
                     if gedeutet.get("kennung", "").startswith("IB:"):
                         eintrag["kennung_ib"] = gedeutet["kennung"]
+                    # V2 (Gruppe 13): ein Taster-Ereignis zaehlt nur mit NEUER Paket-Id - Shelly BLU
+                    # wiederholt dasselbe Paket mehrfach; ohne Paket-Id entscheiden die Rohdaten.
+                    if gedeutet.get("ereignis"):
+                        merk = gedeutet.get("paket_id")
+                        if merk is None:
+                            merk = bytes((werte.get("sdata") or {}).get(bl_beacon.BTHOME_UUID) or b"").hex()
+                        if merk != eintrag.get("taster_merk"):
+                            eintrag["taster_merk"] = merk
+                            eintrag.setdefault("taster", []).append(gedeutet["ereignis"])
+                            eintrag["taster"] = eintrag["taster"][-10:]
+            # V1 (Gruppe 13): eine aufloesbare Zufallsadresse EINMAL gegen alle IRK pruefen; der
+            # Eintrag merkt sich das Ergebnis bis zum naechsten Adresswechsel (neuer Eintrag).
+            if self.irk and eintrag.get("kennung_irk") is None:
+                eintrag["kennung_irk"] = self.irk_zuordnen(mac, eintrag.get("adresstyp", ""))
 
         self.letzte_sichtung_mono = jetzt_m
         self.letzte_sichtung_zeit = jetzt_w
@@ -1161,11 +1348,12 @@ class Dienst:
                     self.testwerte = self.testwerte[-400:]
 
     def _mac_der_kennung(self, kennung):
-        if not kennung.startswith("IB:"):
+        if not (kennung.startswith("IB:") or kennung.startswith("IRK:")):
             return kennung
+        feld = "kennung_irk" if kennung.startswith("IRK:") else "kennung_ib"
         with self.sperre:
-            for mac, e in self.gesehen.items():
-                if e.get("kennung_ib") == kennung:
+            for mac, e in sorted(self.gesehen.items(), key=lambda p: -p[1].get("mono", 0)):
+                if e.get(feld) == kennung:
                     return mac
         return ""
 
@@ -1181,8 +1369,9 @@ class Dienst:
             if tag["art"] == "mac":
                 return self.gesehen.get(tag["kennung"])
             neuester = None
+            feld = "kennung_irk" if tag["art"] == "irk" else "kennung_ib"
             for e in self.gesehen.values():
-                if e.get("kennung_ib") != tag["kennung"]:
+                if e.get(feld) != tag["kennung"]:
                     continue
                 if neuester is None or e.get("mono", 0) > neuester.get("mono", 0):
                     neuester = e
@@ -1296,9 +1485,14 @@ class Dienst:
                 alter = jetzt_m - eintrag["mono"]
 
             frisch = alter is not None and alter <= grenze
-            if frisch:
+            # B11 (Gruppe 13): hochgezaehlt wird nur, wenn seit der letzten Runde ein NEUES Paket kam
+            # (anderer Zeitpunkt der Sichtung). Bis 1.3.27 zaehlte jede Runde mit frischer Sichtung - ein
+            # einziges Paket schaltete bei ankunft_sichtungen 3 nach 10 s fuer 20 s auf anwesend (Probe b11).
+            neu = eintrag is not None and eintrag.get("mono") != zustand.get("ankunft_mono")
+            if frisch and neu:
+                zustand["ankunft_mono"] = eintrag["mono"]
                 zustand["ankunft"] = min(zustand["ankunft"] + 1, noetig)
-            else:
+            elif not frisch:
                 zustand["ankunft"] = 0
 
             # Eine Ankunft muss sich bestaetigen, ein Weggang nicht: beim
@@ -1368,6 +1562,10 @@ class Dienst:
                 self._senden("{0}/distance".format(zweig),
                              d if d is not None else -1, erzwingen)
 
+            if zustand["batterie"] is None and str((tag.get("opt") or {}).get("batt", "")) == "1":
+                # E6 (Gruppe 13): -1 = noch nie gelesen oder nicht lesbar (bisher: nichts, der
+                # Eingang stand stumm auf 0).
+                self._senden("{0}/battery".format(zweig), -1, erzwingen)
             if zustand["batterie"] is not None:
                 self._senden("{0}/battery".format(zweig), zustand["batterie"], erzwingen)
                 self._senden("{0}/battery_ts".format(zweig),
@@ -1378,6 +1576,11 @@ class Dienst:
                     if name in bl_beacon.SENSORTHEMEN:
                         self._senden("{0}/sensor/{1}".format(zweig, name), wert, erzwingen)
 
+            if eintrag and eintrag.get("taster"):
+                with self.sperre:
+                    ereignisse, eintrag["taster"] = eintrag["taster"], []
+                for ereignis in ereignisse:
+                    self._senden("{0}/button".format(zweig), ereignis, erzwingen=True)
             if scannerthemen:
                 self._senden("scanner/{0}/{1}/rssi".format(self.scanner, zweig),
                              (avg + ausgleich) if avg is not None else -255, erzwingen)
@@ -1437,6 +1640,7 @@ class Dienst:
         #    0.9.20; Pruefung 29.09.2026, MQTT 4), die letzte Sichtung beim
         #    Wechsel eines Tags sofort, sonst hoechstens alle 60 s.
         self._senden("server/ts", int(jetzt_w), erzwingen=True, abstand=30)
+        self.lebenszeichen()
         self._senden("server/ok", 1 if self.adapter_ok else 0, erzwingen)
         self._senden("server/adapter_ok", 1 if self.adapter_ok else 0, erzwingen)
         self._senden("server/letzte_sichtung", int(self.letzte_sichtung_zeit), erzwingen,
@@ -1444,6 +1648,7 @@ class Dienst:
         self._senden("server/version", gem.VERSION, erzwingen)
         self._senden("server/scanner", self.scanner, erzwingen)
 
+        self.haus_senden(personen, erzwingen)
         self.letzte_uebersicht = uebersicht
         self.letzte_personen = personen
         self.stoerung = ""
@@ -1512,6 +1717,12 @@ class Dienst:
           hoert systematisch staerker als ein Pi Zero; ohne Ausgleich
           gewinnt immer derselbe.
         """
+        # B12 (Gruppe 13): unter self.sperre - raum_nachricht() schreibt aus dem paho-Faden, und
+        # das Durchlaufen mit Loeschen warf sonst "dictionary changed size during iteration".
+        with self.sperre:
+            return self._raum_bestimmen(kennung, eigener_rssi, ausgleich, jetzt_w, zustand)
+
+    def _raum_bestimmen(self, kennung, eigener_rssi, ausgleich, jetzt_w, zustand):
         eigene = self.raumdaten.setdefault(kennung, {})
         if eigener_rssi is not None:
             eigene[self.scanner] = (jetzt_w, eigener_rssi + ausgleich)
@@ -1557,7 +1768,8 @@ class Dienst:
         kennung = self._kennung_zum_zweig(zweig)
         if not kennung:
             return
-        self.raumdaten.setdefault(kennung, {})[scanner] = (time.time(), wert)
+        with self.sperre:      # B12 (Gruppe 13)
+            self.raumdaten.setdefault(kennung, {})[scanner] = (time.time(), wert)
 
     # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026) ------
 
@@ -1631,9 +1843,18 @@ class Dienst:
         Abbild fuer den Reiter Test.
         """
         if self.cfg.get("wlan_kopplung", "0") != "1":
+            # V10 (Gruppe 13): anwesend_gesamt und quelle kommen IMMER - ohne Kopplung ist es die
+            # BLE-Anwesenheit (quelle "ble"). Wer die Kopplung spaeter einschaltet, verdrahtet nichts um.
             self.wlan_lage = {"an": 0}
+            for person in sorted(personen):
+                gesamt, quelle = gem.anwesenheit_gesamt(int(personen[person]["present"]), None)
+                self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
+                self._senden("person/{0}/quelle".format(person), quelle, erzwingen)
             return
         zuordnung = gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))
+        # V10: Personen ohne Paar in der Zuordnung zaehlen mit, nur ueber BLE.
+        mit_paar = {pn for _wn, pn in zuordnung}
+        zuordnung = list(zuordnung) + [(None, pn) for pn in sorted(personen) if pn not in mit_paar]
         with self.wlan_sperre:
             empfang = self.wlan["ts_empfang"]
             ok = self.wlan["ok"]
@@ -1665,7 +1886,7 @@ class Dienst:
         for wlan_name, person in zuordnung:
             ble = personen.get(person)
             ble_wert = int(ble["present"]) if ble is not None else None
-            roh = werte.get(wlan_name) if frisch else None
+            roh = werte.get(wlan_name) if (frisch and wlan_name is not None) else None
             wlan_wert = 1 if roh == "1" else (0 if roh == "0" else None)
             gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, wlan_wert)
             self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
@@ -1861,6 +2082,8 @@ class Dienst:
                 })
             sichtbar = sichtbar[:120]
             testwerte = list(self.testwerte)
+            testmodus = [{"kennung": k, "bis": int(b)} for k, b in sorted(self.testmodus.items())
+                         if b > time.time()]
             kal = None
             if self.kalibrierung:
                 kal = {"kennung": self.kalibrierung["kennung"],
@@ -1896,6 +2119,14 @@ class Dienst:
                              "namen": v["namen"]} for k, v in personen.items()},
             "sichtbar": sichtbar,
             "testwerte": testwerte,
+            # V11 (Gruppe 13): welcher Tag laeuft im Testmodus und bis wann (Restzeit im Reiter Test).
+            "testmodus": testmodus,
+            # V1/V6 (Gruppe 13): Lage fuer den Reiter Test - IRK-Weg und Haus-Themen
+            "irk": {"an": 1 if self._zahl("irk_aufloesen", 0) == 1 else 0, "weg": gem.aes_weg(),
+                    "namen": sorted(self.irk)},
+            "haus": {"themen": sorted(self.haus_soll), "eigen": sorted(self.haus_eigen),
+                     "zaehler": self.haus_zaehler},
+            "zaehler": self.zaehler,
             "kalibrierung": kal,
             # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026):
             # die Lage fuer die Pruefzeile im Reiter Test.
@@ -1933,6 +2164,9 @@ class Dienst:
         self._senden("server/ok", 0, erzwingen=True)
         self._senden("server/adapter_ok", 0, erzwingen=True)
         self._senden("server/ts", int(time.time()), erzwingen=True, abstand=30)
+        # Gruppe 13: das Lebenszeichen laeuft weiter - "Adapter blind" meldet server/ok, nicht
+        # das Ausbleiben von status/zaehler.
+        self.lebenszeichen()
         aktive = sum(1 for t in self.tags if t.get("aktiv") == "1")
         anwesend = sum(1 for z in self.letzte_uebersicht if z.get("anwesend"))
         self.zustand_schreiben(self.letzte_uebersicht, anwesend, aktive,
@@ -1993,6 +2227,10 @@ class Dienst:
         elif art == "batterie":
             self.batterie_zuletzt = ""
             self.batterie_erledigt = set()
+            # F4 (Gruppe 13): bis 1.3.27 pruefte batterie_runde() danach weiter die Sollzeit - zwischen
+            # 00:00 und batterie_uhrzeit tat "Batterie sofort" nichts, die Oberflaeche meldete trotzdem
+            # "angefordert". Jetzt ueberspringt der Lauf die Sollzeit einmal.
+            self.batterie_sofort = True
             log.info("Batterielauf von Hand angefordert")
 
     def kalibrierung_pruefen(self):
@@ -2005,6 +2243,15 @@ class Dienst:
             self.kalibrierung["ergebnis"] = int(gem.median(werte)) if werte else None
         log.info("Kalibrierung beendet: %d Messungen, Median %s",
                  len(werte), self.kalibrierung["ergebnis"])
+        # E5 (Gruppe 13): das Ergebnis einmal als <Tag>/kalibrierung (dBm, -255 ohne Messung), nie
+        # retained - sonst bliebe das Ergebnis eines Loxone-Befehls unsichtbar.
+        kennung = self.kalibrierung["kennung"]
+        for tag in self.tags:
+            if tag["kennung"] == kennung and tag.get("aktiv") == "1":
+                erg = self.kalibrierung["ergebnis"]
+                self._senden("{0}/kalibrierung".format(self._zweig(tag)),
+                             erg if erg is not None else -255, erzwingen=True)
+                break
 
     # -- Neu verbinden (seit 1.3.20) ----------------------------------------
     #
@@ -2154,6 +2401,7 @@ class Dienst:
           * Manche Schluesselfinder PIEPEN beim Verbinden. Nachts.
         """
         if self._zahl("batterie", 0) != 1 or self.bluez is None:
+            self.batterie_sofort = False
             return
         soll = str(self.cfg.get("batterie_uhrzeit", "04:00"))
         if not re.fullmatch(r"\d{1,2}:\d{2}", soll):
@@ -2163,7 +2411,7 @@ class Dienst:
         if self.batterie_zuletzt == heute:
             return
         stunde, minute = (int(x) for x in soll.split(":"))
-        if (jetzt.tm_hour, jetzt.tm_min) < (stunde, minute):
+        if (jetzt.tm_hour, jetzt.tm_min) < (stunde, minute) and not self.batterie_sofort:
             return
 
         # SEIT 1.3.20 JE DURCHLAUF NUR EIN TAG (Pruefung 29.09.2026, C14). Bis
@@ -2176,6 +2424,7 @@ class Dienst:
             self.batterie_erledigt = set()
         self.batterie_erledigt_am = heute
         kandidaten = []
+        offen_heute = False
         for tag in self.tags:
             if tag.get("aktiv") != "1":
                 continue
@@ -2184,14 +2433,23 @@ class Dienst:
             if tag["kennung"] in self.batterie_unmoeglich \
                     or tag["kennung"] in self.batterie_erledigt:
                 continue
+            offen_heute = True
             eintrag = self.eintrag_zum_tag(tag)
-            if eintrag and eintrag.get("pfad"):
+            # E1/B13 (Gruppe 13): Kandidat nur, wenn der Tag JETZT anwesend ist. Bis 1.3.27 genuegte ein
+            # irgendwann gesehener Pfad - ein abwesender Tag lief in die Zeitgrenze und galt bis zum
+            # naechsten Dienststart als "unmoeglich".
+            if eintrag and eintrag.get("pfad") and self._zustand(tag["kennung"])["anwesend"] == 1:
                 kandidaten.append((tag, eintrag["pfad"]))
-        # Hoechstens zehn Tags je Tag, wie bisher.
+        # B13 (Gruppe 13): der Tag gilt erst als erledigt, wenn jeder batt-Tag erledigt oder unmoeglich
+        # ist (oder zehn dran waren) - bis Mitternacht wird je Durchlauf weiter geprueft. Bis 1.3.27
+        # setzte schon EIN Durchlauf ohne Kandidaten den Tag fuer alle auf erledigt.
         if not kandidaten or len(self.batterie_erledigt) >= 10:
-            self.batterie_zuletzt = heute
-            self.batterie_erledigt = set()
+            if not offen_heute or len(self.batterie_erledigt) >= 10:
+                self.batterie_zuletzt = heute
+                self.batterie_erledigt = set()
+                self.batterie_sofort = False
             return
+        self.batterie_sofort = False
 
         tag, pfad = kandidaten[0]
         self.batterie_erledigt.add(tag["kennung"])
@@ -2207,10 +2465,15 @@ class Dienst:
                 zustand["batterie_zeit"] = time.time()
                 log.info("%s: Batterie %d %%", tag.get("name") or tag["kennung"],
                          prozent)
-            else:
+            elif str(meldung).startswith(gem.KEIN_BATTERY_SERVICE):
                 self.batterie_unmoeglich.add(tag["kennung"])
                 log.info("%s: kein Batteriestand lesbar - wird nicht erneut "
-                         "versucht. %s", tag.get("name") or tag["kennung"], meldung)
+                         "versucht. %s", tag.get("name") or tag["kennung"],
+                         str(meldung)[len(gem.KEIN_BATTERY_SERVICE):])
+            else:
+                # E1 (Gruppe 13): Zeitgrenze/nicht erreichbar - nur fuer heute erledigt, morgen erneut.
+                log.info("%s: Batteriestand heute nicht lesbar (%s) - morgen erneut.",
+                         tag.get("name") or tag["kennung"], meldung)
         finally:
             if not self._suche_starten("dem Batterielauf"):
                 log.error("Suche nach dem Batterielauf nicht wieder gestartet.")
@@ -2340,6 +2603,7 @@ class Dienst:
         if neu_verbunden:
             self.mqtt.neumeldung.clear()
             self.letzter_stand.clear()
+            self.haus_stand.clear()
             log.info("MQTT neu verbunden - alle Zustände werden erneut gemeldet")
 
         vollmeldung = max(self.intervall, self._zahl("aktualisierung", 60))
@@ -2389,6 +2653,7 @@ class Dienst:
         """
         self.config_mtime = self._mtime()
         alte_zweige = {self._zweig(t) for t in self.tags}
+        alte_personen = self._personen_der_tags()
         alter_praefix = self.praefix
         alter_adapter = self.cfg.get("adapter", "hci0")
         altes_mqtt = self.cfg.get("mqtt", "1")
@@ -2403,6 +2668,10 @@ class Dienst:
 
         neue_zweige = {self._zweig(t) for t in self.tags}
         entfallen = alte_zweige - neue_zweige
+        # F3 (Gruppe 13): auch der Zweig person/<P> einer entfallenen Person - sonst bliebe
+        # anwesend_gesamt (V10) bzw. present retained auf dem letzten Wert stehen.
+        entfallen |= {"person/" + p for p in alte_personen - self._personen_der_tags()}
+        self.irk_laden()
         # Auch abgehakte Tags: fuer sie wird nichts mehr gesendet, ihr
         # letzter Wert stuende sonst fuer immer retained im Broker.
         for t in self.tags:
@@ -2483,6 +2752,98 @@ class Dienst:
         log.info("Konfiguration neu eingelesen: %d Tag(s), davon %d aktiv",
                  len(self.tags), sum(1 for t in self.tags if t.get("aktiv") == "1"))
 
+    # -- Gruppe 13 (1.3.28): Signal, Lebenszeichen, IRK, Personen ----------
+
+    def signal_verarbeiten(self, pfad, geaendert, entfernt=()):
+        """B9: ein PropertiesChanged mit RSSI verarbeiten.
+
+        Bis 1.3.27 stand hier "einmal nachgeholt und danach aus dem eigenen
+        Bestand fortgeschrieben" - einen Bestand gab es nicht: JEDES Signal
+        rief ein synchrones GetAll (Probe b9: 150 GetAll fuer 150 Signale,
+        DuplicateData=True laesst BlueZ jedes Werbepaket melden). Jetzt haelt
+        der Dienst je Pfad das Roh-Abbild, mischt die geaenderten Werte hinein
+        (ServiceData/ManufacturerData kommen bei einer Aenderung im selben
+        Signal mit) und liest es mit derselben geraet_lesen() aus. GetAll nur
+        beim ersten Signal eines Pfades; erneuert bei InterfacesRemoved und
+        alle 30 s in der Sicherungsabfrage.
+        """
+        roh = self.roh_abbild.get(pfad)
+        if roh is None:
+            roh = self.bluez.roh_eigenschaften(pfad)
+            self.getall_zaehler += 1
+            if not roh:
+                return False
+            if len(self.roh_abbild) >= 2000:
+                self.roh_abbild.clear()
+            self.roh_abbild[pfad] = roh
+        else:
+            roh.update(geaendert)
+            for k in entfernt or ():
+                roh.pop(k, None)
+        mac, werte = self.bluez.geraet_lesen(pfad, roh)
+        if mac and werte:
+            return self.sichtung(mac, werte)
+        return False
+
+    def lebenszeichen(self):
+        """status/zaehler (E8): 0-999, laeuft um, hoechstens alle 30 s (auch in der Neumeldung),
+        nie retained. Gezaehlt wird nur, was wirklich hinausging. Bei scanner_themen=1 zusaetzlich
+        scanner/<name>/status/zaehler (E9) - mehrere Scanner auf einem Praefix teilen sonst EIN
+        Lebenszeichen, und ein toter Zweitscanner fiele nicht auf."""
+        naechster = (self.zaehler + 1) % 1000
+        self._senden("status/zaehler", naechster, erzwingen=True, abstand=30)
+        if self.letzter_stand.get("status/zaehler") == str(naechster):
+            self.zaehler = naechster
+        if self._zahl("scanner_themen", 0) == 1:
+            naechster = (self.zaehler_scanner + 1) % 1000
+            # Thema als Literal im Aufruf: bl_gesendete_themen() (Reiter Test) liest es dort.
+            self._senden("scanner/{0}/status/zaehler".format(self.scanner), naechster,
+                         erzwingen=True, abstand=30)
+            if self.letzter_stand.get("scanner/{0}/status/zaehler".format(self.scanner)) == str(naechster):
+                self.zaehler_scanner = naechster
+
+    def irk_laden(self):
+        """V1: die IRK der konfigurierten irk-Tags aus irk.json - nur mit irk_aufloesen=1.
+        Ein Tag ohne Schluessel wird einmal gemeldet (Name, nie der Schluessel)."""
+        irk = {}
+        if self._zahl("irk_aufloesen", 0) == 1:
+            alle = gem.irk_lesen()
+            for t in self.tags:
+                if t.get("art") != "irk":
+                    continue
+                name = t["kennung"][4:]
+                if name in alle:
+                    irk[name] = alle[name]
+                elif name not in self.irk_fehlt_gemeldet:
+                    self.irk_fehlt_gemeldet.add(name)
+                    log.warning("IRK-Tag %s: kein Schluessel in %s hinterlegt - der Tag bleibt "
+                                "unsichtbar.", name, gem.IRK_DATEI)
+        if irk != self.irk:
+            with self.sperre:
+                for e in self.gesehen.values():
+                    e["kennung_irk"] = None       # neu zuordnen
+            if irk:
+                log.info("IRK-Aufloesung: %d Schluessel geladen (AES ueber %s).", len(irk), gem.aes_weg())
+        self.irk = irk
+
+    def irk_zuordnen(self, mac, adresstyp):
+        """V1: "IRK:<name>" fuer eine aufloesbare Zufallsadresse dieses IRK, sonst ""."""
+        if str(adresstyp).lower() == "public" or not gem.rpa_aufloesbar(mac):
+            return ""
+        for name, schluessel in sorted(self.irk.items()):
+            if gem.rpa_passt(mac, schluessel):
+                return "IRK:" + name
+        return ""
+
+    def _personen_der_tags(self):
+        """Personen (Themenzweig) der aktiven Tags - wie in auswerten()."""
+        aus = set()
+        for t in self.tags:
+            pn = (t.get("opt") or {}).get("person", "").strip()
+            if t.get("aktiv") == "1" and pn:
+                aus.add(gem.thema_saeubern(pn))
+        return aus
+
     # -- Signalbetrieb ------------------------------------------------------
 
     def signalbetrieb(self):
@@ -2522,12 +2883,7 @@ class Dienst:
                 return
             if "RSSI" not in geaendert:
                 return
-            # PropertiesChanged liefert nur die geaenderten Werte. Adresse und
-            # Werbedaten werden einmal nachgeholt und danach aus dem eigenen
-            # Bestand fortgeschrieben.
-            mac, werte = self.bluez.eigenschaften(str(pfad))
-            if mac and werte:
-                self.sichtung(mac, werte)
+            self.signal_verarbeiten(str(pfad), geaendert, _entfernt)
 
         def bei_neuem_geraet(pfad, schnittstellen):
             geraet = schnittstellen.get(gem.DEVICE_IF)
@@ -2545,6 +2901,15 @@ class Dienst:
             bei_neuem_geraet, dbus_interface=gem.OBJMGR_IF,
             signal_name="InterfacesAdded")
 
+        def bei_entferntem_geraet(pfad, schnittstellen):
+            # B9 (Gruppe 13): Geraet weg - sein Roh-Abbild auch.
+            if gem.DEVICE_IF in [str(s) for s in (schnittstellen or [])]:
+                self.roh_abbild.pop(str(pfad), None)
+
+        self.bluez.bus.add_signal_receiver(
+            bei_entferntem_geraet, dbus_interface=gem.OBJMGR_IF,
+            signal_name="InterfacesRemoved")
+
         def bei_besitzerwechsel(name, alt, neu):
             # Neu seit 1.3.20: bluetoothd wurde neu gestartet. Das Signal kommt
             # im D-Bus-Faden; neu verbunden wird im naechsten Durchlauf.
@@ -2560,6 +2925,7 @@ class Dienst:
             arg0=gem.BLUEZ)
 
         schleife = GLib.MainLoop()
+        takt_s = [self.intervall]
 
         def takt():
             if not self.laeuft:
@@ -2569,6 +2935,13 @@ class Dienst:
                 self.runde()
             except Exception as fehler:      # noqa: BLE001
                 log.exception("Fehler im Durchlauf: %s", fehler)
+            # B10 (Gruppe 13): ein neues Intervall (konfiguration_neu_einlesen) haengt den Zeitgeber um -
+            # der neue laeuft im neuen Takt, der alte endet mit False.
+            if self.intervall != takt_s[0]:
+                takt_s[0] = self.intervall
+                GLib.timeout_add_seconds(self.intervall, takt)
+                log.info("Auswertung jetzt alle %d s", self.intervall)
+                return False
             return True
 
         def sicherungsabfrage():
@@ -2579,6 +2952,9 @@ class Dienst:
             """
             if not self.laeuft:
                 return False
+            # B9 (Gruppe 13): alle 30 s den ganzen Bestand neu - das naechste Signal je Pfad holt
+            # sein Abbild frisch (Fang fuer verpasste Aenderungen ausserhalb von PropertiesChanged).
+            self.roh_abbild.clear()
             try:
                 self.einlesen()
             except Exception as fehler:      # noqa: BLE001

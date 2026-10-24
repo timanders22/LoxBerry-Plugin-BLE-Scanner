@@ -108,33 +108,22 @@ if [ -f "$MARKE" ]; then
     esac
 fi
 
-# Prozesse des Dienstes, argumentweise (dieselbe Funktion wie in daemon/daemon,
-# preupgrade.sh, postinstall.sh, postupgrade.sh und uninstall): GENAU zwei
-# Argumente, ein python-Interpreter und der volle Dienstpfad, Benutzer $2.
-bl_dienste_finden() {
-    for bl_d in /proc/[0-9]*; do
-        grep -qaF "ble_scanner_ng.py" "$bl_d/cmdline" 2>/dev/null || continue
-        [ "$(stat -c %u "$bl_d" 2>/dev/null)" = "$2" ] || continue
-        bl_n=0
-        bl_treffer=0
-        while IFS= read -r bl_arg; do
-            bl_n=$((bl_n + 1))
-            if [ "$bl_n" = 1 ]; then
-                case "${bl_arg##*/}" in
-                    python|python3|python3.*) ;;
-                    *) break ;;
-                esac
-            elif [ "$bl_n" = 2 ] && [ "$bl_arg" = "$1" ]; then
-                bl_treffer=1
-            fi
-        done <<BL_ARGUMENTE
-$(tr '\0' '\n' < "$bl_d/cmdline" 2>/dev/null)
-BL_ARGUMENTE
-        if [ "$bl_treffer" = 1 ] && [ "$bl_n" = 2 ]; then
-            echo "${bl_d#/proc/}"
-        fi
-    done
-}
+# --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh ---------------------------------------
+# Fehlt die Datei oder ist sie defekt: Warnung und eine Minimalform (nur nach der PID-Datei) - keine stille
+# Luecke, aber auch kein Abbruch.
+BLH="REPLACELBPBINDIR/bl_haken.sh"
+if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$BLH" 2>/dev/null; then
+    BL_HAKEN_LADEN=1
+    . "$BLH"
+else
+    echo "<WARNING> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - es gilt die Minimalform (PID-Datei)."
+    bl_dienste_finden() {
+        bl_p=$(cat "$PIDDATEI" 2>/dev/null)
+        case "$bl_p" in ''|*[!0-9]*) return 0 ;; esac
+        grep -qaF "$1" "/proc/$bl_p/cmdline" 2>/dev/null && echo "$bl_p"
+        return 0
+    }
+fi
 
 if [ ! -x "$DIENST" ]; then
     melde_gebremst "der Dienst $DIENST fehlt oder ist nicht ausfuehrbar - es wird nicht nachgestartet."
@@ -157,7 +146,11 @@ if [ -n "$LAEUFT" ]; then
     case "$ZEIT" in ''|*[!0-9]*) ZEIT="" ;; esac
     case "$JETZT" in ''|*[!0-9]*) JETZT="" ;; esac
     if [ -z "$TAKT" ] || [ -z "$ZEIT" ] || [ -z "$JETZT" ]; then
-        # Nicht beurteilbar: nicht eingreifen.
+        # Nicht beurteilbar: nicht eingreifen. B17 (Gruppe 13): steht ein Abbild da, ist aber kein Feld "zeit"
+        # an erster Stelle zu lesen, ist der Waechter blind - einmal je Stunde sagen, statt still zu enden.
+        if [ -z "$ZEIT" ] && [ -s "$ABBILD" ]; then
+            melde_gebremst "Abbild ohne lesbares Feld zeit an erster Stelle ($ABBILD) - Waechter blind, es wird nicht eingegriffen."
+        fi
         exit 0
     fi
     # Waehrend einer BlueZ-Stoerung schreibt der Dienst das Abbild nur alle
