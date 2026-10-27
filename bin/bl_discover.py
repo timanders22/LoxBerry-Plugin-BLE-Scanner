@@ -76,6 +76,8 @@ def selbst_suchen(cfg):
     except (TypeError, ValueError):
         grenze = 0
     bluez.suche_starten(grenze)
+    # Gruppe 33: hinterlegte Bind-Keys - verschluesselte Xiaomi-Fuehler zeigen dann ihre Werte (nie der Schluessel).
+    schluessel = gem.bindkey_lesen()
     gesehen = {}
     messungen = {}
     try:
@@ -91,7 +93,7 @@ def selbst_suchen(cfg):
                     # Der Absender MUSS mit: MiBeacon traegt die MAC des messenden
                     # Geraets, und nur bei Gleichheit gehoert der Wert dahin.
                     gedeutet = bl_beacon.deuten(werte.get("mdata"),
-                                                werte.get("sdata"), mac)
+                                                werte.get("sdata"), mac, True, schluessel)
                 if alt is None:
                     gesehen[mac] = {
                         "mac": mac,
@@ -155,9 +157,12 @@ def main():
             }, ensure_ascii=False))
             return 1
 
+    # Gruppe 33: Bind-Key hinterlegt? (nur ja/nein - nie der Wert)
+    hinterlegt = set(gem.bindkey_lesen())
     for g in sichtbar:
         g["bekannt"] = 1 if (g.get("mac") in bekannt
                              or g.get("beaconkennung") in bekannt) else 0
+        g["bindkey"] = 1 if g.get("mac") in hinterlegt else 0
         g.setdefault("adresstyp", "unbekannt")
         g.setdefault("beaconart", "")
         g.setdefault("beaconkennung", "")

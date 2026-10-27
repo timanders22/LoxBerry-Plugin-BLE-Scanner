@@ -307,6 +307,21 @@ if [ ! -e "$NETZ_IRK" ] && [ -s "$NETZ_IRK_ZWEIT" ] && [ "$(head -c 1 "$NETZ_IRK
     fi
 fi
 [ -f "$NETZ_IRK" ] && chmod 0600 "$NETZ_IRK" 2>/dev/null
+# Gruppe 33 (1.3.29): bindkey.json genauso (Bind-Keys der Xiaomi-Thermometer, 0600; eine vorhandene bleibt).
+NETZ_BK="$NETZ_CFG/bindkey.json"
+NETZ_BK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
+if [ ! -e "$NETZ_BK" ] && [ -s "$NETZ_BK_ZWEIT" ] && [ "$(head -c 1 "$NETZ_BK_ZWEIT" 2>/dev/null)" = "{" ]; then
+    if cp "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" 2>/dev/null \
+       && chmod 0600 "$NETZ_BK.neu" 2>/dev/null \
+       && cmp -s "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" \
+       && mv "$NETZ_BK.neu" "$NETZ_BK" 2>/dev/null; then
+        echo "<OK> bindkey.json aus der Zweitschrift wiederhergestellt (0600)."
+    else
+        rm -f "$NETZ_BK.neu" 2>/dev/null
+        echo "<WARNING> bindkey.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_BK_ZWEIT."
+    fi
+fi
+[ -f "$NETZ_BK" ] && chmod 0600 "$NETZ_BK" 2>/dev/null
 
 # --- Den Dienst starten, wenn dies eine NEUINSTALLATION ist -----------------
 #

@@ -41,6 +41,7 @@ $bl_such    = null;
 $bl_test_titel = '';
 $bl_test_text  = '';
 $bl_eingetippt = null;   // Tag-Zeilen aus dem Suchlauf, ueber die Umleitung getragen
+$bl_cloud = null;        // Gruppe 33: Ergebnis des Bind-Key-Abrufs (ohne Schluessel), ueber die Umleitung
 // X-2 (Verbesserungsbau 30.09.2026): welches Formular, welche Felder und
 // Tag-Zeilen beanstandet wurden - daraus reisen die Eingaben mit der
 // Einmalmeldung. Entscheidung 16: gespeichert wird dann nichts.
@@ -67,6 +68,7 @@ if (!$bl_ist_post) {
         $bl_test_text = $bl_einmal['test_text'];
         $bl_such = $bl_einmal['such'];
         $bl_eingetippt = $bl_einmal['tags'];
+        $bl_cloud = $bl_einmal['cloud'];
         // X-2: nach einer Beanstandung die eingetippten Werte zeigen.
         if (is_array($bl_einmal['eingaben'])) {
             bl_eingaben_setzen($bl_einmal['eingaben']);
@@ -531,6 +533,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
         'discovery_rssi' => 'FELD.DISCOVERY_RSSI', 'log_kappung_kb' => 'FELD.LOGKAPPUNG',
         'ereignisse_tage' => 'FELD.EREIGNISTAGE', 'raum_hysterese_db' => 'FELD.RAUM_HYST',
         'raum_ausgleich_db' => 'FELD.RAUM_AUSGLEICH', 'daempfung' => 'FELD.DAEMPFUNG',
+        'messwert_frist' => 'FELD.MESSWERT_FRIST',      // Gruppe 33 (E-E10)
     );
     foreach ($bl_zahlfelder as $bl_k => $bl_feld) {
         $neu[$bl_k] = bl_feld_zahl($bl_k, isset($_POST[$bl_k]) ? $_POST[$bl_k] : '',
@@ -574,6 +577,15 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $neu['haus_anwesenheit'] = isset($_POST['haus_anwesenheit']) ? '1' : '0';
     $neu['bthome']           = isset($_POST['bthome']) ? '1' : '0';
     $neu['irk_aufloesen']    = isset($_POST['irk_aufloesen']) ? '1' : '0';
+    // Gruppe 33: Vorwahl der Region im Bind-Key-Abruf (kein Geheimnis)
+    $bl_reg_roh = isset($_POST['xiaomi_region']) && is_string($_POST['xiaomi_region']) ? $_POST['xiaomi_region'] : '';
+    list($ok, $w) = bl_wert_pruefen('xiaomi_region', $bl_reg_roh);
+    if ($ok) {
+        $neu['xiaomi_region'] = $w;
+    } else {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.REGION'), bl_saubere_eingabe($bl_reg_roh));
+    }
+    $bl_merk('xiaomi_region');
     $zu_roh = isset($_POST['wlan_zuordnung']) ? $_POST['wlan_zuordnung'] : '';
     list($ok, $w) = bl_wert_pruefen('wlan_zuordnung', $zu_roh);
     if ($ok) {
@@ -603,6 +615,8 @@ if ($bl_ist_post && isset($_POST['save'])) {
 
     $tags = bl_tags_aus_post($bl_fehler, $bl_tags, $bl_bean_tags);
     list($bl_irk_neu, $bl_irk_anders) = bl_irk_aus_post($bl_fehler, $tags, $bl_bean_tags);
+    // Gruppe 33 (E-E4): Bind-Keys je MAC-Zeile (nur Schreiben, Haken loeschen)
+    list($bl_bk_neu, $bl_bk_anders) = bl_bindkey_aus_post($bl_fehler, $tags, $bl_bean_tags);
     $bl_merk('tags');
     // B19 (Gruppe 13): wirkungslose Altoptionen (min, raum) fallen beim Speichern weg - einmal gesagt.
     $bl_alt_weg = array();
@@ -621,6 +635,9 @@ if ($bl_ist_post && isset($_POST['save'])) {
         $bl_saved = true;
         if ($bl_irk_anders && !bl_irk_schreiben($bl_irk_neu)) {
             $bl_error = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_e(bl_irk_datei()));
+        }
+        if ($bl_bk_anders && !bl_bindkey_schreiben($bl_bk_neu)) {
+            $bl_error = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_e(bl_bindkey_datei()));
         }
         require_once __DIR__ . '/bl_test.php';
         // Neu starten nur, wenn der Dienst auch lief. Bis 1.2.10 startete
@@ -775,6 +792,20 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
             $bl_saved = true;
             require_once __DIR__ . '/bl_test.php';
             $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n, count($bl_neu_tags));
+            // Gruppe 33 (E-E6): Bind-Keys und IRK aus der Sicherung; fehlt ein Abschnitt (1.3.28), bleibt der Bestand.
+            list($bl_sbk, $bl_sirk, $bl_shin) = bl_sicherung_schluessel(
+                (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']), $bl_neu_tags);
+            if ($bl_sbk !== null && !bl_bindkey_schreiben($bl_sbk)) {
+                $bl_gescheitert[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_bindkey_datei());
+            }
+            if ($bl_sirk !== null && !bl_irk_schreiben($bl_sirk)) {
+                $bl_gescheitert[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_irk_datei());
+            }
+            $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.SICH_SCHLUESSEL'), $bl_sbk === null ? '-' : count($bl_sbk),
+                                         $bl_sirk === null ? '-' : count($bl_sirk));
+            if ($bl_shin) {
+                $bl_hinweis .= ' ' . implode(' ', $bl_shin);
+            }
             if ($bl_neu['mqtt'] === '1') {
                 list($bl_abo_pfad, $bl_abo_da) = bl_abo_datei($bl_neu['themenpraefix'], true);
                 if (!$bl_abo_da) {
@@ -793,6 +824,80 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
         } else {
             $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
         }
+    }
+}
+
+/* ============ Gruppe 33 (1.3.29, E-E7): Bind-Key aus der Xiaomi-Cloud ============
+ * Nur POST, nur mit Formularmerkmal (Wachposten oben), nur im angemeldeten Bereich; Netz nur in diesem POST (nie beim
+ * Seitenaufbau, nie im Reiter Test). Das Kennwort lebt nur in diesem einen Aufruf: gelesen, an das Stammmodul gegeben,
+ * danach in $_POST und der Kopie ueberschrieben - nie gespeichert, nie protokolliert, nie in einer Meldung, nie in den
+ * Eingaben nach einer Beanstandung. Das Ergebnis (Liste OHNE Schluessel, Zweitfaktor-Link) reist mit der Umleitung;
+ * die Auswahl selbst liegt 0600 im data-Ordner (Stammmodul, <= 10 min). */
+if ($bl_ist_post && (isset($_POST['cloud_holen']) || isset($_POST['cloud_code_senden'])
+        || isset($_POST['cloud_captcha_senden']) || isset($_POST['cloud_weg']))) {
+    $bl_tab = 'tab-settings';
+    bl_cloud_bereit();
+    $bl_cfilter = bl_cloud_filter();
+    if (isset($_POST['cloud_captcha_senden'])) {
+        $bl_closung = (isset($_POST['cloud_captcha']) && is_string($_POST['cloud_captcha'])) ? trim($_POST['cloud_captcha']) : '';
+        $bl_cpass = (isset($_POST['cloud_pass']) && is_string($_POST['cloud_pass'])) ? $_POST['cloud_pass'] : '';
+        $_POST['cloud_pass'] = '';
+        $bl_cerg = xc_captcha_loesen($bl_closung, $bl_cpass);
+    } elseif (isset($_POST['cloud_weg'])) {
+        $bl_cweg = (is_string($_POST['cloud_weg']) && in_array($_POST['cloud_weg'], array('mail', 'sms'), true)) ? $_POST['cloud_weg'] : '';
+        $bl_cerg = xc_code_anfordern($bl_cweg);
+    } elseif (isset($_POST['cloud_code_senden'])) {
+        $bl_ccode = (isset($_POST['cloud_code']) && is_string($_POST['cloud_code'])) ? trim($_POST['cloud_code']) : '';
+        $bl_cerg = xc_abruf('', '', 'de', 0, $bl_cfilter, $bl_ccode);
+    } else {
+        $bl_ckonto = (isset($_POST['cloud_konto']) && is_string($_POST['cloud_konto'])) ? trim($_POST['cloud_konto']) : '';
+        $bl_cpass = (isset($_POST['cloud_pass']) && is_string($_POST['cloud_pass'])) ? $_POST['cloud_pass'] : '';
+        $bl_creg = (isset($_POST['cloud_region']) && is_string($_POST['cloud_region'])) ? $_POST['cloud_region'] : 'de';
+        $_POST['cloud_pass'] = '';
+        $bl_cerg = ($bl_ckonto === '' || $bl_cpass === '') ? array('lage' => 'LEER')
+                 : xc_abruf($bl_ckonto, $bl_cpass, $bl_creg, 0, $bl_cfilter);
+    }
+    if (isset($bl_cpass)) { $bl_cpass = str_repeat("\0", strlen($bl_cpass)); $bl_cpass = ''; }
+    $bl_clage = isset($bl_cerg['lage']) ? (string) $bl_cerg['lage'] : 'ANTWORT';
+    $bl_cloud = array('lage' => $bl_clage);
+    if ($bl_clage === 'ok') {
+        $bl_cloud['geraete'] = $bl_cerg['geraete'];
+        $bl_cloud['meldung'] = sprintf(bl_t('CLOUD.M_GEFUNDEN'), count($bl_cerg['geraete']), implode(', ', $bl_cerg['regionen']));
+    } elseif ($bl_clage === 'ZWEITFAKTOR') {
+        $bl_cloud['link'] = (string) $bl_cerg['link'];
+        $bl_cloud['meldung'] = bl_t('CLOUD.M_ZWEITFAKTOR');
+    } elseif ($bl_clage === 'CODE_GESENDET') {
+        $bl_cloud['meldung'] = bl_t($bl_cerg['weg'] === 'sms' ? 'CLOUD.M_CODE_SMS' : 'CLOUD.M_CODE_MAIL');
+    } elseif ($bl_clage === 'CAPTCHA') {
+        $bl_cloud['meldung'] = bl_t('CLOUD.M_CAPTCHA');
+    } elseif ($bl_clage === 'KEINE') {
+        $bl_error = bl_e(sprintf(bl_t('CLOUD.F_KEINE'), implode(', ', $bl_cerg['regionen'])));
+    } else {
+        $bl_ck = 'CLOUD.F_' . preg_replace('/[^A-Z_]/', '', $bl_clage);
+        $bl_error = bl_e(bl_t($bl_ck) !== $bl_ck ? bl_t($bl_ck) : bl_t('CLOUD.F_ANTWORT'));
+    }
+    unset($bl_cerg);
+}
+if ($bl_ist_post && isset($_POST['cloud_nehmen'])) {
+    $bl_tab = 'tab-settings';
+    $bl_ci = (isset($_POST['cloud_nehmen']) && is_string($_POST['cloud_nehmen']) && preg_match('/^\d{1,3}\z/', $_POST['cloud_nehmen']))
+        ? (int) $_POST['cloud_nehmen'] : -1;
+    list($bl_cok, $bl_clage, $bl_cwer, $bl_calt) = $bl_ci < 0 ? array(false, 'WAHL', '', false) : bl_cloud_uebernehmen($bl_ci);
+    if ($bl_cok) {
+        $bl_saved = true;
+        $bl_hinweis = bl_cloud_text($bl_clage, $bl_cwer);
+        if ($bl_calt) {
+            $bl_hinweis .= ' ' . bl_t('CLOUD.M_ALTE_FORM');
+        }
+        require_once __DIR__ . '/bl_test.php';
+        // Der Dienst liest bindkey.json beim Start und beim Neueinlesen - nachziehen, wenn er lief.
+        if (bl_dienst_pid() > 0) {
+            bl_dienst('restart');
+            $bl_hinweis .= ' ' . (bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET') : bl_t('TEXT.DIENST_LAEUFT_NICHT'));
+        }
+        list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
+    } else {
+        $bl_error = bl_e(bl_cloud_text($bl_clage, $bl_cwer));
     }
 }
 
@@ -820,6 +925,7 @@ if ($bl_ist_post) {
         'test_titel' => $bl_test_titel, 'test_text' => $bl_test_text,
         'such' => is_array($bl_such) ? $bl_such : null,
         'tags' => is_array($bl_eingetippt) ? $bl_eingetippt : null,
+        'cloud' => is_array($bl_cloud) ? $bl_cloud : null,
         'eingaben' => bl_eingaben_sammeln($bl_eingaben_form, $bl_beanstandet, $bl_bean_tags),
     );
     if (bl_einmal_schreiben($bl_einmal_neu)) {
@@ -1059,6 +1165,7 @@ if (class_exists('LBWeb', false)) {
          Orange ueber einer Reihe ohne Orange. */ ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= bl_e(bl_t('LEGENDE.LESEN')) ?></span>
+<span><i class="sm-punkt sm-b-technik"></i> <?= bl_e(bl_t('LEGENDE.TECHNIK')) ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= bl_e(bl_t('LEGENDE.AKTION')) ?></span>
 </div>
 
@@ -1104,6 +1211,11 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 <br><?= bl_e(bl_t('FELD.IRK')) ?>: <input data-role="none" type="password" autocomplete="off" name="tag_irk[<?= (int) $i ?>]" value="" size="34" placeholder="<?= bl_e(bl_irk_anzeige(substr($tag['kennung'], 4))) ?>"<?= bl_tag_markierung($tag, 'irk') ?>>
 <div class="sm-hilfe"><?= bl_e(bl_t('TEXT.IRK_HILFE')) ?></div>
 <?php } ?>
+<?php if ($tag['art'] === 'mac') { /* Gruppe 33 (E-E4): Bind-Key nur Schreiben - nie vorbefuellt, nie Ziffern */ ?>
+<br><?= bl_e(bl_t('FELD.BINDKEY')) ?>: <input data-role="none" type="password" autocomplete="off" name="tag_bindkey[<?= (int) $i ?>]" value="" size="34" placeholder="<?= bl_e(bl_bindkey_anzeige($tag['mac'])) ?>"<?= bl_tag_markierung($tag, 'bindkey') ?>>
+&nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_bindkey_weg[<?= (int) $i ?>]" value="1"> <?= bl_e(bl_t('FELD.BINDKEY_WEG')) ?></label>
+<div class="sm-hilfe"><?= bl_e(bl_bindkey_anzeige($tag['mac'])) ?> &middot; <?= bl_e(bl_t('TEXT.BINDKEY_HILFE')) ?> <a href="#xiaomi-bindkey"><?= bl_e(bl_t('CLOUD.H_BINDKEY')) ?></a></div>
+<?php } ?>
 <div class="sm-hilfe"><?= bl_e(bl_t('TEXT.ALIAS_HILFE')) ?></div>
 </div>
 </details></td>
@@ -1121,9 +1233,15 @@ foreach ($bl_zeilen_tab as $i => $tag) {
         if (($z['adresstyp'] ?? '') === 'wechselnd') {
             echo '<br><span class="sm-aus sm-klein">' . bl_e(bl_t('TEXT.ADRESSE_WECHSELT')) . '</span>';
         }
-        if (!empty($z['sensor'])) {
+        if (isset($z['sensor_lage']) && $z['sensor_lage'] !== null && in_array((int) $z['sensor_lage'], array(2, 3, 5), true)) {
+            // Gruppe 33: bei Lage 2/3/5 der Grund statt der Werte
+            echo '<br><span class="sm-aus sm-klein">' . bl_e(bl_lage_text($z['sensor_lage'])) . '</span>';
+        } elseif (!empty($z['sensor'])) {
             echo '<br><span class="sm-klein">';
             foreach ($z['sensor'] as $sk => $sv) { echo bl_e($sk . '=' . $sv) . ' '; }
+            if (isset($z['sensor_alter']) && (int) $z['sensor_alter'] >= 0) {
+                echo bl_e(sprintf(bl_t('TEXT.VOR_SEKUNDEN'), (int) $z['sensor_alter']));
+            }
             echo '</span>';
         }
     } else { echo '<span class="sm-klein">&ndash;</span>'; } ?></td>
@@ -1265,6 +1383,17 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 <div class="sm-feld">
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="bthome" value="1"<?= bl_eingabe_an('settings', 'bthome', bl_cfg($bl_cfg, 'bthome', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BTHOME')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.BTHOME_HILFE')) ?></p></div>
+<?php /* Gruppe 33 (E-E10): Frist der Messwerte; Vorwahl der Region im Bind-Key-Abruf */ ?>
+<div class="sm-feld"><label><?= bl_e(bl_t('FELD.MESSWERT_FRIST')) ?></label>
+<input data-role="none" type="number" name="messwert_frist" min="300" max="21600" value="<?= bl_e(bl_eingabe('settings', 'messwert_frist', bl_cfg($bl_cfg, 'messwert_frist', '1800'))) ?>"<?= bl_markierung('messwert_frist') ?>>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.MESSWERT_FRIST_HILFE')) ?></p></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('FELD.XIAOMI_REGION')) ?></label>
+<select data-role="none" name="xiaomi_region"<?= bl_markierung('xiaomi_region') ?>>
+<?php $bl_rv = (string) bl_eingabe('settings', 'xiaomi_region', bl_cfg($bl_cfg, 'xiaomi_region', 'de'));
+foreach (array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle') as $bl_rr) { ?>
+<option value="<?= bl_e($bl_rr) ?>"<?= $bl_rr === $bl_rv ? ' selected' : '' ?>><?= bl_e(bl_t('CLOUD.REGION_' . strtoupper($bl_rr))) ?></option>
+<?php } ?>
+</select></div>
 <div class="sm-feld">
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="irk_aufloesen" value="1"<?= bl_eingabe_an('settings', 'irk_aufloesen', bl_cfg($bl_cfg, 'irk_aufloesen', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.IRK_AUFLOESEN')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.IRK_AUFLOESEN_HILFE')) ?></p></div>
@@ -1322,6 +1451,114 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 </div>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.SPEICHERN_HILFE')) ?></p>
 </form>
+
+<?php /* Gruppe 33 (1.3.29, E-E7): Bind-Key aus der Xiaomi-Cloud holen - eigene Formulare (nie im Speichern-Formular,
+         Formulare lassen sich nicht schachteln; deshalb direkt unter dem Speichern statt in der Tag-Liste). Konto,
+         Kennwort (Passwortfeld, nie vorbefuellt, nie zurueckgeschrieben), Region. Die Liste zeigt Name, Modell, MAC und
+         Region - nie den Schluessel. Ein Captcha umgeht das Plugin nicht: Bild von Xiaomi, Loesung tippt der Hausherr;
+         Zweitfaktor: Weg Mail/SMS waehlen, dann Code eintragen. Knopffarben nach Regeln/04: grau = schaltet nichts am
+         Haus (Abruf, Captcha, Code), orange = aendert die Einstellungen (uebernehmen). */
+bl_cloud_bereit();
+xc_aufraeumen(); ?>
+<h2 id="xiaomi-bindkey"><?= bl_e(bl_t('CLOUD.H_BINDKEY')) ?></h2>
+<details<?= $bl_cloud ? ' open' : '' ?>>
+<summary><b><?= bl_e(bl_t('CLOUD.ABRUF_TITEL')) ?></b></summary>
+<div class="sm-hinweis"><?= bl_e(bl_t('CLOUD.ABRUF_TEXT')) ?></div>
+<?php if ($bl_cloud && !empty($bl_cloud['meldung']) && is_string($bl_cloud['meldung'])) { ?>
+<div class="sm-hinweis"><?= bl_e($bl_cloud['meldung']) ?></div>
+<?php } ?>
+<?php if ($bl_cloud && $bl_cloud['lage'] === 'ok' && !empty($bl_cloud['geraete']) && is_array($bl_cloud['geraete'])) { ?>
+<form action="index.php" method="post">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th><?= bl_e(bl_t('CLOUD.SP_NAME')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_MODELL')) ?></th><th><?= bl_e(bl_t('TEXT.SP_ADRESSE')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_REGION')) ?></th><th></th></tr>
+<?php foreach ($bl_cloud['geraete'] as $bl_cg) {
+    if (!is_array($bl_cg) || !isset($bl_cg['i'])) { continue; } ?>
+<tr><td><?= bl_e(isset($bl_cg['name']) ? (string) $bl_cg['name'] : '') ?></td>
+<td><span class="sm-mono"><?= bl_e(isset($bl_cg['modell']) ? (string) $bl_cg['modell'] : '') ?></span></td>
+<td><span class="sm-mono"><?= bl_e(isset($bl_cg['mac']) && $bl_cg['mac'] !== '' ? (string) $bl_cg['mac'] : bl_t('CLOUD.MAC_FEHLT')) ?></span></td>
+<td><?= bl_e(isset($bl_cg['region']) ? (string) $bl_cg['region'] : '') ?></td>
+<td><?php if (!empty($bl_cg['mac'])) { ?><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="cloud_nehmen" value="<?= (int) $bl_cg['i'] ?>"><?= bl_e(bl_t('CLOUD.K_UEBERNEHMEN')) ?></button><?php } ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.UEBERNEHMEN_TEXT')) ?></p>
+</form>
+<?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('CAPTCHA', 'CAPTCHA_FALSCH', 'LOESUNG'), true)
+                && ($bl_ccap = xc_lesen('captcha')) !== null && isset($bl_ccap['bild'], $bl_ccap['bildtyp'])
+                && in_array($bl_ccap['bildtyp'], array('image/png', 'image/jpeg', 'image/gif'), true)) {
+    /* Das Captcha-Bild von Xiaomi unveraendert (data:-Adresse aus dem 0600-Zwischenstand, kein Aufruf an Xiaomi aus
+     * dem Browser). Der Hausherr tippt die Zeichen und sein Kennwort erneut - EIN Versuch. */ ?>
+<div class="sm-warnung"><?= bl_e(bl_t('CLOUD.CAPTCHA_TEXT')) ?></div>
+<form action="index.php" method="post" autocomplete="off">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-feld"><img src="data:<?= bl_e($bl_ccap['bildtyp']) ?>;base64,<?= bl_e(preg_replace('#[^A-Za-z0-9+/=]#', '', (string) $bl_ccap['bild'])) ?>" alt="<?= bl_e(bl_t('CLOUD.CAPTCHA_BILD')) ?>" style="max-width:100%;border:1px solid #ccc;background:#fff;"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.CAPTCHA_LOESUNG')) ?></label>
+<input data-role="none" type="text" name="cloud_captcha" value="" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="10"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.KENNWORT')) ?></label>
+<input data-role="none" type="password" name="cloud_pass" value="" autocomplete="new-password" maxlength="200"></div>
+<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.KENNWORT_HINWEIS')) ?></p>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_captcha_senden" value="1"><?= bl_e(bl_t('CLOUD.K_CAPTCHA')) ?></button>
+</div>
+</form>
+<?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('ZWEITFAKTOR', 'SENDEN', 'WEG'), true)
+                && ($bl_czf = xc_lesen('zweitfaktor')) !== null) {
+    /* Zweitfaktor, Schritt 1: der Hausherr waehlt, wohin Xiaomi den Code schickt (nur die Wege, die Xiaomi anbietet). */ ?>
+<div class="sm-warnung"><?= bl_e(bl_t('CLOUD.ZWEITFAKTOR_WAHL')) ?>
+<?php if (!empty($bl_cloud['link']) && is_string($bl_cloud['link']) && preg_match('#^https://#', $bl_cloud['link'])) { ?>
+<br><a href="<?= bl_e($bl_cloud['link']) ?>" target="_blank" rel="noopener noreferrer"><?= bl_e(bl_t('CLOUD.ZWEITFAKTOR_LINK')) ?></a>
+<?php } ?></div>
+<form action="index.php" method="post" autocomplete="off">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-knopfreihe">
+<?php if (in_array(8, (array) $bl_czf['optionen'], true)) { ?>
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_weg" value="mail"><?= bl_e(bl_t('CLOUD.K_WEG_MAIL')) ?></button>
+<?php } ?>
+<?php if (in_array(4, (array) $bl_czf['optionen'], true)) { ?>
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_weg" value="sms"><?= bl_e(bl_t('CLOUD.K_WEG_SMS')) ?></button>
+<?php } ?>
+</div>
+</form>
+<?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('CODE_GESENDET', 'CODE'), true)
+                && ($bl_czf = xc_lesen('zweitfaktor')) !== null && !empty($bl_czf['weg'])) {
+    /* Zweitfaktor, Schritt 2: den Code eintragen (10 Minuten ab Beginn, ein Versuch). */ ?>
+<div class="sm-warnung"><?= bl_e(bl_t('CLOUD.ZWEITFAKTOR_TEXT')) ?></div>
+<form action="index.php" method="post" autocomplete="off">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.CODE')) ?></label>
+<input data-role="none" type="text" name="cloud_code" value="" inputmode="numeric" autocomplete="one-time-code" maxlength="12"></div>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_code_senden" value="1"><?= bl_e(bl_t('CLOUD.K_CODE')) ?></button>
+</div>
+</form>
+<?php } ?>
+<form action="index.php" method="post" autocomplete="off">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.KONTO')) ?></label>
+<input data-role="none" type="text" name="cloud_konto" value="" autocomplete="off" maxlength="100"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.KENNWORT')) ?></label>
+<input data-role="none" type="password" name="cloud_pass" value="" autocomplete="new-password" maxlength="200"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.REGION')) ?></label>
+<select data-role="none" name="cloud_region">
+<?php $bl_creg_vor = (string) bl_cfg($bl_cfg, 'xiaomi_region', 'de');
+foreach (array_merge(xc_regionen(), array('alle')) as $bl_cr) { ?>
+<option value="<?= bl_e($bl_cr) ?>"<?= $bl_cr === $bl_creg_vor ? ' selected' : '' ?>><?= bl_e(bl_t('CLOUD.REGION_' . strtoupper($bl_cr))) ?></option>
+<?php } ?>
+</select></div>
+<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.KENNWORT_HINWEIS')) ?></p>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_holen" value="1"><?= bl_e(bl_t('CLOUD.K_HOLEN')) ?></button>
+</div>
+</form>
+<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.WEG2')) ?></p>
+</details>
 
 <h2><?= bl_t('TEXT.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= bl_t('TEXT.SICH_ERKLAERUNG') ?></div>

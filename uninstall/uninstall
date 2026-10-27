@@ -264,6 +264,11 @@ ZWEIT_IRK="$BASE/config/plugins/$PDIR.backup.irk.json"
 if [ -f "$ZWEIT_IRK" ]; then
     rm -f "$ZWEIT_IRK" && echo "<OK> Zweitschrift der IRK-Schluessel entfernt ($ZWEIT_IRK)."
 fi
+# Gruppe 33 (1.3.29): die Zweitschrift von bindkey.json (Bind-Keys) ebenso.
+ZWEIT_BK="$BASE/config/plugins/$PDIR.backup.bindkey.json"
+if [ -f "$ZWEIT_BK" ]; then
+    rm -f "$ZWEIT_BK" && echo "<OK> Zweitschrift der Bind-Keys entfernt ($ZWEIT_BK)."
+fi
 
 # --- Der Helfer fuer das Einschalten von Bluetooth --------------------------
 #

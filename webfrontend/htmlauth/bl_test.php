@@ -1202,6 +1202,21 @@ function bl_pruefzeilen($cfg, $tags)
     $zeilen[] = bl_zeile(bl_t('PRUEF.AUFTRAG'), $ok, $meldung);
     list($ok, $meldung) = bl_pruef_irk($cfg, $tags, $status);
     $zeilen[] = bl_zeile(bl_t('PRUEF.IRK'), $ok, $meldung);
+    // --- Gruppe 33 (1.3.29, E-E11): AES-CCM ueber den Weg des Dienstes, Bind-Keys, Lage je Thermometer
+    list($ok, $ausgabe) = bl_python('bl_beacon.py', '--ccm', 10);
+    $j = bl_json_aus($ausgabe);
+    if (is_array($j) && isset($j['ok'])) {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.CCM'), (bool) $j['ok'],
+                             sprintf(bl_t($j['ok'] ? 'TEST.CCM_OK' : 'TEST.CCM_FEHL'), (int) $j['faelle'],
+                                     (string) $j['weg'], implode('; ', (array) $j['fehler'])));
+    } else {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.CCM'), null, bl_kuerzen(trim($ausgabe), 200));
+    }
+    list($ok, $meldung) = bl_pruef_bindkey($tags, $status, $gilt);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.BINDKEY'), $ok, $meldung);
+    foreach (bl_pruef_thermometer($tags, $gilt) as $bl_tz) {
+        $zeilen[] = $bl_tz;
+    }
     list($ok, $meldung) = bl_pruef_haus($cfg, $tags, $status, $gilt);
     $zeilen[] = bl_zeile(bl_t('PRUEF.HAUS'), $ok, $meldung);
 

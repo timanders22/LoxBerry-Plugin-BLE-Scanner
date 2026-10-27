@@ -16,6 +16,7 @@ Grundlage ist das Plugin BLE-Scanner von Christian Woerstenfeld (2021.2.3,
 Apache-Lizenz 2.0). Die Aenderungen stehen in NOTICE.
 """
 
+import hmac
 import json
 import os
 import re
@@ -155,6 +156,9 @@ VERLAUF_FILE = os.path.join(DATA_DIR, "verlauf.csv")
 # loescht ihn bei jedem Update, danach wird einmal neu nachgesehen - das ist
 # gewollt und kostet eine Rueckfrage beim Broker.
 ALTLAST_MERKER = os.path.join(DATA_DIR, "retain_altlast")
+# Gruppe 33: die erkannten Messformate je Tag ("<kennung>=<format>" je Zeile) - nach einem Neustart geht fuer
+# diese Tags sofort sensor/lage 1 hinaus (statt der zurueckbehaltenen Lage 0 des vorigen Laufs).
+FORMATE_MERKER = os.path.join(DATA_DIR, "sensor_formate")
 PRAEFIX_DATEI = os.path.join(DATA_DIR, "mqtt_praefix")
 
 # Sperrdatei des Dienstes (seit 1.3.20, Regeln/03 "Ein Dauerlaeufer nimmt eine
@@ -362,6 +366,10 @@ VORGABEN = {
     "haus_anwesenheit": "0",
     "bthome": "0",
     "irk_aufloesen": "0",
+    # -- Gruppe 33 (1.3.29): Frist der Messwerte (s, 300-21600; danach Temperatur -999, Feuchte -1, Lage 4)
+    #    und die Vorwahl der Region im Bind-Key-Abruf aus der Xiaomi-Cloud (kein Geheimnis).
+    "messwert_frist": "1800",
+    "xiaomi_region": "de",
 }
 
 # Erlaubte Schluessel der Zusatzangaben je Tag (viertes Feld der Tag-Zeile).
@@ -477,6 +485,9 @@ RETAIN = {
     "rssi_avg":      False,
     "distance":      False,
     "sensor":        False,      # Temperatur, Feuchte, Druck, Spannung
+    # Gruppe 33 (1.3.29): die Lage der Messwerte eines Thermometers ist ein Zustand (0 frisch ... 5 alte Form) -
+    # retained; gilt nur zusammen mit server/online (ein toter Dienst laesst die letzte Lage stehen).
+    "sensor/lage":   True,
     "scanner/rssi":  False,
     # -- last_seen ist eine DAUER und altert damit von selbst. Zurueckbehalten
     #    waere "vor 3 s gesehen" nach einer Woche noch zu lesen. Der
@@ -517,7 +528,8 @@ def thema_stamm(unterthema):
     if not teile:
         return ""
     if "sensor" in teile:
-        return "sensor"
+        # Gruppe 33: sensor/lage ist ein eigener Stamm (retained), alle anderen Messwerte "sensor".
+        return "sensor/lage" if teile[-1] == "lage" else "sensor"
     if teile[0] in ("server", "summary", "status"):
         return teile[0] + "/" + (teile[1] if len(teile) > 1 else "")
     if teile[0] in ("person", "scanner"):
@@ -808,6 +820,80 @@ def irk_lesen(pfad=None):
         if IRK_NAME.match(str(name)) and re.fullmatch(r"[0-9A-Fa-f]{32}", str(wert or "")):
             aus[str(name)] = bytes.fromhex(str(wert))
     return aus
+
+
+# ---------------------------------------------------------------------------
+# Gruppe 33 (1.3.29): Bind-Keys der Xiaomi-Thermometer und AES-CCM (MiBeacon v4/v5)
+# ---------------------------------------------------------------------------
+#
+# bindkey.json (0600, neben der Konfiguration, wie irk.json): {MAC: 32 oder 24 Hex}. Der Dienst braucht den
+# Schluessel, also eine eigene 0600-Datei (Regeln/05) statt der 0640-Konfiguration, die die Oberflaeche anzeigt.
+# Der Schluessel steht nie im Protokoll, nie im Abbild, nie auf einer Kommandozeile.
+# AES-CCM nach NIST SP 800-38C (RFC 3610) auf EINEM AES-Block: aes128() oben - python3-cryptography, wenn es da
+# ist, sonst _aes128_rein(). Derselbe Weg wie bei den IRK; kein neues Paket (Entscheidung E-E2).
+
+BINDKEY_DATEI = os.path.join(CONFIG_DIR, "bindkey.json")
+
+
+def schluessel_lesen(text):
+    """Bind-Key aus Formular, Datei oder Cloud: Leerraum, ':' und '-' weg, klein.
+    32 Hex -> (16 Byte, "v45"); 24 Hex -> (12 Byte, "alt" = alte Form v2/v3, nicht lesbar); sonst (None, "")."""
+    t = "".join(ch for ch in str(text or "") if ch not in " \t\r\n:-").lower()
+    if len(t) in (24, 32) and re.fullmatch(r"[0-9a-f]+", t):
+        return bytes.fromhex(t), ("v45" if len(t) == 32 else "alt")
+    return None, ""
+
+
+def bindkey_lesen(pfad=None):
+    """bindkey.json lesen: {MAC: (Schluessel, "v45" | "alt")}. Ungueltige Eintraege fallen weg."""
+    pfad = pfad or BINDKEY_DATEI
+    try:
+        with open(pfad, "r", encoding="utf-8") as fh:
+            roh = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    aus = {}
+    if not isinstance(roh, dict):
+        return aus
+    for mac, wert in roh.items():
+        m = mac_normieren(mac)
+        k, form = schluessel_lesen(wert)
+        if m and k is not None:
+            aus[m] = (k, form)
+    return aus
+
+
+def _xor(a, b):
+    return bytes(x ^ y for x, y in zip(a, b))
+
+
+def ccm_entschluesseln(schluessel, nonce, chiffre, mic, aad=b"\x11", aes=None):
+    """AES-CCM entschluesseln (NIST SP 800-38C): Klartext oder None, wenn der MIC nicht passt.
+    Nonce 7 bis 13 Byte, MIC 4 bis 16 Byte (gerade). MiBeacon v4/v5: Nonce 12 Byte, MIC 4 Byte, AAD 0x11.
+    Der MIC wird GEPRUEFT - ein falscher Schluessel ergibt None, nie einen geratenen Wert."""
+    aes = aes or aes128
+    n = len(nonce)
+    m = len(mic)
+    if len(schluessel) != 16 or not 7 <= n <= 13 or m not in (4, 6, 8, 10, 12, 14, 16):
+        return None
+    lq = 15 - n
+
+    def zaehler(i):
+        return aes(schluessel, bytes([lq - 1]) + bytes(nonce) + i.to_bytes(lq, "big"))
+
+    chiffre = bytes(chiffre)
+    klar = b"".join(_xor(chiffre[i:i + 16], zaehler(i // 16 + 1)) for i in range(0, len(chiffre), 16))
+    flags = (0x40 if aad else 0) | (((m - 2) // 2) << 3) | (lq - 1)
+    x = aes(schluessel, bytes([flags]) + bytes(nonce) + len(klar).to_bytes(lq, "big"))
+    bloecke = b""
+    if aad:
+        a = len(aad).to_bytes(2, "big") + bytes(aad)
+        bloecke += a + bytes((-len(a)) % 16)
+    bloecke += klar + bytes((-len(klar)) % 16)
+    for i in range(0, len(bloecke), 16):
+        x = aes(schluessel, _xor(x, bloecke[i:i + 16]))
+    soll = _xor(x[:m], zaehler(0)[:m])
+    return klar if hmac.compare_digest(soll, bytes(mic)) else None
 
 
 # ---------------------------------------------------------------------------

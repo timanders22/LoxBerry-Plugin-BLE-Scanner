@@ -181,6 +181,8 @@ if [ -d "$SICHER" ]; then
         echo "<OK> Konfiguration zurueckgespielt."
         # V1 (Gruppe 13): irk.json traegt Identitaetsschluessel - 0600, auch nach dem Zurueckspielen.
         [ -f "$PCONFIG/irk.json" ] && chmod 0600 "$PCONFIG/irk.json" 2>/dev/null
+        # Gruppe 33 (1.3.29): bindkey.json (Bind-Keys der Xiaomi-Thermometer) ebenso.
+        [ -f "$PCONFIG/bindkey.json" ] && chmod 0600 "$PCONFIG/bindkey.json" 2>/dev/null
     else
         ALLES_ZURUECK=0
         echo "<WARNING> Die Konfiguration liess sich nicht vollstaendig zurueckspielen"

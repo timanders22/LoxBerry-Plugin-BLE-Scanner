@@ -174,10 +174,11 @@ def _aufraeumen():
     return weg
 
 
-def _dienst_bauen(cfgtext):
+def _dienst_bauen(cfgtext, merker_ordner=None):
     """Einen echten Dienst mit einer Konfigurationsdatei aufsetzen.
 
-    MQTT wird nicht gestartet; senden() wird mitgeschrieben.
+    MQTT wird nicht gestartet; senden() wird mitgeschrieben. Gruppe 33: Formatmerker und bindkey.json liegen im
+    Arbeitsordner (oder in merker_ordner, wenn ein Fall sie selbst vorbereitet) - nie im echten Daten-/Konfigordner.
     """
     import ble_scanner_ng as dienstmodul
     ordner = _arbeitsordner("ble_selbsttest_")
@@ -188,6 +189,8 @@ def _dienst_bauen(cfgtext):
     gem.STATUS_FILE = os.path.join(ordner, "status.json")
     gem.STEUER_FILE = os.path.join(ordner, "steuer.json")
     gem.VERLAUF_FILE = os.path.join(ordner, "verlauf.csv")
+    gem.FORMATE_MERKER = os.path.join(merker_ordner or ordner, "sensor_formate")
+    gem.BINDKEY_DATEI = os.path.join(merker_ordner or ordner, "bindkey.json")
 
     gesendet = {}
 
@@ -1055,6 +1058,71 @@ def alles_pruefen():
     p.gleich(G, "Merkliste: nur die retained eigenen", sorted(dh.haus_eigen),
              ["haus/anwesenheit/anna", "haus/anwesenheit/jemand", "haus/tag/schluessel1/da"])
     dh.mqtt.client = None
+
+    # =====================================================================
+    G = "Gruppe 33: Xiaomi-Thermometer (MiBeacon v5, Frist, Lage)"
+    # Pruefweg des Dienstes: sichtung() mit eingespeister ServiceData, auswerten(). Platzhalter-MAC, Testschluessel.
+    ordner_t = _arbeitsordner("ble_selbsttest_g33_")
+    gem.BINDKEY_DATEI = os.path.join(ordner_t, "bindkey.json")
+    gem.FORMATE_MERKER = os.path.join(ordner_t, "sensor_formate")
+    mac_t = "11:" + "BB:CC:DD:EE:FF"
+    with open(gem.BINDKEY_DATEI, "w", encoding="utf-8") as fh:
+        json.dump({mac_t: bytes(range(16)).hex()}, fh)
+    cfg_t = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nbeacon=1\nmesswert_frist=300\n"
+             "tag1=%s|1|Thermometer|alias=thermo_probe\n" % mac_t)
+    dt, gt, _ot = _dienst_bauen(cfg_t, ordner_t)
+    paket = bytes.fromhex(bl_beacon.MV5_TESTPAKET)
+    dt.sichtung(mac_t, {"rssi": -60, "sdata": {bl_beacon.MIBEACON_UUID: paket}})
+    dt.auswerten(erzwingen=True)
+    p.gleich(G, "v5 entschluesselt: Temperatur, Lage 0, Alter 0",
+             (gt.get("thermo_probe/sensor/temperatur"), gt.get("thermo_probe/sensor/lage"),
+              gt.get("thermo_probe/sensor/alter")), ("21.7", "0", "0"))
+    p.gleich(G, "sensor/lage retained, sensor/alter nicht",
+             (gem.retain_fuer("thermo_probe/sensor/lage", "0"), gem.retain_fuer("thermo_probe/sensor/alter", "0")),
+             (True, False))
+    dt.sichtung(mac_t, {"rssi": -60, "sdata": {bl_beacon.MIBEACON_UUID: paket}})
+    p.gleich(G, "gleiche Werbung zweimal: einmal gerechnet (Merker)", len(dt.mibeacon_merker), 1)
+    # Frist: der letzte Messwert 301 s alt -> -999/-1 und Lage 4
+    z_t = dt._zustand(mac_t)
+    for n in list(z_t["mess"]):
+        z_t["mess"][n] = (z_t["mess"][n][0], z_t["mess"][n][1] - 301)
+    dt.gesehen[mac_t]["mess"] = {}
+    dt.messwert_start -= 301          # auch der Dienststart liegt 301 s zurueck (Feuchte kam nie)
+    gt.clear()
+    dt.auswerten(erzwingen=True)
+    p.gleich(G, "Frist ueberschritten: Temperatur -999, Feuchte -1, Lage 4",
+             (gt.get("thermo_probe/sensor/temperatur"), gt.get("thermo_probe/sensor/feuchte"),
+              gt.get("thermo_probe/sensor/lage")), ("-999", "-1", "4"))
+    p.gleich(G, "Batterie: -1 erst nach 24 h (noch nichts)", gt.get("thermo_probe/sensor/batterie"), None)
+    # Falscher Schluessel: neu laden ohne Neustart -> Lage 3, keine neuen Werte
+    with open(gem.BINDKEY_DATEI, "w", encoding="utf-8") as fh:
+        json.dump({mac_t: "ff" * 16}, fh)
+    dt.bindkey_laden()
+    dt.sichtung(mac_t, {"rssi": -60, "sdata": {bl_beacon.MIBEACON_UUID: paket}})
+    gt.clear()
+    dt.auswerten(erzwingen=True)
+    p.gleich(G, "Schluessel neu geladen, passt nicht: Lage 3", gt.get("thermo_probe/sensor/lage"), "3")
+    # Ohne Schluessel: Lage 2
+    with open(gem.BINDKEY_DATEI, "w", encoding="utf-8") as fh:
+        json.dump({}, fh)
+    dt.bindkey_laden()
+    dt.sichtung(mac_t, {"rssi": -60, "sdata": {bl_beacon.MIBEACON_UUID: paket}})
+    gt.clear()
+    dt.auswerten(erzwingen=True)
+    p.gleich(G, "Schluessel entfernt: Lage 2", gt.get("thermo_probe/sensor/lage"), "2")
+    # Neustart: Merker kennt das Format -> sofort Lage 1, Alter -1, noch keine Fehlwerte
+    dn, gn, _on = _dienst_bauen(cfg_t, ordner_t)
+    dn.auswerten(erzwingen=True)
+    p.gleich(G, "Neustart: Lage 1 und Alter -1 sofort, keine Fehlwerte vor der Frist",
+             (gn.get("thermo_probe/sensor/lage"), gn.get("thermo_probe/sensor/alter"),
+              gn.get("thermo_probe/sensor/temperatur")), ("1", "-1", None))
+    # Abbild: kein Schluessel, aber Lage/Alter
+    dt.zustand_schreiben(dt.letzte_uebersicht, 0, 1, {})
+    with open(gem.STATUS_FILE, "r", encoding="utf-8") as fh:
+        abbild = fh.read()
+    p.gleich(G, "Abbild ohne Schluessel, mit sensor_lage",
+             (bytes(range(16)).hex() in abbild, "ff" * 16 in abbild, '"sensor_lage": 2' in abbild), (False, False, True))
+    p.merke(G, "AES-Weg: %s" % gem.aes_weg(), True)
 
     return p.zeilen
 

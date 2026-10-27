@@ -1,11 +1,45 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.28
+Version 1.3.29
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.29
+
+**Xiaomi-Thermometer, auch verschlüsselt.** Der Dienst liest jetzt neben dem offenen MiBeacon (runder Mi-Fühler
+LYWSDCGQ/01ZM = `cleargrass.sensor_ht.dk1`, Fassung 2) auch **verschlüsselte MiBeacon-Pakete der Fassung 4/5**
+(LYWSD03MMC, MJWSD05MMC, LYWSD02MMC, XMWSDJ04MMC u. a.): AES-CCM mit dem **Bind-Key** des Geräts, der MIC wird
+geprüft – ein falscher Schlüssel ergibt keinen Wert, sondern die Lage „Bind-Key passt nicht“. Dazu die
+**Qingping-Form** (ServiceData `0xFDCD`, offen). Verschlüsselte Pakete der alten Form (Fassung 2/3) werden bewusst
+nicht entschlüsselt (kein prüfbarer MIC).
+
+- **Bind-Key je MAC-Zeile** (Reiter *Einstellungen*, „Mehr Einstellungen“): Passwortfeld, nie vorbefüllt, 32 Hex
+  (24 Hex der alten Form werden mit Hinweis gespeichert), Haken „Schlüssel löschen“. Ablage in `bindkey.json`
+  (0600, Zweitschrift beim Update wie `irk.json`); angezeigt wird nur „hinterlegt“/„fehlt“ – nie Ziffern.
+- **Bind-Key aus der Xiaomi-Cloud holen**: Anmeldung mit Konto und Kennwort (nie gespeichert, nie protokolliert),
+  Captcha-Bild und Zweitfaktor per Mail/SMS im Plugin, Liste nur der Bluetooth-Geräte (Name, Modell, MAC, Region –
+  ohne Schlüssel), „Übernehmen“ setzt den Schlüssel am Tag mit dieser MAC oder legt einen neuen Tag an. Gebaut auf
+  dem neuen gemeinsamen Stammmodul `xiaomi_cloud.php` 1.0.0 (herausgelöst aus dem Saugroboter-Abruf).
+- **Neue Themen je Thermometer über das MQTT-Gateway V2**: `<Tag>/sensor/lage` (0 frisch, 1 noch kein Messwert seit
+  dem Start, 2 verschlüsselt ohne Schlüssel, 3 Schlüssel passt nicht, 4 veraltet, 5 alte Form; zurückbehalten) und
+  `<Tag>/sensor/alter` (Sekunden seit dem letzten gültigen Messwert, −1 nie). Namenstabelle und V2-Hakenliste führen
+  beide; das Musterprojekt hat 24 statt 22 Haken.
+- **−1-Regel für Messwerte**: nach der neuen Frist `messwert_frist` (Werk 1800 s, 300–21600) geht die Temperatur als
+  **−999** (−1 °C ist ein echter Wert) und die Feuchte als −1 hinaus; die Batterie wird nach 24 h ohne Batteriesatz −1.
+  Bis 1.3.28 blieb der letzte Wert eines verstummten Fühlers in Loxone stehen.
+- **Sicherung mit Schlüsseln**: Abschnitte `bindkeys` und `irk` (die IRK fehlten bisher), Kopf-Hinweis „wie ein
+  Passwort behandeln“. Eine Sicherung aus 1.3.28 lässt die hinterlegten Schlüssel stehen. Rückweg: 1.3.28 weist eine
+  1.3.29-Sicherung wegen der neuen Abschnitte ab.
+- **IRK-Anzeige ohne Ziffern** (bisher die letzten vier Hex).
+- **Reiter Test**: Prüfzeilen „AES-CCM (MiBeacon)“ (NIST SP 800-38C Anhang C, Beispiel 1 und 2, über den Weg des
+  Dienstes), „Bind-Keys“ (Schlüssel ohne Tag, Rechte) und je Thermometer Lage, Alter, Format und Schlüssel.
+- Befehlsbrücke 1.0.1 (gemeinsame Stammfassung). `MI_TYPEN` berichtigt: 0x0387 ist der MHO-C401, der MHO-C303 0x06D3.
+- `python3-cryptography` bleibt optional: ohne das Paket rechnet AES in reinem Python (eine Entschlüsselung unter 1 ms).
+- Am Gerät mit einem verschlüsselnden Fühler noch **nicht** gemessen (Nonce-Aufbau nach ble_monitor, gegen eine
+  zweite Umsetzung geprüft); der Cloud-Abruf nur gegen eine Attrappe.
 
 ## Neu in 1.3.28
 

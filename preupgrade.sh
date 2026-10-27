@@ -354,4 +354,20 @@ if [ -s "$NETZ_IRK" ] && [ "$(head -c 1 "$NETZ_IRK" 2>/dev/null)" = "{" ] \
     fi
 fi
 
+# Gruppe 33 (1.3.29): Zweitschrift von bindkey.json (Bind-Keys der Xiaomi-Thermometer) - wie irk.json, 0600.
+NETZ_BK="$NETZ_CFG/bindkey.json"
+NETZ_BK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
+if [ -s "$NETZ_BK" ] && [ "$(head -c 1 "$NETZ_BK" 2>/dev/null)" = "{" ] \
+   && tail -c 3 "$NETZ_BK" 2>/dev/null | grep -q '}'; then
+    if cp "$NETZ_BK" "$NETZ_BK_ZIEL.neu" 2>/dev/null \
+       && chmod 0600 "$NETZ_BK_ZIEL.neu" 2>/dev/null \
+       && cmp -s "$NETZ_BK" "$NETZ_BK_ZIEL.neu" \
+       && mv "$NETZ_BK_ZIEL.neu" "$NETZ_BK_ZIEL" 2>/dev/null; then
+        echo "<INFO> Zweitschrift der Bind-Keys angelegt (0600)."
+    else
+        rm -f "$NETZ_BK_ZIEL.neu" 2>/dev/null
+        echo "<WARNING> Die Zweitschrift der Bind-Keys liess sich nicht anlegen."
+    fi
+fi
+
 exit 0

@@ -270,6 +270,9 @@ function bl_defaults()
         'haus_anwesenheit'        => '0',
         'bthome'                  => '0',
         'irk_aufloesen'           => '0',
+        // Gruppe 33 (1.3.29): Frist der Messwerte (s) und Vorwahl der Region im Bind-Key-Abruf
+        'messwert_frist'          => '1800',
+        'xiaomi_region'           => 'de',
     );
 }
 
@@ -282,7 +285,7 @@ function bl_defaults()
 function bl_schluessel_spaeter()
 {
     return array('wlan_kopplung', 'wlan_zuordnung', 'befehle_mqtt_ein', 'befehle_eingreifend_ein',
-                 'haus_anwesenheit', 'bthome', 'irk_aufloesen');
+                 'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region');
 }
 
 /**
@@ -340,6 +343,8 @@ function bl_regeln()
         'haus_anwesenheit'        => array('schalter'),
         'bthome'                  => array('schalter'),
         'irk_aufloesen'           => array('schalter'),
+        'messwert_frist'          => array('zahl', 300, 21600),
+        'xiaomi_region'           => array('wahl', array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle')),
     );
 }
 
@@ -557,6 +562,8 @@ function bl_retain()
         'rssi_avg'      => false,
         'distance'      => false,
         'sensor'        => false,
+        // Gruppe 33: die Lage der Messwerte eines Thermometers ist ein Zustand - retained
+        'sensor/lage'   => true,
         'scanner/rssi'  => false,
         // -- eine Dauer altert von selbst
         'last_seen'     => false,
@@ -596,7 +603,8 @@ function bl_thema_stamm($thema)
         return '';
     }
     if (in_array('sensor', $teile, true)) {
-        return 'sensor';
+        // Gruppe 33: sensor/lage ist ein eigener Stamm (retained), alle anderen Messwerte "sensor".
+        return $teile[count($teile) - 1] === 'lage' ? 'sensor/lage' : 'sensor';
     }
     if (in_array($teile[0], array('server', 'summary', 'status'), true)) {
         return $teile[0] . '/' . (isset($teile[1]) ? $teile[1] : '');
@@ -1567,7 +1575,7 @@ function bl_sensor_katalog()
 function bl_sensor_rueckfall()
 {
     $k = array(
-        'temperatur'  => array('min' => -45, 'max' => 90,         'einheit' => '°C'),
+        'temperatur'  => array('min' => -999, 'max' => 90,        'einheit' => '°C'),
         'feuchte'     => array('min' => 0,   'max' => 100,        'einheit' => '%'),
         'druck'       => array('min' => 500, 'max' => 1200,       'einheit' => 'hPa'),
         'batterie'    => array('min' => 0,   'max' => 100,        'einheit' => '%'),
@@ -1580,6 +1588,9 @@ function bl_sensor_rueckfall()
         'helligkeit'  => array('min' => 0,   'max' => 120000,     'einheit' => 'lx'),
         'fenster'     => array('min' => 0,   'max' => 1,          'einheit' => ''),
         'bewegungsmelder' => array('min' => 0, 'max' => 1,        'einheit' => ''),
+        // Gruppe 33 (1.3.29): je Thermometer
+        'lage'        => array('min' => 0,   'max' => 5,          'einheit' => ''),
+        'alter'       => array('min' => -1,  'max' => 2147483647, 'einheit' => 's'),
     );
     foreach ($k as $n => $_i) {
         $k[$n]['art'] = 'analog';
@@ -1658,7 +1669,10 @@ function bl_sensor_themen($kennung)
     $katalog = bl_sensor_katalog();
     $out = array();
     $abbild = bl_zustaende();
-    if (!isset($abbild[$kennung]) || empty($abbild[$kennung]['sensor'])) {
+    // Gruppe 33: ein verschluesselter Fuehler ohne passenden Schluessel liefert keine Werte, aber eine Lage - auch
+    // er bekommt seine Themen (das Format steht fest, sobald er einmal gesendet hat).
+    if (!isset($abbild[$kennung]) || (empty($abbild[$kennung]['sensor'])
+            && !isset($abbild[$kennung]['sensor_lage']))) {
         return $out;
     }
     $z = $abbild[$kennung];
@@ -1693,6 +1707,10 @@ function bl_sensor_themen($kennung)
     // Was der Tag tatsaechlich schon geliefert hat, kommt IMMER dazu - falls
     // ein Format mehr kann, als die Tabelle kennt.
     $namen = array_unique(array_merge($namen, array_keys((array) $z['sensor'])));
+    // Gruppe 33: Thermometer (Temperatur oder Feuchte) bekommen sensor/lage und sensor/alter - wie der Dienst.
+    if (in_array('temperatur', $namen, true) || in_array('feuchte', $namen, true)) {
+        $namen = array_unique(array_merge($namen, array('lage', 'alter')));
+    }
     sort($namen);
     foreach ($namen as $name) {
         $name = (string) $name;
@@ -2222,6 +2240,11 @@ function bl_bausteinliste($cfg, $tags)
             bl_t('BAUSTEIN.Z3_11'),
             bl_t('BAUSTEIN.Z3_12'),
             bl_t('BAUSTEIN.Z3_13'),
+            // Gruppe 33 (Entwurf Abschnitt 9): Lage, Alter, Formel, ODER
+            bl_t('BAUSTEIN.Z3_14'),
+            bl_t('BAUSTEIN.Z3_15'),
+            bl_t('BAUSTEIN.Z3_16'),
+            bl_t('BAUSTEIN.Z3_17'),
         ), array(
             bl_t('BAUSTEIN.SEITE3_SCHRITT1'),
             bl_t('BAUSTEIN.SEITE3_SCHRITT2'),
@@ -2464,6 +2487,10 @@ function bl_sicherung_bauen($cfg, $tags)
             'opt'     => (object) (isset($t['opt']) && is_array($t['opt']) ? $t['opt'] : array()),
         );
     }
+    // Gruppe 33 (E-E6, N5): die Schluessel gehoeren in die Sicherung (Regeln/05) - sonst ist der Umzug auf einen
+    // zweiten LoxBerry fuer verschluesselte Fuehler und IRK-Tags wertlos. Der Kopf sagt es (TEXT.SICH_KOPF).
+    $aus['bindkeys'] = (object) bl_bindkey_lesen();
+    $aus['irk'] = (object) bl_irk_lesen();
     return $aus;
 }
 
@@ -2489,7 +2516,8 @@ function bl_sicherung_lesen($roh, &$namen = null)
     $bekannt = array_keys($neu);
     $anzahl = 0;
     foreach ($daten as $k => $w) {
-        if ($k === '_' || $k === 'tags') {
+        // Gruppe 33: die Schluessel-Abschnitte liest bl_sicherung_schluessel().
+        if ($k === '_' || $k === 'tags' || $k === 'bindkeys' || $k === 'irk') {
             continue;
         }
         if (!in_array($k, $bekannt, true)) {
@@ -2582,6 +2610,50 @@ function bl_sicherung_lesen($roh, &$namen = null)
     }
     $namen = array_values(array_unique($namen));
     return array($mangel ? null : $neu, $mangel, $anzahl, $tags);
+}
+
+/**
+ * Gruppe 33 (E-E6): die Abschnitte "bindkeys" (MAC -> 24/32 Hex) und "irk" (Name -> 32 Hex) einer Sicherung lesen.
+ * Rueckgabe array(bindkeys|null, irk|null, hinweise): null = Abschnitt fehlt (Sicherung aus 1.3.28) - dann bleiben die
+ * hinterlegten Schluessel unveraendert. Ein Eintrag mit falscher Form wird mit Hinweis (nur Name/MAC) uebergangen.
+ * Nur Schluessel zu Tags der Sicherung bleiben (keine Waisen).
+ */
+function bl_sicherung_schluessel($roh, $tags)
+{
+    $d = json_decode((string) $roh, true);
+    $hinweise = array();
+    $bk = null;
+    $irk = null;
+    $macs = array();
+    $namen = array();
+    foreach ((array) $tags as $t) {
+        if ($t['art'] === 'mac') { $macs[] = $t['mac']; }
+        if ($t['art'] === 'irk') { $namen[] = substr($t['kennung'], 4); }
+    }
+    if (is_array($d) && array_key_exists('bindkeys', $d)) {
+        $bk = array();
+        foreach (is_array($d['bindkeys']) ? $d['bindkeys'] : array() as $mac => $v) {
+            $m = bl_mac((string) $mac);
+            $k = is_string($v) ? bl_bindkey_form($v) : '';
+            if ($m === '' || $k === '' || !in_array($m, $macs, true)) {
+                $hinweise[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_UEBERGANGEN'), 'bindkeys', bl_kuerzen((string) $mac, 20));
+                continue;
+            }
+            $bk[$m] = $k;
+        }
+    }
+    if (is_array($d) && array_key_exists('irk', $d)) {
+        $irk = array();
+        foreach (is_array($d['irk']) ? $d['irk'] : array() as $n => $v) {
+            if (!preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) || !is_string($v) || !preg_match('/^[0-9A-Fa-f]{32}$/', $v)
+                || !in_array((string) $n, $namen, true)) {
+                $hinweise[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_UEBERGANGEN'), 'irk', bl_kuerzen((string) $n, 40));
+                continue;
+            }
+            $irk[(string) $n] = strtolower($v);
+        }
+    }
+    return array($bk, $irk, $hinweise);
 }
 
 /**
@@ -2952,6 +3024,8 @@ function bl_einmal_lesen()
     $aus['tags'] = isset($d['tags']) && is_array($d['tags']) ? $d['tags'] : null;
     // X-2 (Verbesserungsbau 30.09.2026): geprueft wird in bl_eingaben_setzen().
     $aus['eingaben'] = isset($d['eingaben']) && is_array($d['eingaben']) ? $d['eingaben'] : null;
+    // Gruppe 33: Ergebnis des Cloud-Abrufs (Lage, Liste OHNE Schluessel, Zweitfaktor-Link, Meldung).
+    $aus['cloud'] = isset($d['cloud']) && is_array($d['cloud']) && isset($d['cloud']['lage']) ? $d['cloud'] : null;
     return $aus;
 }
 
@@ -3135,12 +3209,12 @@ function bl_irk_schreiben($tab)
     return bl_datei_schreiben($f, json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n", 0600);
 }
 
-/** Anzeige im Formular: nie der Schluessel - nur "hinterlegt ... <letzte vier Hex>" oder "fehlt". */
+/** Anzeige im Formular: nie der Schluessel und seit 1.3.29 auch keine Ziffern daraus (Gruppe 33, E-E5/N6) -
+ * nur "hinterlegt" oder "fehlt", wie beim Bind-Key. */
 function bl_irk_anzeige($name, $tab = null)
 {
     if (!is_array($tab)) { $tab = bl_irk_lesen(); }
-    return isset($tab[$name]) ? sprintf(bl_t('TEXT.IRK_HINTERLEGT'), substr($tab[$name], -4))
-                              : bl_t('TEXT.IRK_FEHLT');
+    return isset($tab[$name]) ? bl_t('TEXT.IRK_HINTERLEGT') : bl_t('TEXT.IRK_FEHLT');
 }
 
 /**
@@ -3293,7 +3367,7 @@ function bl_mqtt_namen($cfg, $tags)
         $zeile('scanner/' . ($scanner !== '' ? $scanner : '<S>') . '/status/zaehler',
                array('s' => 'THEMA.SC_ZAEHLER', 'art' => 'analog', 'min' => 0, 'max' => 999));
     }
-    // Musterprojekt (Entwurf 2.5): 21 Haken mit den Musternamen; mit E5 Kalibrierung 22.
+    // Musterprojekt (Entwurf 2.5): 21 Haken mit den Musternamen; mit E5 Kalibrierung 22; Gruppe 33 lage/alter 24.
     $muster = bl_muster_themen();
     foreach ($aus as $i => $z) {
         $aus[$i]['muster'] = in_array($z['thema'], $muster, true);
@@ -3315,7 +3389,9 @@ function bl_muster_themen()
                  'schluessel1/raum', 'schluessel1/kalibrierung',
                  'thermometer_wohnzimmer/present', 'thermometer_wohnzimmer/sensor/temperatur',
                  'thermometer_wohnzimmer/sensor/feuchte', 'thermometer_wohnzimmer/sensor/batterie',
-                 'thermometer_wohnzimmer/last_seen');
+                 'thermometer_wohnzimmer/last_seen',
+                 // Gruppe 33 (Entwurf 2.4, Musterprojekt #14/#15): 24 Haken
+                 'thermometer_wohnzimmer/sensor/lage', 'thermometer_wohnzimmer/sensor/alter');
 }
 
 /** Die Musterthemen mit den eigenen Namen (Praefix ohne, Alias und Personen wie bl_bausteinliste_ersatz()). */
@@ -3824,4 +3900,287 @@ function bl_pruef_vorlage_mqtt($cfg, $tags)
         return array(false, bl_t('TEST.VORLAGE_KAPUTT'));
     }
     return array(true, sprintf(bl_t('TEST.VORLAGE_MQTT'), count(bl_mqtt_befehle($cfg, $tags))));
+}
+
+/* ==================================================================
+ * Gruppe 33 (1.3.29): Xiaomi-Thermometer - Bind-Keys, Cloud-Abruf, Pruefzeilen
+ *
+ * bindkey.json (0600) neben der Konfiguration: MAC -> 32 Hex (MiBeacon v4/v5) oder 24 Hex (alte Form, nicht
+ * lesbar). Der Dienst braucht den Schluessel, also eigene 0600-Datei (Regeln/05) wie irk.json. Formular nur
+ * Schreiben (Passwortfeld, nie vorbefuellt), Anzeige nur "hinterlegt"/"fehlt" - nie Ziffern (E-E3/E-E4/E-E5).
+ * Der Abruf aus der Xiaomi-Cloud laeuft ueber das gemeinsame Stammmodul xiaomi_cloud.php 1.0.0 (Filter ble=1);
+ * Kennwort, Sitzung und Schluessel gehen nie in Protokoll, Meldung oder HTML.
+ * ================================================================== */
+
+function bl_bindkey_datei()
+{
+    return bl_paths()['configdir'] . '/bindkey.json';
+}
+
+/** Bind-Key normieren wie schluessel_lesen() in bl_common.py: Leerraum, ':' und '-' weg, klein; 24/32 Hex, sonst ''. */
+function bl_bindkey_form($wert)
+{
+    $t = strtolower((string) preg_replace('/[\s:\-]/', '', (string) $wert));
+    return preg_match('/^([0-9a-f]{24}|[0-9a-f]{32})\z/', $t) ? $t : '';
+}
+
+function bl_bindkey_lesen()
+{
+    $f = bl_bindkey_datei();
+    $j = is_readable($f) ? @json_decode((string) @file_get_contents($f), true) : null;
+    $aus = array();
+    if (is_array($j)) {
+        foreach ($j as $mac => $v) {
+            $m = bl_mac((string) $mac);
+            $k = is_string($v) ? bl_bindkey_form($v) : '';
+            if ($m !== '' && $k !== '') {
+                $aus[$m] = $k;
+            }
+        }
+    }
+    ksort($aus);
+    return $aus;
+}
+
+/** Schreiben mit 0600 (Rechte vor Inhalt, atomar), Zweitschrift macht preupgrade.sh. Leere Tabelle: {}. */
+function bl_bindkey_schreiben($tab)
+{
+    $f = bl_bindkey_datei();
+    if (bl_paths()['home'] === '' && !is_dir(dirname($f))) {
+        return false;
+    }
+    ksort($tab);
+    return bl_datei_schreiben($f, json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n", 0600);
+}
+
+/** Anzeige an der Tag-Zeile: nie Ziffern (Entscheidung "nie in Ausgabe"). */
+function bl_bindkey_anzeige($mac, $tab = null)
+{
+    if (!is_array($tab)) { $tab = bl_bindkey_lesen(); }
+    if (!isset($tab[$mac])) {
+        return bl_t('TEXT.BINDKEY_FEHLT');
+    }
+    return bl_t(strlen($tab[$mac]) === 32 ? 'TEXT.BINDKEY_HINTERLEGT' : 'TEXT.BINDKEY_ALT');
+}
+
+/**
+ * Die Bind-Keys aus dem Formular (tag_bindkey[<i>] nur Schreiben, tag_bindkey_weg[<i>] Haken "loeschen").
+ * Leeres Feld behaelt; Schluessel UND Haken zugleich -> beanstandet; Form 24/32 Hex, sonst MANGEL.BINDKEY mit der
+ * Bezeichnung (nie der Wert). Schluessel entfernter MAC-Tags fallen weg (keine Waisen). Rueckgabe array(Tabelle, geaendert).
+ */
+function bl_bindkey_aus_post(&$mangel, $tags, &$bean = null)
+{
+    $tab = bl_bindkey_lesen();
+    $roh = isset($_POST['tag_bindkey']) && is_array($_POST['tag_bindkey']) ? $_POST['tag_bindkey'] : array();
+    $weg = isset($_POST['tag_bindkey_weg']) && is_array($_POST['tag_bindkey_weg']) ? $_POST['tag_bindkey_weg'] : array();
+    $kenn = isset($_POST['tag_kennung']) && is_array($_POST['tag_kennung']) ? $_POST['tag_kennung'] : array();
+    $namen = isset($_POST['tag_name']) && is_array($_POST['tag_name']) ? $_POST['tag_name'] : array();
+    $geaendert = false;
+    foreach (array_unique(array_merge(array_keys($roh), array_keys($weg))) as $i) {
+        $w = isset($roh[$i]) && is_string($roh[$i]) ? trim($roh[$i]) : '';
+        $loeschen = isset($weg[$i]) && $weg[$i] === '1';
+        if ($w === '' && !$loeschen) {
+            continue;
+        }
+        $mac = isset($kenn[$i]) && is_string($kenn[$i]) ? bl_mac($kenn[$i]) : '';
+        $wer = (isset($namen[$i]) && is_string($namen[$i]) && trim($namen[$i]) !== '')
+            ? bl_kuerzen(trim($namen[$i]), 40) : ($mac !== '' ? $mac : '-');
+        if ($w !== '' && $loeschen) {
+            $mangel[] = sprintf(bl_t('MANGEL.BINDKEY_BEIDES'), $wer);
+            if (is_array($bean)) { $bean[$i][] = 'bindkey'; }
+            continue;
+        }
+        if ($mac === '') {
+            $mangel[] = sprintf(bl_t('MANGEL.BINDKEY'), $wer);
+            if (is_array($bean)) { $bean[$i][] = 'bindkey'; }
+            continue;
+        }
+        if ($loeschen) {
+            if (isset($tab[$mac])) { unset($tab[$mac]); $geaendert = true; }
+            continue;
+        }
+        $k = bl_bindkey_form($w);
+        if ($k === '') {
+            $mangel[] = sprintf(bl_t('MANGEL.BINDKEY'), $wer);
+            if (is_array($bean)) { $bean[$i][] = 'bindkey'; }
+            continue;
+        }
+        if (!isset($tab[$mac]) || $tab[$mac] !== $k) { $tab[$mac] = $k; $geaendert = true; }
+    }
+    $macs = array();
+    foreach ($tags as $t) {
+        if (isset($t['art']) && $t['art'] === 'mac') { $macs[] = $t['mac']; }
+    }
+    foreach (array_keys($tab) as $m) {
+        if (!in_array($m, $macs, true)) { unset($tab[$m]); $geaendert = true; }
+    }
+    return array($tab, $geaendert);
+}
+
+/** Lage der Messwerte als Text (0-5; Regeln/04: jeder Zustand hat seinen Sprachschluessel). */
+function bl_lage_text($lage)
+{
+    $lage = (int) $lage;
+    return ($lage >= 0 && $lage <= 5) ? bl_t('TEXT.LAGE_' . $lage) : '-';
+}
+
+/* ---------------- Bind-Key aus der Xiaomi-Cloud (Stammmodul xiaomi_cloud.php 1.0.0) ---------------- */
+
+/** Das Stammmodul laden und die Ablage der Zwischenstaende (data-Ordner, 0600, <= 10 min) setzen. */
+function bl_cloud_bereit()
+{
+    require_once __DIR__ . '/xiaomi_cloud.php';
+    $d = bl_paths()['datadir'];
+    if ($d !== '' && !is_dir($d)) {
+        @mkdir($d, 0775, true);
+    }
+    xc_ablage($d);
+    return defined('XC_FASSUNG');
+}
+
+/** Filter dieser Linie: nur Bluetooth-Geraete (did mit "blt"), alle Modelle. */
+function bl_cloud_filter()
+{
+    return array('modelle' => array(), 'ble' => 1);
+}
+
+/**
+ * Ein Geraet der Auswahl uebernehmen (E-E7): gibt es einen Tag mit dieser MAC, bekommt er den Schluessel; sonst ein
+ * neuer aktiver Tag <MAC>|1|<Name aus der Cloud>|alias=<haus_name(Name)> - Alias nur, wenn frei und zulaessig. Die
+ * Auswahl ist danach verbraucht. Rueckgabe array(ok, Lage, Bezeichnung, alte_form).
+ */
+function bl_cloud_uebernehmen($index)
+{
+    bl_cloud_bereit();
+    $a = xc_auswahl_nehmen((int) $index);
+    if ($a === null || !isset($a['geraet']) || !is_array($a['geraet'])) {
+        return array(false, 'ABGELAUFEN', '', false);
+    }
+    $g = $a['geraet'];
+    $name = isset($g['name']) && is_string($g['name']) ? trim($g['name']) : '';
+    $name = trim((string) preg_replace('/[\x00-\x1F\x7F"\'|,=<>\\\\]/u', '', $name));
+    $name = function_exists('mb_substr') ? mb_substr($name, 0, 40, 'UTF-8') : substr($name, 0, 40);
+    $mac = bl_mac(isset($g['mac']) ? (string) $g['mac'] : '');
+    $key = bl_bindkey_form(isset($g['bindkey']) ? (string) $g['bindkey'] : '');
+    $g = null;
+    if ($mac === '') {
+        return array(false, 'MAC', $name, false);
+    }
+    if ($key === '') {
+        return array(false, 'SCHLUESSEL', $name, false);
+    }
+    list($cfg, $tags, ) = bl_config_read();
+    $da = false;
+    $aliase = array();
+    foreach ($tags as $t) {
+        if ($t['art'] === 'mac' && $t['mac'] === $mac) { $da = true; }
+        if (isset($t['opt']['alias']) && $t['opt']['alias'] !== '') { $aliase[] = strtolower(bl_saeubern($t['opt']['alias'])); }
+    }
+    $lage = 'BESTEHEND';
+    if (!$da) {
+        $alias = bl_haus_name($name);
+        if ($alias === '' || trim($alias, '_') === '' || in_array($alias, bl_reservierte_zweige(), true)
+            || in_array($alias, $aliase, true)) {
+            $alias = '';
+        }
+        $neu = array('kennung' => $mac, 'aktiv' => '1', 'name' => $name,
+                     'opt' => $alias !== '' ? array('alias' => $alias) : array());
+        list($tag, $grund) = bl_tag_pruefen($neu);
+        if ($tag === null) {
+            $neu['opt'] = array();
+            $alias = '';
+            list($tag, $grund) = bl_tag_pruefen($neu);
+        }
+        if ($tag === null) {
+            return array(false, 'TAG', $name, false);
+        }
+        $tags[] = $tag;
+        if (!bl_config_write($cfg, $tags)) {
+            return array(false, 'SCHREIBEN', $name, false);
+        }
+        $lage = $alias !== '' ? 'NEU' : 'NEU_OHNE_ALIAS';
+    }
+    $tab = bl_bindkey_lesen();
+    $tab[$mac] = $key;
+    $alt = strlen($key) === 24;
+    $key = '';
+    if (!bl_bindkey_schreiben($tab)) {
+        return array(false, 'SCHREIBEN', $name, false);
+    }
+    return array(true, $lage, $name !== '' ? $name : $mac, $alt);
+}
+
+/** Meldung zur Uebernahme (je Lage ein fester Sprachschluessel - die Platzhalterpruefung sieht jeden Aufruf). */
+function bl_cloud_text($lage, $wer)
+{
+    switch ($lage) {
+        case 'BESTEHEND':      return sprintf(bl_t('CLOUD.M_UEB_BESTEHEND'), $wer);
+        case 'NEU':            return sprintf(bl_t('CLOUD.M_UEB_NEU'), $wer);
+        case 'NEU_OHNE_ALIAS': return sprintf(bl_t('CLOUD.M_UEB_NEU_OHNE_ALIAS'), $wer);
+        case 'MAC':            return sprintf(bl_t('CLOUD.F_UEB_MAC'), $wer);
+        case 'SCHLUESSEL':     return sprintf(bl_t('CLOUD.F_UEB_SCHLUESSEL'), $wer);
+        case 'TAG':            return sprintf(bl_t('CLOUD.F_UEB_TAG'), $wer);
+        case 'SCHREIBEN':      return sprintf(bl_t('CLOUD.F_UEB_SCHREIBEN'), $wer);
+        case 'ABGELAUFEN':     return bl_t('CLOUD.F_UEB_ABGELAUFEN');
+    }
+    return bl_t('CLOUD.F_UEB_WAHL');
+}
+
+/* ---------------- Reiter Test (Gruppe 33) ---------------- */
+
+/** Pruefzeile "Bind-Keys": Schluessel ohne Tag (gelb), Rechte 0600, Anzahl - nie MAC oder Schluessel. */
+function bl_pruef_bindkey($tags, $status, $gilt)
+{
+    $tab = bl_bindkey_lesen();
+    $macs = array();
+    foreach ($tags as $t) {
+        if ($t['art'] === 'mac') { $macs[] = $t['mac']; }
+    }
+    $waisen = 0;
+    foreach (array_keys($tab) as $m) {
+        if (!in_array($m, $macs, true)) { $waisen++; }
+    }
+    $f = bl_bindkey_datei();
+    $rechte = is_file($f) ? substr(sprintf('%o', @fileperms($f)), -3) : '-';
+    if (is_file($f) && DIRECTORY_SEPARATOR !== '\\' && $rechte !== '600') {
+        return array(false, sprintf(bl_t('TEST.BINDKEY_RECHTE'), $rechte));
+    }
+    if ($waisen > 0) {
+        return array(null, sprintf(bl_t('TEST.BINDKEY_WAISEN'), $waisen));
+    }
+    $geladen = ($gilt && is_array($status) && isset($status['bindkeys']['anzahl'])) ? (string) (int) $status['bindkeys']['anzahl'] : '?';
+    return array(true, sprintf(bl_t('TEST.BINDKEY_OK'), count($tab), $geladen));
+}
+
+/**
+ * Je aktivem Thermometer eine Zeile: Lage (Text 0-5), Alter, Format/Fassung, Schluessel hinterlegt/fehlt - nie Ziffern.
+ * Gruen bei Lage 0, gelb bei 1 (noch kein Messwert seit dem Start), rot bei 2-5. Rueckgabe Liste von bl_zeile().
+ */
+function bl_pruef_thermometer($tags, $gilt)
+{
+    $aus = array();
+    if (!$gilt) {
+        return $aus;
+    }
+    $abbild = bl_zustaende();
+    $tab = bl_bindkey_lesen();
+    foreach ($tags as $t) {
+        if ($t['aktiv'] !== '1' || !isset($abbild[$t['kennung']])) {
+            continue;
+        }
+        $z = $abbild[$t['kennung']];
+        if (!isset($z['sensor_lage']) || $z['sensor_lage'] === null) {
+            continue;
+        }
+        $lage = (int) $z['sensor_lage'];
+        $text = sprintf(bl_t('TEST.THERMO'), bl_lage_text($lage), (int) (isset($z['sensor_alter']) ? $z['sensor_alter'] : -1),
+                        (string) $z['beaconart'] !== '' ? (string) $z['beaconart'] : '-',
+                        $t['art'] === 'mac' ? bl_bindkey_anzeige($t['mac'], $tab) : '-');
+        if ($lage === 3) {
+            $text .= ' ' . bl_t('TEXT.LAGE_3_HILFE');
+        }
+        $wer = $t['name'] !== '' ? $t['name'] : $t['kennung'];
+        $aus[] = bl_zeile(sprintf(bl_t('PRUEF.THERMO'), $wer), $lage === 0 ? true : ($lage === 1 ? null : false), $text);
+    }
+    return $aus;
 }

@@ -890,6 +890,13 @@ class Dienst:
         self.irk = {}
         self.irk_fehlt_gemeldet = set()
         self.irk_laden()
+        # Gruppe 33 (1.3.29): Bind-Keys je MAC (bindkey.json), Wiederholmerker je MAC, erkannte Messformate je Tag,
+        # Bezugszeit der Frist (Dienststart)
+        self.bindkeys = {}
+        self.mibeacon_merker = {}
+        self.bindkey_laden()
+        self.formate = self._formate_lesen()
+        self.messwert_start = time.monotonic()
         # V2: Taster-Ereignisse je Tag, entprellt ueber die Paket-Id
         # V6-V8/V12: Haus-Themen - zuletzt gesendet, Sollstand, eigene (Merkliste)
         self.haus_stand = {}
@@ -1238,7 +1245,9 @@ class Dienst:
         return self.tagzustand.setdefault(
             kennung, {"anwesend": 0, "stufe": 0, "seit_mono": None,
                       "seit_zeit": 0, "ankunft": 0, "ankunft_mono": None, "batterie": None,
-                      "batterie_zeit": 0, "raum": "", "raum_seit": 0})
+                      "batterie_zeit": 0, "raum": "", "raum_seit": 0,
+                      # Gruppe 33: gueltige Messwerte {name: (wert, mono)}, Lage aus dem letzten Paket, Lage/Alter
+                      "mess": {}, "lage_roh": None, "lage": None, "alter": -1})
 
     def _zweig(self, tag):
         return gem.thema_der_kennung(tag["art"], tag["kennung"],
@@ -1299,11 +1308,19 @@ class Dienst:
                 # messenden Geraets im Paket, und nur wenn beide gleich sind,
                 # gehoert der Wert diesem Tag.
                 # V2 (Gruppe 13): BTHome nur mit der Einstellung "bthome".
+                # Gruppe 33: Bind-Key je MAC und der Wiederholmerker fuer MiBeacon v4/v5.
                 gedeutet = bl_beacon.deuten(werte.get("mdata"),
                                             werte.get("sdata"), mac,
-                                            self._zahl("bthome", 0) == 1)
+                                            self._zahl("bthome", 0) == 1,
+                                            self.bindkeys, self.mibeacon_merker)
                 if gedeutet:
                     eintrag["beacon"] = gedeutet
+                    # Gruppe 33: Lage des Pakets und die GUELTIGEN Messwerte mit ihrem Zeitpunkt - eine
+                    # Wiederholung derselben Werbung ist kein neuer Messwert (sie frischt die Frist nicht auf).
+                    eintrag["lage_roh"] = self.LAGE_ROH.get(gedeutet.get("lage", ""), 0)
+                    if gedeutet.get("lage") != "wiederholung":
+                        for name_w, wert_w in (gedeutet.get("werte") or {}).items():
+                            eintrag.setdefault("mess", {})[name_w] = (wert_w, jetzt_m)
                     if gedeutet.get("kennung", "").startswith("IB:"):
                         eintrag["kennung_ib"] = gedeutet["kennung"]
                     # V2 (Gruppe 13): ein Taster-Ereignis zaehlt nur mit NEUER Paket-Id - Shelly BLU
@@ -1571,10 +1588,10 @@ class Dienst:
                 self._senden("{0}/battery_ts".format(zweig),
                              int(zustand["batterie_zeit"]), erzwingen)
 
-            if eintrag and eintrag.get("beacon"):
-                for name, wert in (eintrag["beacon"].get("werte") or {}).items():
-                    if name in bl_beacon.SENSORTHEMEN:
-                        self._senden("{0}/sensor/{1}".format(zweig, name), wert, erzwingen)
+            # Gruppe 33: Messwerte mit Frist, -999/-1, sensor/lage und sensor/alter (vorher: nur solange der
+            # Eintrag lebte - ein verstummter Fuehler liess seinen letzten Wert in Loxone stehen, N11).
+            if eintrag and eintrag.get("beacon") or self.formate.get(kennung):
+                self._messwerte(tag, zweig, eintrag, zustand, erzwingen)
 
             if eintrag and eintrag.get("taster"):
                 with self.sperre:
@@ -1679,6 +1696,10 @@ class Dienst:
             # wurde - .get("beacon", {}) liefert dann None, nicht {}.
             "sensor": ((eintrag or {}).get("beacon") or {}).get("werte", {}),
             "beaconart": bl_beacon.beschriftung((eintrag or {}).get("beacon")),
+            # Gruppe 33: Lage/Alter der Messwerte und die MiBeacon-Fassung - nie ein Schluessel.
+            "sensor_lage": zustand.get("lage"),
+            "sensor_alter": zustand.get("alter", -1),
+            "beacon_version": ((eintrag or {}).get("beacon") or {}).get("version"),
         }
 
     def _referenz(self, tag, eintrag):
@@ -2124,6 +2145,9 @@ class Dienst:
             # V1/V6 (Gruppe 13): Lage fuer den Reiter Test - IRK-Weg und Haus-Themen
             "irk": {"an": 1 if self._zahl("irk_aufloesen", 0) == 1 else 0, "weg": gem.aes_weg(),
                     "namen": sorted(self.irk)},
+            # Gruppe 33: wie viele Bind-Keys der Dienst geladen hat (Zahl, nie MAC oder Schluessel) und die Frist
+            "bindkeys": {"anzahl": len(self.bindkeys), "weg": gem.aes_weg(),
+                         "frist": min(21600, max(300, self._zahl("messwert_frist", 1800)))},
             "haus": {"themen": sorted(self.haus_soll), "eigen": sorted(self.haus_eigen),
                      "zaehler": self.haus_zaehler},
             "zaehler": self.zaehler,
@@ -2672,6 +2696,7 @@ class Dienst:
         # anwesend_gesamt (V10) bzw. present retained auf dem letzten Wert stehen.
         entfallen |= {"person/" + p for p in alte_personen - self._personen_der_tags()}
         self.irk_laden()
+        self.bindkey_laden()       # Gruppe 33: neuer Schluessel ohne Neustart
         # Auch abgehakte Tags: fuer sie wird nichts mehr gesendet, ihr
         # letzter Wert stuende sonst fuer immer retained im Broker.
         for t in self.tags:
@@ -2801,6 +2826,93 @@ class Dienst:
                          erzwingen=True, abstand=30)
             if self.letzter_stand.get("scanner/{0}/status/zaehler".format(self.scanner)) == str(naechster):
                 self.zaehler_scanner = naechster
+
+    # -- Gruppe 33 (1.3.29): Messwerte je Thermometer --------------------------
+
+    # Lage aus dem letzten Paket (bl_beacon.mibeacon "lage"): 2 verschluesselt ohne Schluessel, 3 Schluessel passt
+    # nicht (MIC), 5 alte Form; alles andere (offen, entschluesselt, Wiederholung, andere Formate) ist lesbar = 0.
+    LAGE_ROH = {"kein_schluessel": 2, "schluessel_falsch": 3, "alte_form": 5}
+
+    def bindkey_laden(self):
+        """Bind-Keys aus bindkey.json (0600) - beim Start und bei jedem Neueinlesen. Der Wiederholmerker wird bei
+        einer Aenderung geleert (ein neuer Schluessel rechnet das naechste Paket neu). Nie der Schluessel im Protokoll."""
+        neu = gem.bindkey_lesen()
+        if neu != self.bindkeys:
+            with self.sperre:
+                self.mibeacon_merker = {}
+            log.info("Bind-Keys: %d hinterlegt (AES ueber %s).", len(neu), gem.aes_weg())
+        self.bindkeys = neu
+
+    def _formate_lesen(self):
+        aus = {}
+        for z in self._merker_lesen(gem.FORMATE_MERKER).splitlines():
+            k, _s, art = z.partition("=")
+            if k and art in bl_beacon.FORMAT_GROESSEN:
+                aus[k] = art
+        return aus
+
+    def _formate_schreiben(self):
+        self._merker_schreiben(gem.FORMATE_MERKER, "\n".join("%s=%s" % p for p in sorted(self.formate.items())))
+
+    def _messwerte(self, tag, zweig, eintrag, zustand, erzwingen):
+        """Messwerte eines aktiven Tags senden (E-E9/E-E10).
+
+        Thermometer (das erkannte Format kennt Temperatur oder Feuchte): Werte aus den GUELTIGEN Messungen mit ihrem
+        Zeitpunkt; nach der Frist messwert_frist temperatur -999 (-1 GradC ist ein echter Wert), feuchte -1; batterie
+        -1 nach 24 h ohne Batteriesatz (sparsame Fuehler melden sie stuendlich). Nach dem Dienststart gehen die
+        Fehlwerte erst nach der Frist hinaus - kein Flackern nach jedem Neustart. Dazu sensor/lage (retained) und
+        sensor/alter (s seit dem letzten Messwert, -1 nie; hoechstens alle 60 s, beim Lagewechsel sofort).
+        Andere Formate (iBeacon ...): wie bis 1.3.28 die Werte des letzten Pakets."""
+        jetzt = time.monotonic()
+        b = (eintrag or {}).get("beacon") or {}
+        art = str(b.get("art", "") or "")
+        if bl_beacon.FORMAT_GROESSEN.get(art) and self.formate.get(tag["kennung"]) != art:
+            self.formate[tag["kennung"]] = art
+            self._formate_schreiben()
+        for name, (wert, mono) in list(((eintrag or {}).get("mess") or {}).items()):
+            alt = zustand["mess"].get(name)
+            if alt is None or mono > alt[1]:
+                zustand["mess"][name] = (wert, mono)
+        if eintrag is not None and eintrag.get("lage_roh") is not None:
+            zustand["lage_roh"] = eintrag["lage_roh"]
+        groessen = bl_beacon.FORMAT_GROESSEN.get(self.formate.get(tag["kennung"], ""), ())
+        if "temperatur" not in groessen and "feuchte" not in groessen:
+            for name, wert in (b.get("werte") or {}).items():
+                if name in bl_beacon.SENSORTHEMEN:
+                    self._senden("{0}/sensor/{1}".format(zweig, name), wert, erzwingen)
+            return
+        frist = min(21600, max(300, self._zahl("messwert_frist", 1800)))
+        start = self.messwert_start
+        zeiten = [zustand["mess"][n][1] for n in ("temperatur", "feuchte") if n in zustand["mess"]]
+        letzte = max(zeiten) if zeiten else None
+        if zustand.get("lage_roh") in (2, 3, 5):
+            lage = zustand["lage_roh"]
+        elif letzte is None:
+            lage = 1 if jetzt - start <= frist else 4
+        else:
+            lage = 0 if jetzt - letzte <= frist else 4
+        for name in groessen:
+            w = zustand["mess"].get(name)
+            thema = "{0}/sensor/{1}".format(zweig, name)
+            if name in ("temperatur", "feuchte", "batterie"):
+                grenze = 86400 if name == "batterie" else frist
+                if w is not None and jetzt - w[1] <= grenze:
+                    self._senden(thema, w[0], erzwingen)
+                elif jetzt - (w[1] if w is not None else start) > grenze:
+                    self._senden(thema, -999 if name == "temperatur" else -1, erzwingen)
+            elif w is not None:
+                self._senden(thema, w[0], erzwingen)
+        alter = int(jetzt - letzte) if letzte is not None else -1
+        vorher = zustand.get("lage")
+        wechsel = vorher != lage
+        if wechsel and lage == 3:
+            # Einmal je Lagewechsel, mit der Bezeichnung - nie der Schluessel, nie die Nutzlast.
+            log.warning("Thermometer %s: der Bind-Key passt nicht (MIC) - er aendert sich bei jedem neuen Koppeln "
+                        "in Mi Home; im Reiter Einstellungen neu holen.", tag.get("name") or zweig)
+        zustand["lage"] = lage
+        zustand["alter"] = alter
+        self._senden("{0}/sensor/lage".format(zweig), lage, erzwingen, wechsel=wechsel)
+        self._senden("{0}/sensor/alter".format(zweig), alter, erzwingen, abstand=60, wechsel=wechsel)
 
     def irk_laden(self):
         """V1: die IRK der konfigurierten irk-Tags aus irk.json - nur mit irk_aufloesen=1.

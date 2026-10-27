@@ -38,6 +38,14 @@ gemeldet, nicht geraten (siehe beschriftung()); der Ausweg ist dort weiterhin
 die freie Firmware, also der ATC-Fall. Die UNVERSCHLUESSELTE Fassung - und
 die sendet das verbreitete MJ_HT_V1 ab Werk - wird gelesen.
 
+SEIT 1.3.29 (Gruppe 33): verschluesselte MiBeacon-Pakete der Fassung 4/5
+werden mit dem Bind-Key des Geraets gelesen (AES-CCM, MIC geprueft, siehe
+mibeacon()); die Qingping-Form (ServiceData 0000fdcd) kommt dazu. Der
+Schluessel liegt in bindkey.json (0600) und kommt von Hand oder aus der
+Xiaomi-Cloud (Reiter Einstellungen). Belegt nach ble_monitor (MIT, nur
+gelesen) und gegen NIST SP 800-38C Anhang C geeicht - nicht an einem
+verschluesselnden Geraet gemessen.
+
 BEWUSST KEINE Bibliothek: TheengsDecoder deckt hunderte Geraete ab, ist aber
 kein Debian-Paket. Ein systemweites pip3 install scheitert auf Bookworm und
 Trixie an PEP 668; das brauchte eine virtuelle Umgebung oder
@@ -55,11 +63,19 @@ Geraet gemessen worden - deshalb die engen Plausibilitaetsgrenzen und
 deshalb nennt die Oberflaeche sie als "zu pruefen".
 """
 
+import os
 import struct
+import sys
+
+# Gruppe 33: AES-CCM und Schluesselform aus bl_common (liegt daneben; auch bei python3 -I auffindbar).
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bl_common as gem   # noqa: E402
 
 EDDYSTONE_UUID = "0000feaa-0000-1000-8000-00805f9b34fb"
 ATC_UUID = "0000181a-0000-1000-8000-00805f9b34fb"
 MIBEACON_UUID = "0000fe95-0000-1000-8000-00805f9b34fb"
+QINGPING_UUID = "0000fdcd-0000-1000-8000-00805f9b34fb"
 APPLE = 0x004C
 RUUVI = 0x0499
 
@@ -293,10 +309,18 @@ def ruuvi(mdata):
 # Anzeige - ein unbekannter Typ wird trotzdem gelesen, solange die Saetze
 # stimmen. Sie zu erweitern kostet nichts und aendert nichts am Verhalten.
 MI_TYPEN = {
-    0x01AA: "LYWSDCGQ/01ZM",      # der runde Mi-Fuehler, am 13.09.2026 gemessen
+    0x01AA: "LYWSDCGQ/01ZM",      # der runde Mi-Fuehler, am 13.09.2026 gemessen (= cleargrass.sensor_ht.dk1)
     0x045B: "LYWSD02",
     0x055B: "LYWSD03MMC",
-    0x0387: "MHO-C303",
+    # Gruppe 33 (N3): 0x0387 ist laut ble_monitor der MHO-C401 (bis 1.3.28 hier "MHO-C303"), der MHO-C303 0x06D3.
+    0x0387: "MHO-C401",
+    0x06D3: "MHO-C303",
+    0x16E4: "LYWSD02MMC",
+    0x2542: "LYWSD02MMC",
+    0x2832: "MJWSD05MMC",
+    0x1203: "XMWSDJ04MMC",
+    0x0347: "CGG1",
+    0x0B48: "CGG1",
     0x02DF: "JQJCY01YM",
     0x0098: "HHCCJCY01",          # Flower Care
     0x03BC: "GCLS002",
@@ -312,14 +336,17 @@ MI_VERSCHLUESSELT = 0x0008
 MI_MAC_DABEI = 0x0010
 MI_CAPABILITY = 0x0020
 MI_WERTE_DABEI = 0x0040
+MI_MESH = 0x0080              # Gruppe 33: Mesh-Pakete verwerfen
 
 
-def mibeacon(sdata, absender=""):
-    r"""ServiceData unter 0000fe95 (Xiaomi / Mijia), unverschluesselte Fassung.
+def mibeacon(sdata, absender="", schluessel=None, merker=None):
+    r"""ServiceData unter 0000fe95 (Xiaomi / Mijia): offen, und seit 1.3.29 auch verschluesselt (v4/v5).
 
     AM GERAET GEMESSEN am 13.09.2026 an einem LYWSDCGQ/01ZM (MJ_HT_V1), und
     zwar an zwei verschiedenen Satzarten - das ist der Unterschied zu atc()
-    und ruuvi(), die nur gegen die Beschreibung geprueft sind.
+    und ruuvi(), die nur gegen die Beschreibung geprueft sind. Das gemessene
+    Paket ist MiBeacon-Fassung 2 (Rahmen 0x2050), nicht 5 (Gruppe 33, N4): wer
+    nach der Fassung verzweigt, darf den offenen Weg nicht an "v >= 4" binden.
 
     EINE EINSCHRAENKUNG, damit das Beispiel nicht mehr behauptet, als es ist:
     die ADRESSE im Beispiel unten und in der Eichung ist durch eine
@@ -334,10 +361,11 @@ def mibeacon(sdata, absender=""):
         -> 26,6 GradC / 48,2 %
 
     Aufbau:
-      * Rahmen  2 Byte, klein zuerst. Bits siehe MI_* oben.
+      * Rahmen  2 Byte, klein zuerst. Bits siehe MI_* oben; Bit 12-15 Fassung.
       * Typ     2 Byte, Geraetetyp (MI_TYPEN).
       * Zaehler 1 Byte, steigt je Werbung - wird als "folge" veroeffentlicht.
       * MAC     6 Byte RUECKWAERTS, nur wenn MI_MAC_DABEI gesetzt ist.
+      * Capability 1 Byte (+1 bei Bit 0x20 darin), nur mit MI_CAPABILITY.
       * dann beliebig viele Saetze: Art 2 Byte, Laenge 1 Byte, Werte.
 
     DIE ABSENDERPRUEFUNG IST DER WICHTIGE TEIL. Das Paket traegt die MAC des
@@ -345,29 +373,44 @@ def mibeacon(sdata, absender=""):
     UUID tragen. Wer die beiden nicht gegeneinander haelt, schreibt fremde
     Temperaturen in den eigenen Tag. Stimmen sie nicht, wird NICHTS geliefert.
 
-    Verschluesselte Pakete (MI_VERSCHLUESSELT, bei neueren Geraeten und nach
-    dem Binden in der Mi-Home-App der Normalfall) brauchen den Bindungs-
-    schluessel. Den gibt es hier nicht, also wird kein Wert erfunden - es wird
-    aber auch nicht geschwiegen: das Ergebnis traegt "hinweis" und leere
-    Werte, damit die Oberflaeche den Grund nennen kann.
+    VERSCHLUESSELT (Gruppe 33, 1.3.29; Ablauf nach ble_monitor xiaomi.py, MIT, nur gelesen):
+      * v4/v5: Nutzlast = Chiffre | erweiterter Zaehler 3 Byte | MIC 4 Byte. Nonce 12 Byte = MAC rueckwaerts (6)
+        + Typ und Zaehler (Byte 2-4, 3) + erweiterter Zaehler (3); AAD 0x11; AES-CCM mit dem Bind-Key des Geraets
+        (schluessel = {MAC: (16 Byte, "v45")}, aus bindkey.json). Der MIC wird GEPRUEFT: passt er nicht, kommt
+        kein Wert, sondern lage "schluessel_falsch" (falsche Zahlen sind schlimmer als keine).
+      * v2/v3 verschluesselt ("alte Form", 12-Byte-Schluessel): ohne pruefbaren MIC waere jeder falsche Schluessel
+        ein falscher Messwert - deshalb NICHT entschluesselt, lage "alte_form" (Entscheidung E-E4).
+      * ohne Schluessel: lage "kein_schluessel", Hinweis "verschluesselt", leere Werte - wie bis 1.3.28.
+      * merker (dict je MAC, vom Dienst gehalten): dieselbe Werbung kommt mehrfach (gleicher Zaehler und
+        erweiterter Zaehler) - sie wird nicht neu gerechnet, sondern als lage "wiederholung" mit den Werten der
+        ersten zurueckgegeben (der Dienst wertet sie nicht als neuen Messwert; zugleich Wiederholschutz).
+    Die Plausibilitaetsgrenzen (GRENZEN) gelten NACH dem Entschluesseln.
+    Neue Satzarten (ble_monitor obj4803/obj4c01/obj4c02/obj4c08): 0x4803 Batterie (1 Byte %), 0x4C01 Temperatur
+    (float32, klein zuerst), 0x4C02 Feuchte (1 Byte %), 0x4C08 Feuchte (float32); gerundet auf 0,1 wie der Bestand.
     """
     roh = (sdata or {}).get(MIBEACON_UUID)
     if not roh or len(roh) < 5:
         return None
 
     rahmen, typ = struct.unpack("<HH", roh[0:4])
+    version = rahmen >> 12
+    # Gruppe 33: Mesh-Pakete und Fassung < 2 verwerfen (wie ble_monitor).
+    if rahmen & MI_MESH or version < 2:
+        return None
     zaehler = roh[4]
     out = {"art": "mibeacon", "kennung": "", "ref_1m": None, "werte": {},
-           "geraet": MI_TYPEN.get(typ, "0x%04X" % typ)}
+           "geraet": MI_TYPEN.get(typ, "0x%04X" % typ), "version": version, "lage": "offen"}
 
+    mac = str(absender or "").upper()
     i = 5
     if rahmen & MI_MAC_DABEI:
         if len(roh) < i + 6:
             return None
-        mac = ":".join("%02X" % b for b in roh[i:i + 6][::-1])
+        im_paket = ":".join("%02X" % b for b in roh[i:i + 6][::-1])
         i += 6
-        if absender and mac != str(absender).upper():
+        if absender and im_paket != mac:
             return None
+        mac = im_paket
     if rahmen & MI_CAPABILITY:
         # B14 (Gruppe 13): das Capability-Byte lesen; ist darin 0x20 (I/O-Capability)
         # gesetzt, folgt EIN weiteres Byte (wie xiaomi-ble parser.py und ble_monitor
@@ -380,41 +423,118 @@ def mibeacon(sdata, absender=""):
         if cap & 0x20:
             i += 1
 
-    if rahmen & MI_VERSCHLUESSELT:
-        out["hinweis"] = "verschluesselt"
-        return out
-
     if not rahmen & MI_WERTE_DABEI:
         return None
+    nutz = roh[i:]
+    merk = None
+    if rahmen & MI_VERSCHLUESSELT:
+        if version <= 3:
+            out["lage"] = "alte_form"
+            out["hinweis"] = "verschluesselt (alte Form)"
+            return out
+        eintrag = (schluessel or {}).get(mac) if mac else None
+        if not eintrag or eintrag[1] != "v45":
+            out["lage"] = "kein_schluessel"
+            out["hinweis"] = "verschluesselt"
+            return out
+        if len(nutz) < 1 + 7:
+            return None
+        ext, mic = bytes(nutz[-7:-4]), bytes(nutz[-4:])
+        merk = (zaehler, ext)
+        if merker is not None and (merker.get(mac) or (None,))[0] == merk:
+            out["lage"] = "wiederholung"
+            out["hinweis"] = "entschluesselt"
+            out["werte"] = dict(merker[mac][1])
+            return out
+        nonce = bytes.fromhex(mac.replace(":", ""))[::-1] + bytes(roh[2:5]) + ext
+        klar = gem.ccm_entschluesseln(eintrag[0], nonce, nutz[:-7], mic)
+        if klar is None:
+            out["lage"] = "schluessel_falsch"
+            out["hinweis"] = "Schluessel passt nicht"
+            return out
+        out["lage"] = "entschluesselt"
+        out["hinweis"] = "entschluesselt"
+        nutz = klar
 
-    _sammle(out["werte"], "folge", zaehler)
-    while i + 3 <= len(roh):
-        art, laenge = struct.unpack("<HB", roh[i:i + 3])
-        i += 3
-        daten = roh[i:i + laenge]
-        i += laenge
+    w = out["werte"]
+    _sammle(w, "folge", zaehler)
+    j = 0
+    while j + 3 <= len(nutz):
+        art, laenge = struct.unpack("<HB", nutz[j:j + 3])
+        j += 3
+        daten = nutz[j:j + laenge]
+        j += laenge
         if len(daten) < laenge:
             break
         # Nur die Saetze, fuer die es ein Thema gibt (SENSORTHEMEN). Ein
         # Bodenfeuchte- oder Leitwertsatz eines Blumenfuehlers wird bewusst
         # uebergangen statt unter einem erfundenen Namen veroeffentlicht.
         if art == 0x1004 and laenge == 2:
-            _sammle(out["werte"], "temperatur",
-                    round(struct.unpack("<h", daten)[0] / 10.0, 1))
+            _sammle(w, "temperatur", round(struct.unpack("<h", daten)[0] / 10.0, 1))
         elif art == 0x1006 and laenge == 2:
-            _sammle(out["werte"], "feuchte",
-                    round(struct.unpack("<H", daten)[0] / 10.0, 1))
+            _sammle(w, "feuchte", round(struct.unpack("<H", daten)[0] / 10.0, 1))
         elif art == 0x100A and laenge == 1:
-            _sammle(out["werte"], "batterie", float(daten[0]))
+            _sammle(w, "batterie", float(daten[0]))
         elif art == 0x100D and laenge == 4:
+            grad, feucht = struct.unpack("<hH", daten)
+            _sammle(w, "temperatur", round(grad / 10.0, 1))
+            _sammle(w, "feuchte", round(feucht / 10.0, 1))
+        elif art == 0x4803 and laenge == 1:
+            _sammle(w, "batterie", float(daten[0]))
+        elif art == 0x4C01 and laenge == 4:
+            _sammle(w, "temperatur", round(struct.unpack("<f", daten)[0], 1))
+        elif art == 0x4C02 and laenge == 1:
+            _sammle(w, "feuchte", float(daten[0]))
+        elif art == 0x4C08 and laenge == 4:
+            _sammle(w, "feuchte", round(struct.unpack("<f", daten)[0], 1))
+
+    # "folge" allein ist kein Messwert - dann ist nichts Brauchbares dabei.
+    if set(w) <= {"folge"}:
+        return None
+    if merker is not None and merk is not None:
+        merker[mac] = (merk, dict(w))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Qingping (ClearGrass), ServiceData 0000fdcd - Gruppe 33 (1.3.29)
+# ---------------------------------------------------------------------------
+#
+# Nach ble_monitor qingping.py (MIT, nur gelesen): Byte 0 Rahmen, Byte 1 Geraetekennung, Byte 2-7 MAC
+# rueckwaerts (gegen den Absender geprueft), dann Saetze Kennung 1 Byte / Laenge 1 Byte / Wert:
+#   0x01 (4 Byte): Temperatur int16/10, Feuchte uint16/10   0x02 (1 Byte): Batterie %
+# Keine Verschluesselung in dieser Form. CGDN1 (0x0E/0x24) traegt die MAC anders - nicht aufgenommen.
+# Ein CGDK2 sendet beides (Qingping offen + MiBeacon verschluesselt): deuten() fragt Qingping VOR MiBeacon.
+
+QP_TYPEN = {0x01: "CGG1", 0x07: "CGG1", 0x09: "CGP1W", 0x0C: "CGD1", 0x10: "CGDK2", 0x12: "CGPR1", 0x18: "CGP23W"}
+
+
+def qingping(sdata, absender=""):
+    """Qingping-Form aus ServiceData[0000fdcd-...], unverschluesselt. Rueckgabe dict oder None."""
+    roh = (sdata or {}).get(QINGPING_UUID)
+    if not roh or len(roh) < 10:
+        return None
+    if roh[1] not in QP_TYPEN:
+        return None
+    mac = ":".join("%02X" % b for b in roh[2:8][::-1])
+    if absender and mac != str(absender).upper():
+        return None
+    out = {"art": "qingping", "kennung": "", "ref_1m": None, "werte": {},
+           "geraet": QP_TYPEN[roh[1]], "lage": "offen"}
+    i = 8
+    while i + 2 <= len(roh):
+        kenn, laenge = roh[i], roh[i + 1]
+        daten = roh[i + 2:i + 2 + laenge]
+        i += 2 + laenge
+        if len(daten) < laenge:
+            break
+        if kenn == 0x01 and laenge == 4:
             grad, feucht = struct.unpack("<hH", daten)
             _sammle(out["werte"], "temperatur", round(grad / 10.0, 1))
             _sammle(out["werte"], "feuchte", round(feucht / 10.0, 1))
-
-    # "folge" allein ist kein Messwert - dann ist nichts Brauchbares dabei.
-    if set(out["werte"]) <= {"folge"}:
-        return None
-    return out
+        elif kenn == 0x02 and laenge == 1:
+            _sammle(out["werte"], "batterie", float(daten[0]))
+    return out if out["werte"] else None
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +638,7 @@ def bthome(sdata):
     return out
 
 
-def deuten(mdata, sdata, absender="", bthome_an=True):
+def deuten(mdata, sdata, absender="", bthome_an=True, schluessel=None, merker=None):
     """Alle Dekoder der Reihe nach. Rueckgabe: dict oder None.
 
     Ergebnis:
@@ -537,6 +657,9 @@ def deuten(mdata, sdata, absender="", bthome_an=True):
 
     bthome_an (Gruppe 13, V2): BTHome v2 nur mit der Einstellung "bthome" (der Dienst
     reicht sie durch; die Geraetesuche zeigt das Format immer an).
+
+    schluessel/merker (Gruppe 33): Bind-Keys {MAC: (Schluessel, Form)} und der Wiederholmerker des Dienstes,
+    durchgereicht an mibeacon(). Qingping (0xFDCD, offen) kommt VOR MiBeacon.
     """
     for fn, arg in ((ibeacon, mdata), (ruuvi, mdata),
                     (eddystone, sdata), (atc, sdata)):
@@ -554,7 +677,13 @@ def deuten(mdata, sdata, absender="", bthome_an=True):
         if erg:
             return erg
     try:
-        erg = mibeacon(sdata, absender)
+        erg = qingping(sdata, absender)
+    except (struct.error, IndexError, TypeError, ValueError):
+        erg = None
+    if erg:
+        return erg
+    try:
+        erg = mibeacon(sdata, absender, schluessel, merker)
     except (struct.error, IndexError, TypeError, ValueError):
         erg = None
     return erg or None
@@ -574,6 +703,8 @@ def beschriftung(gedeutet):
     art = str(gedeutet.get("art", "") or "")
     hinweis = str(gedeutet.get("hinweis", "") or "")
     geraet = str(gedeutet.get("geraet", "") or "")
+    if gedeutet.get("version"):
+        art = "%s v%d" % (art, int(gedeutet["version"]))     # Gruppe 33: Fassung (mibeacon v2 / v5)
     if geraet and geraet not in art:
         art = (art + " " + geraet).strip()
     return (art + " (" + hinweis + ")") if hinweis and art else (art or hinweis)
@@ -608,7 +739,8 @@ def beschriftung(gedeutet):
 # Rueckfall bl_sensor_text() wurde nie aufgerufen und ist seit 1.3.25
 # weg). Fehlt der Rueckfalleintrag, meldet es die Pruefzeile.
 SENSORTHEMEN = {
-    "temperatur":  ("Temperatur", "°C", -45, 90),
+    # Gruppe 33 (N7): MinVal -999 - ohne Aussage geht -999 hinaus (-1 GradC ist eine echte Temperatur).
+    "temperatur":  ("Temperatur", "°C", -999, 90),
     "feuchte":     ("Relative Luftfeuchte", "%", 0, 100),
     "druck":       ("Luftdruck", "hPa", 500, 1200),
     "batterie":    ("Batteriestand", "%", 0, 100),
@@ -621,6 +753,11 @@ SENSORTHEMEN = {
     "helligkeit":  ("Beleuchtungsstärke", "lx", 0, 120000),
     "fenster":     ("Fensterkontakt", "", 0, 1),
     "bewegungsmelder": ("Bewegungsmelder", "", 0, 1),
+    # Gruppe 33 (1.3.29): je Thermometer (Format mit Temperatur oder Feuchte) - kein Dekoder sammelt sie,
+    # der Dienst rechnet sie (lage 0 frisch, 1 noch kein Messwert seit dem Start, 2 verschluesselt ohne
+    # Schluessel, 3 Schluessel passt nicht, 4 veraltet, 5 alte Form; alter = s seit dem letzten Messwert, -1 nie).
+    "lage":        ("Lage der Messwerte", "", 0, 5),
+    "alter":       ("Alter der Messwerte", "s", -1, 2147483647),
 }
 
 # Welches Format kann WELCHE Groessen liefern? Fuer die Loxone-Vorlage.
@@ -658,6 +795,7 @@ FORMAT_GROESSEN = {
     "atc":       ("temperatur", "feuchte", "batterie", "batterie_mv"),
     "ruuvi":     ("temperatur", "feuchte", "druck", "batterie_mv", "bewegung", "folge"),
     "mibeacon":  ("temperatur", "feuchte", "batterie", "folge"),
+    "qingping":  ("temperatur", "feuchte", "batterie"),
     "bthome":    ("temperatur", "feuchte", "batterie", "batterie_mv", "helligkeit", "fenster",
                   "bewegungsmelder"),
 }
@@ -772,12 +910,14 @@ def eichung():
     #     EICHUNG der Bitmaske: 0x08 gesetzt heisst verschluesselt. Haelt man
     #     wie ich zuerst 0x40 dafuer, wird das GEMESSENE Paket oben als
     #     unlesbar gemeldet - dann sind die drei Zeilen davor rot.
+    #     Gruppe 33: 0x2058 ist Fassung 2 VERSCHLUESSELT ("alte Form") - wird nicht entschluesselt (E-E4).
     miv = bytes.fromhex("5820AA0183FFEEDDCCBBAA9999")
     erg = mibeacon({MIBEACON_UUID: miv}, "AA:BB:CC:DD:EE:FF")
     pruefe("MiBeacon verschluesselt erkannt",
-           erg and erg.get("hinweis"), "verschluesselt")
+           erg and erg.get("hinweis"), "verschluesselt (alte Form)")
     pruefe("MiBeacon verschluesselt ohne erfundene Werte",
            erg and erg["werte"], {})
+    pruefe("MiBeacon alte Form: Lage", erg and erg.get("lage"), "alte_form")
     #     Ein Paket ohne Wertebit ist kein Messpaket.
     pruefe("MiBeacon ohne Wertebit",
            mibeacon({MIBEACON_UUID: bytes.fromhex("1020AA0183FFEEDDCCBBAA")},
@@ -797,6 +937,44 @@ def eichung():
     pruefe("MiBeacon Capability 0x21 + IO-Byte", erg and erg["werte"].get("temperatur"), 26.6)
     pruefe("MiBeacon Capability ohne Byte (Laenge)",
            mibeacon({MIBEACON_UUID: bytes.fromhex("7020AA0183FFEEDDCCBBAA")}, "AA:BB:CC:DD:EE:FF"), None)
+
+    # --- Gruppe 33 (1.3.29): AES-CCM und MiBeacon verschluesselt, Qingping. Die Pakete wurden mit einer zweiten,
+    #     unabhaengigen Umsetzung (python3-cryptography AESCCM) erzeugt; Platzhalter-MAC, Testschluessel 000102...0f.
+    for name, ok_ in ccm_eichung()[2]:
+        pruefe(name, ok_, True)
+    mv5 = bytes.fromhex(MV5_TESTPAKET)
+    mac5 = "11:" + "BB:CC:DD:EE:FF"
+    sch = {mac5: (bytes(range(16)), "v45")}
+    erg = mibeacon({MIBEACON_UUID: mv5}, mac5, sch)
+    pruefe("MiBeacon v5 entschluesselt (LYWSD03MMC, 21,7 GradC)",
+           erg and (erg["lage"], erg["werte"].get("temperatur"), erg["geraet"], erg["version"]),
+           ("entschluesselt", 21.7, "LYWSD03MMC", 5))
+    erg = mibeacon({MIBEACON_UUID: mv5}, mac5, {mac5: (bytes([0xFF] * 16), "v45")})
+    pruefe("MiBeacon v5 falscher Schluessel -> keine Werte (MIC)", erg and (erg["lage"], erg["werte"]),
+           ("schluessel_falsch", {}))
+    erg = mibeacon({MIBEACON_UUID: mv5}, mac5, {})
+    pruefe("MiBeacon v5 ohne Schluessel -> Hinweis", erg and (erg["lage"], erg.get("hinweis")),
+           ("kein_schluessel", "verschluesselt"))
+    erg = mibeacon({MIBEACON_UUID: mv5}, mac5, {mac5: (bytes(12), "alt")})
+    pruefe("MiBeacon v5 mit 24-Hex-Schluessel -> kein Schluessel", erg and erg["lage"], "kein_schluessel")
+    mk = {}
+    a = mibeacon({MIBEACON_UUID: mv5}, mac5, sch, mk)
+    b = mibeacon({MIBEACON_UUID: mv5}, mac5, sch, mk)
+    pruefe("MiBeacon gleiche Werbung zweimal -> Wiederholung", (a and a["lage"], b and b["lage"],
+           b and b["werte"] == a["werte"]), ("entschluesselt", "wiederholung", True))
+    pruefe("MiBeacon v5 ueber deuten() mit Schluessel",
+           (deuten({}, {MIBEACON_UUID: mv5}, mac5, False, sch) or {}).get("lage"), "entschluesselt")
+    qp = bytes.fromhex("8810FFEEDDCCBB11" "0104EA000002" "02014D")
+    erg = qingping({QINGPING_UUID: qp}, mac5)
+    pruefe("Qingping CGDK2 (23,4 GradC, 51,2 %, 77 %)",
+           erg and (erg["geraet"], erg["werte"]), ("CGDK2", {"temperatur": 23.4, "feuchte": 51.2, "batterie": 77.0}))
+    pruefe("Qingping fremder Absender verworfen", qingping({QINGPING_UUID: qp}, "22:" + "BB:CC:DD:EE:FF"), None)
+    pruefe("Qingping ueber deuten()", (deuten({}, {QINGPING_UUID: qp}, mac5) or {}).get("art"), "qingping")
+    #     (die Schreibweise mit Doppelpunkten wird zusammengesetzt - als Literal hielte das Freigabetor sie fuer MACs)
+    pruefe("Schluesselform: 32 Hex mit Doppelpunkten, gross", gem.schluessel_lesen(
+        " " + ":".join("%02X" % b for b in range(16)) + " ")[1], "v45")
+    pruefe("Schluesselform: 24 Hex alte Form, 31 Hex abgewiesen",
+           (gem.schluessel_lesen("0" * 24)[1], gem.schluessel_lesen("0" * 31)), ("alt", (None, "")))
 
     # --- V2 (Gruppe 13): BTHome v2, Beispiele aus https://bthome.io/format/ (gelesen 24.10.2026).
     #     Beispielpaket der Seite: 40 02C409 03BF13 -> 25,00 GradC, 50,55 %.
@@ -861,7 +1039,44 @@ def eichung():
     return bestanden, gesamt, fehler
 
 
+# ---------------------------------------------------------------------------
+# Gruppe 33 (1.3.29): Eichung des AES-CCM-Wegs (Reiter Test, Pruefzeile "AES-CCM (MiBeacon)")
+# ---------------------------------------------------------------------------
+# NIST SP 800-38C Anhang C, Beispiel 1 und 2 (Schluessel 40..4f), dazu das MiBeacon-Testpaket unten - ueber
+# denselben Weg, den der Dienst nimmt (bl_common.aes128: cryptography, wenn vorhanden, sonst rein).
+# Testpaket (v5, LYWSD03MMC, Zaehler 0x21, 0x1004 = 21,7 GradC), erzeugt mit python3-cryptography AESCCM:
+MV5_TESTPAKET = "58505b0521" "ffeeddccbb11" "1f1aa8351c" "010203" "2a9125f5"
+
+
+def ccm_eichung():
+    """Rueckgabe (alle_gut, weg, [(text, gut), ...]). Ein verfaelschtes Bit muss None ergeben."""
+    k = bytes.fromhex("404142434445464748494a4b4c4d4e4f")
+    faelle = []
+    for nr, n, a, p, c, m in (
+            (1, "10111213141516", "0001020304050607", "20212223", "7162015b4dac255d", 4),
+            (2, "1011121314151617", "000102030405060708090a0b0c0d0e0f", "202122232425262728292a2b2c2d2e2f",
+             "d2a1f0e051ea5f62081a7792073d593d1fc64fbfaccd", 6)):
+        n, a, p, c = bytes.fromhex(n), bytes.fromhex(a), bytes.fromhex(p), bytes.fromhex(c)
+        faelle.append(("AES-CCM Anhang C, Beispiel %d" % nr,
+                       gem.ccm_entschluesseln(k, n, c[:-m], c[-m:], a) == p))
+        kaputt = bytes([c[0] ^ 1]) + c[1:]
+        faelle.append(("AES-CCM Anhang C, Beispiel %d mit einem falschen Bit -> nichts" % nr,
+                       gem.ccm_entschluesseln(k, n, kaputt[:-m], kaputt[-m:], a) is None))
+    mac5 = "11:" + "BB:CC:DD:EE:FF"
+    erg = mibeacon({MIBEACON_UUID: bytes.fromhex(MV5_TESTPAKET)}, mac5, {mac5: (bytes(range(16)), "v45")})
+    faelle.append(("MiBeacon-Testpaket entschluesselt", bool(erg) and erg.get("werte", {}).get("temperatur") == 21.7))
+    return all(g for _t, g in faelle), gem.aes_weg(), faelle
+
+
 if __name__ == "__main__":
+    import sys
+    if "--ccm" in sys.argv:
+        # Gruppe 33: eine JSON-Zeile fuer den Reiter Test (bl_test.php, Pruefzeile AES-CCM).
+        import json
+        gut, weg, faelle = ccm_eichung()
+        print(json.dumps({"ok": gut, "weg": weg, "faelle": len(faelle),
+                          "fehler": [t for t, g in faelle if not g]}, ensure_ascii=False))
+        raise SystemExit(0 if gut else 1)
     ok, alle, meldungen = eichung()
     print("Eichung der Beacon-Dekoder: %d von %d bestanden" % (ok, alle))
     for m in meldungen:
