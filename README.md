@@ -1,11 +1,25 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.29
+Version 1.3.30
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.30
+
+Pflegefassung der Nachtwelle (29.10.2026), ohne neue Funktion und ohne Änderung am Verhalten:
+
+* **Befehlsbrücke 1.0.2** (gemeinsame Stammfassung). Die Vorlage „MQTT-Befehle“ (`VQ_BLE-Scanner-NG_MQTT.xml`) baut das Plugin selbst; sie hatte schon
+  Windows-Zeilenenden (CRLF). Ein Neuimport ist nicht nötig.
+* **Reiter Test, neue Zeile „Gateway V2: sind alle Datenpunkte der Hakenliste angehakt?“** Unter MQTT-Gateway V2
+  liest das Plugin `config/system/subscriptions.json` und nennt jeden Datenpunkt des Musterprojekts (Reiter Einbindung, Spalte „Musterprojekt“; Textthemen ausgenommen),
+  der dort nicht angehakt ist, und jeden, bei dem „Noncached“ nicht stimmt (`server/ok` braucht es, die übrigen nicht).
+  Unter Gateway V1 und bei ausgeschalteter MQTT-Veröffentlichung heißt die Zeile „trifft nicht zu“.
+* **Xiaomi-Cloud 1.0.1** (gemeinsames Modul, wie Saugroboter und Xiaomi Licht). Der Abruf der Bind-Keys bleibt,
+  wie er war: ein Gerät je Übernahme. Neu im Modul sind die Mehrfachauswahl und ein Captcha beim Code-Versand –
+  dieses Plugin bietet beides nicht an; lehnt Xiaomi den Versand ab, meldet der Kasten das wie bisher.
 
 ## Neu in 1.3.29
 

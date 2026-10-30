@@ -1188,6 +1188,9 @@ function bl_pruefzeilen($cfg, $tags)
     $zeilen[] = bl_zeile(bl_t('PRUEF.VORLAGE'), $ok, $meldung);
     list($ok, $meldung) = bl_pruef_namen($cfg, $tags);
     $zeilen[] = bl_zeile(bl_t('PRUEF.NAMEN'), $ok, $meldung);
+    // Nachtwelle N4 (1.3.30): Haken unter MQTT-Gateway V2 (Musterprojekt-Zeilen der Namenstabelle, ohne Textthemen)
+    list($ok, $meldung) = bl_v2_haken_lage($cfg, $tags);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.V2_HAKEN'), $ok === 2 ? null : ($ok === 1), $meldung);
     list($ok, $meldung) = bl_pruef_lebenszeichen($status, $gilt, $grund);
     $zeilen[] = bl_zeile(bl_t('PRUEF.LEBENSZEICHEN'), $ok, $meldung);
     list($ok, $meldung) = bl_pruef_reserviert($tags);

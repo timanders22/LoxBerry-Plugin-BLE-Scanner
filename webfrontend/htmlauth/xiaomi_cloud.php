@@ -1,11 +1,16 @@
 <?php
 /*
- * xiaomi_cloud.php - gemeinsames Stammmodul "Xiaomi-Cloud" 1.0.0 (Gruppe 33, 27.10.2026; Stammfassung
+ * xiaomi_cloud.php - gemeinsames Stammmodul "Xiaomi-Cloud" 1.0.1 (Gruppe 33, 27.10.2026; Stammfassung
  * Werkzeuge/gemeinsam/xiaomi_cloud.php, byte-gleich verteilt wie Befehlsbruecke/Sprachmodul). Herausgeloest aus dem
  * Saugroboter 1.1.23 (robo_lib.php ro_cloud_*). Linieneigen bleiben: Oberflaeche, Uebernahme in die Geraetezeile,
  * Sprachtexte der Lagen. Abhaengigkeiten: keine (kein ro_*, kein bl_*); PHP 7.4/8.4/8.5, nur Stream-Wrapper https.
+ * 1.0.1 (Gruppe 34, 27.10.2026): neu xc_auswahl_mehrere() - mehrere Geraete aus EINER Auswahl (ein Griff, danach
+ * geloescht); dazu je Geraet das Feld 'online' (isOnline der Cloud: 1/0, -1 unbekannt) in Liste und Anzeige - nur
+ * hinzugefuegt, kein Feld geaendert. xc_code_anfordern(): Antwort von Xiaomi bei SENDEN ('art' SPERRE/CAPTCHA/UNBEKANNT,
+ * 'code', 'grund'), Versand-Captcha mit $icode (neu xc_sendefehler(), xc_bild_holen()); Lage SENDEN bleibt.
+ * Alle uebrigen Funktionen, auch xc_auswahl_nehmen(), unveraendert.
  */
-define('XC_FASSUNG', '1.0.0');
+define('XC_FASSUNG', '1.0.1');
 
 /** Ordner der Zwischenstaende (Captcha, Zweitfaktor, Auswahl; je 0600, <= 10 min). Die Linie setzt ihn einmal. */
 function xc_ablage($ordner = null)
@@ -59,6 +64,35 @@ function xc_auswahl_nehmen($index)
 {
     $d = xc_nehmen('auswahl');
     return ($d !== null && isset($d['liste'][(int) $index])) ? array('zeile' => (int) $d['zeile'], 'geraet' => $d['liste'][(int) $index]) : null;
+}
+
+/**
+ * 1.0.1 (Gruppe 34, 27.10.2026): MEHRERE Eintraege der Auswahl in EINEM Griff nehmen - die Liste wird einmal gelesen
+ * und dabei sofort geloescht wie bei xc_auswahl_nehmen() (eine Anmeldung, eine Uebernahme). $indizes: die angehakten
+ * Indizes der Anzeige (ganze Zahlen >= 0; doppelte zaehlen einmal, unbekannte fallen weg, hoechstens 100).
+ * Rueckgabe array(Index => Geraet mit Token/Bind-Key) in der Reihenfolge der Liste, oder null = keine Auswahl mehr
+ * (abgelaufen oder schon genommen). Nichts angehakt: es wird NICHTS genommen - die Liste bleibt fuer einen zweiten
+ * Versuch liegen (Rueckgabe array(), oder null, wenn sie schon abgelaufen ist). Die Linie uebernimmt.
+ */
+function xc_auswahl_mehrere(array $indizes)
+{
+    $wahl = array();
+    foreach ($indizes as $i) {
+        if ((is_int($i) || (is_string($i) && preg_match('/^[0-9]{1,4}\z/', $i))) && (int) $i >= 0 && count($wahl) < 100) {
+            $wahl[(int) $i] = true;
+        }
+    }
+    if (!$wahl) {
+        return xc_lesen('auswahl') === null ? null : array();
+    }
+    $d = xc_nehmen('auswahl');
+    if ($d === null || !isset($d['liste']) || !is_array($d['liste'])) { return null; }
+    $aus = array();
+    foreach ($d['liste'] as $i => $g) {
+        if (isset($wahl[(int) $i]) && is_array($g)) { $aus[(int) $i] = $g; }
+    }
+    unset($d);
+    return $aus;
 }
 
 /* ==================================================================
@@ -354,11 +388,17 @@ function xc_zweitfaktor_beginnen($link, array $dose, array $ziele)
  * Den Code anfordern (Extractor Schritt 3 sendEmailTicket fuer Mail; fuer SMS derselbe Aufbau an sendPhoneTicket -
  * UNGEPRUEFT, in den gelesenen Quellen steht nur die Pruefung verifyPhone; klappt der Versand nicht, bleibt der Prueflink
  * von Xiaomi). $weg 'mail' | 'sms'. Der Zwischenzustand bleibt (mit dem gewaehlten Weg, Ablauf ab dem Beginn).
- * Rueckgabe array('lage' => CODE_GESENDET | WEG | ABGELAUFEN | SENDEN | NETZ | ZIEL | SCHREIBEN, 'weg').
+ * Rueckgabe array('lage' => CODE_GESENDET | WEG | ABGELAUFEN | SENDEN | NETZ | ZIEL | SCHREIBEN | LOESUNG, 'weg').
+ * 1.0.1 (Geraetetest 27.10.): bei SENDEN zusaetzlich 'art' => SPERRE (zu viele Versuche: 70022 oder ein Text mit
+ * limit/frequent) | CAPTCHA (Xiaomi verlangt fuer den Versand ein Captcha: captchaUrl oder 87001 - das Bild liegt dann
+ * im Zwischenzustand unter 'sende_captcha', der Hausherr tippt die Zeichen, der Versand wird mit $icode wiederholt) |
+ * UNBEKANNT, dazu 'code' (Zahl der Antwort oder 0) und 'grund' (description/desc, gekuerzt, ohne Kennungen). Die Lage
+ * bleibt SENDEN - eine Linie, die 'art' nicht kennt, meldet wie bisher. LOESUNG = $icode hat nicht die Form.
  */
-function xc_code_anfordern($weg, $ziele = null)
+function xc_code_anfordern($weg, $ziele = null, $icode = null)
 {
     if (!is_array($ziele)) { $ziele = xc_ziele(); }
+    if ($icode !== null && !preg_match('/^[0-9A-Za-z]{3,10}\z/', (string) $icode)) { return array('lage' => 'LOESUNG', 'weg' => $weg); }
     $flag = $weg === 'mail' ? 8 : ($weg === 'sms' ? 4 : 0);
     $zf = xc_lesen('zweitfaktor');
     if ($zf === null) { return array('lage' => 'ABGELAUFEN'); }
@@ -367,15 +407,62 @@ function xc_code_anfordern($weg, $ziele = null)
     list($c, $t) = xc_http('POST', $ziele['konto'] . '/identity/auth/' . ($flag === 8 ? 'sendEmailTicket' : 'sendPhoneTicket'),
         array('_dc' => (string) round(microtime(true) * 1000), 'sid' => 'xiaomiio', 'context' => (string) $zf['kontext'],
               'mask' => '0', '_locale' => 'en_US'),
-        array('retry' => '0', 'icode' => '', '_json' => 'true', 'ick' => isset($dose['ick']) ? $dose['ick'] : ''), $dose, $ziele);
+        array('retry' => '0', 'icode' => $icode === null ? '' : (string) $icode, '_json' => 'true',
+              'ick' => isset($dose['ick']) ? $dose['ick'] : ''), $dose, $ziele);
     if ($c === -1) { return array('lage' => 'ZIEL'); }
     if ($c === 0) { return array('lage' => 'NETZ'); }
     $j = xc_json($t);
-    if ($c !== 200 || (is_array($j) && isset($j['code']) && (int) $j['code'] !== 0)) { return array('lage' => 'SENDEN', 'weg' => $weg); }
+    unset($zf['sende_captcha']);
+    if ($c !== 200 || (is_array($j) && isset($j['code']) && (int) $j['code'] !== 0)) {
+        $erg = xc_sendefehler($c, $j);
+        $erg['weg'] = $weg;
+        if ($erg['art'] === 'CAPTCHA') {
+            $url = (is_array($j) && !empty($j['captchaUrl']) && is_string($j['captchaUrl'])) ? $j['captchaUrl'] : '/pass/getCode?icodeType=antiVerify';
+            list($typ, $bild) = xc_bild_holen($url, $dose, $ziele);
+            if ($typ !== '') {
+                $zf['sende_captcha'] = array('bild' => base64_encode($bild), 'bildtyp' => $typ, 'weg' => $weg);
+            } else {
+                $erg['art'] = 'UNBEKANNT';
+            }
+        }
+        $zf['dose'] = $dose;                        // ick des Captcha-Bilds gehoert zur Loesung
+        if (!xc_ablegen('zweitfaktor', $zf)) { return array('lage' => 'SCHREIBEN'); }
+        return $erg;
+    }
     $zf['dose'] = $dose;
     $zf['weg'] = $flag;
     if (!xc_ablegen('zweitfaktor', $zf)) { return array('lage' => 'SCHREIBEN'); }
     return array('lage' => 'CODE_GESENDET', 'weg' => $weg);
+}
+
+/**
+ * 1.0.1: eine abgelehnte Antwort des Code-Versands einordnen. Nur zwei Felder der Antwort: code (Zahl) und
+ * description/desc (hoechstens 120 Zeichen; Mailadressen, Telefonnummern und lange Ziffern-/Hexfolgen herausgenommen).
+ */
+function xc_sendefehler($http, $j)
+{
+    $code = (is_array($j) && isset($j['code']) && is_numeric($j['code'])) ? (int) $j['code'] : 0;
+    $t = '';
+    foreach (array('description', 'desc') as $k) {
+        if ($t === '' && is_array($j) && isset($j[$k]) && is_string($j[$k])) { $t = $j[$k]; }
+    }
+    $t = preg_replace('/\S+@\S+/', '<...>', $t);
+    $t = preg_replace('/[0-9a-fA-F]{8,}|\+?[0-9][0-9 \-]{5,}[0-9]/', '<...>', $t);
+    $t = trim(preg_replace('/[\x00-\x1F\x7F"\'<>&\\\\]+/', ' ', str_replace('<...>', '...', $t)));
+    $t = preg_replace('/\s{2,}/', ' ', $t);
+    $t = function_exists('mb_substr') ? mb_substr($t, 0, 120, 'UTF-8') : substr($t, 0, 120);
+    $art = 'UNBEKANNT';
+    if ($code === 70022 || preg_match('/limit|frequent/i', $t)) { $art = 'SPERRE'; }
+    if ($code === 87001 || (is_array($j) && !empty($j['captchaUrl']))) { $art = 'CAPTCHA'; }
+    return array('lage' => 'SENDEN', 'art' => $art, 'code' => $code, 'grund' => $t, 'http' => (int) $http);
+}
+
+/** 1.0.1: ein Captcha-Bild mit der Keksdose holen (setzt ick). Rueckgabe array(bildtyp|'', Bild). Nur PNG/JPEG/GIF <= 100 kB. */
+function xc_bild_holen($url, array &$dose, array $ziele)
+{
+    list($c, $bild) = xc_http('GET', xc_absolut($ziele['konto'], (string) $url), array(), null, $dose, $ziele, true);
+    $typ = $c === 200 ? xc_bildtyp($bild) : '';
+    return ($typ === '' || strlen($bild) > 102400) ? array('', '') : array($typ, $bild);
 }
 
 /** Der Ort eines Zwischenstands (Zweitfaktor, Captcha, Auswahlliste) - alle 0600, hoechstens 10 Minuten. */
@@ -576,10 +663,13 @@ function xc_geraete(array $sitzung, array $regionen, array $ziele, array $filter
                 $mac = isset($g['mac']) && is_string($g['mac']) ? strtoupper($g['mac']) : '';
                 if (!preg_match('/^([0-9A-F]{2}:){5}[0-9A-F]{2}\z/', $mac)) { $mac = ''; }
                 $ip = isset($g['localip']) && is_string($g['localip']) && preg_match('/^[\w\.\-]{1,253}\z/', $g['localip']) ? $g['localip'] : '';
+                // 1.0.1: was die Cloud zur Erreichbarkeit meldet (isOnline): 1 online, 0 offline, -1 unbekannt (Feld fehlt)
+                $on = isset($g['isOnline']) ? $g['isOnline'] : null;
+                $on = ($on === true || $on === 1 || $on === '1' || $on === 'true') ? 1 : (($on === false || $on === 0 || $on === '0' || $on === 'false') ? 0 : -1);
                 $aus[] = array('name' => substr(isset($g['name']) && is_string($g['name']) ? $g['name'] : '', 0, 60),
                                'modell' => substr($g['model'], 0, 60), 'ip' => $ip, 'token' => $ble ? '' : $tok,
                                'mac' => $mac, 'bindkey' => $bind, 'ble' => $ble ? 1 : 0, 'did' => substr((string) $g['did'], 0, 64),
-                               'region' => $reg);
+                               'region' => $reg, 'online' => $on);
             }
         }
     }
@@ -672,6 +762,6 @@ function xc_ergebnis(array $a, $region, $zeile, array $ziele, array $filter)
     if (!xc_ablegen('auswahl', array('zeit' => time(), 'zeile' => (int) $zeile, 'liste' => $liste))) { return array('lage' => 'SCHREIBEN'); }
     $zeigen = array();
     foreach ($liste as $i => $g) { $zeigen[] = array('i' => $i, 'name' => $g['name'], 'modell' => $g['modell'], 'ip' => $g['ip'],
-        'mac' => $g['mac'], 'ble' => $g['ble'], 'region' => $g['region']); }
+        'mac' => $g['mac'], 'ble' => $g['ble'], 'region' => $g['region'], 'online' => $g['online']); }
     return array('lage' => 'ok', 'geraete' => $zeigen, 'regionen' => $erreicht, 'zeile' => (int) $zeile);
 }

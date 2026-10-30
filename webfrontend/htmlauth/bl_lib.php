@@ -3407,6 +3407,140 @@ function bl_muster_themen_eigen($cfg, $tags)
     return $aus;
 }
 
+/* ---------------- Gateway V2: Selbsttest der Haken (Nachtwelle N4, 1.3.30) ---------------- */
+
+/**
+ * Die Abos des MQTT-Gateways V2 aus config/system/subscriptions.json (Subscriptions[].Id je Thema, Noncached):
+ * array(Thema => Noncached ja/nein), null = nicht lesbar. Form wie MGiSmart 1.1.28 mg_v2_abos() und Govee 0.9.30
+ * gv_mqtt_v2_haken_lage(); die Datei liest bl_v2_haken_lage().
+ */
+function bl_v2_abos($daten)
+{
+    if (!is_array($daten)) {
+        return null;
+    }
+    $liste = array();
+    foreach (array('Subscriptions', 'subscriptions') as $s) {
+        if (isset($daten[$s]) && is_array($daten[$s])) {
+            $liste = $daten[$s];
+            break;
+        }
+    }
+    $abo = array();
+    foreach ($liste as $e) {
+        if (!is_array($e)) {
+            continue;
+        }
+        $id = '';
+        foreach (array('Id', 'id', 'Topic', 'topic') as $k) {
+            if (isset($e[$k]) && is_string($e[$k])) {
+                $id = $e[$k];
+                break;
+            }
+        }
+        if ($id === '') {
+            continue;
+        }
+        $nc = false;
+        foreach (array('Noncached', 'noncached') as $k) {
+            if (isset($e[$k])) {
+                $nc = ($e[$k] === true || in_array(strtolower(trim((string) $e[$k])), array('1', 'true', 'yes', 'on'), true));
+            }
+        }
+        $abo[$id] = $nc;
+    }
+    return $abo;
+}
+
+/**
+ * Soll gegen Ist, rein (liest nichts): array(1|0, fehlt[], noncached_fehlt[], noncached_zu_viel[], angehakt, soll).
+ * Soll je Zeile array('thema' => volles Thema, 'name' => Gateway-Name, 'noncached' => bool). Noncached wird in
+ * beide Richtungen verglichen: fehlt es, reicht das Gateway einen gleichen Wert nicht weiter; steht es zu viel, geht
+ * jeder Wert erneut an den Miniserver.
+ */
+function bl_v2_haken_abgleich(array $soll, array $abo)
+{
+    $fehlt = array();
+    $nc_fehlt = array();
+    $nc_zuviel = array();
+    $da = 0;
+    foreach ($soll as $e) {
+        if (!array_key_exists($e['thema'], $abo)) {
+            $fehlt[] = $e['name'];
+            continue;
+        }
+        $da++;
+        if ($e['noncached'] && !$abo[$e['thema']]) {
+            $nc_fehlt[] = $e['name'];
+        } elseif (!$e['noncached'] && $abo[$e['thema']]) {
+            $nc_zuviel[] = $e['name'];
+        }
+    }
+    return array(($fehlt || $nc_fehlt || $nc_zuviel) ? 0 : 1, $fehlt, $nc_fehlt, $nc_zuviel, $da, count($soll));
+}
+
+/**
+ * Das Soll fuer den Selbsttest: die Zeilen der Namenstabelle (bl_mqtt_namen() - DIESELBE Funktion wie die Tabelle im
+ * Reiter Einbindung, Regeln/07), die dort in der Spalte Musterprojekt "ja" tragen (bl_muster_themen_eigen(), mit den
+ * eigenen Namen), ohne Textthemen. Noncached: Spalte V2 = N (server/ok).
+ */
+function bl_v2_haken_soll($cfg, $tags)
+{
+    $p = (string) bl_cfg($cfg, 'themenpraefix', 'blescanner');
+    $muster = bl_muster_themen_eigen($cfg, $tags);
+    $aus = array();
+    foreach (bl_mqtt_namen($cfg, $tags) as $z) {
+        if ($z['text'] || !in_array($z['thema'], $muster, true)) {
+            continue;
+        }
+        $aus[] = array('thema' => $p . '/' . trim((string) $z['thema'], '/'), 'name' => $z['name'],
+                       'noncached' => $z['v2'] === 'N');
+    }
+    return $aus;
+}
+
+/**
+ * Selbsttestzeile "Gateway V2: sind alle Datenpunkte der Hakenliste angehakt?" (Nachtwelle N4, Vorschrift Punkt 4):
+ * array(1|0|2, Text ohne Markup). 1 alle Haken da und Noncached wie in der Hakenliste; 0 es fehlt ein Haken oder
+ * Noncached stimmt nicht (mit Namen); 2 trifft nicht zu (MQTT dieses Plugins aus, Gateway V1) oder nicht
+ * feststellbar (Fassung 0, keine Wurzel, subscriptions.json nicht lesbar). Liest nur.
+ */
+function bl_v2_haken_lage($cfg, $tags)
+{
+    if (bl_cfg($cfg, 'mqtt', '1') !== '1') {
+        return array(2, bl_t('TEST.V2_AUS'));
+    }
+    $fassung = (int) bl_gateway_fassung();
+    $home = (string) bl_paths()['home'];
+    if ($fassung === 0 || $home === '') {
+        return array(2, bl_t('TEST.V2_UNKLAR'));
+    }
+    if ($fassung < 2) {
+        return array(2, bl_t('TEST.V2_V1'));
+    }
+    $abo = bl_v2_abos(@json_decode((string) @file_get_contents($home . '/config/system/subscriptions.json'), true));
+    if ($abo === null) {
+        return array(2, bl_t('TEST.V2_UNKLAR'));
+    }
+    $liste = bl_v2_haken_soll($cfg, $tags);
+    if (!$liste) {
+        return array(2, bl_t('TEST.V2_LEER'));   // leere Hakenliste: kein Urteil (Hausform wie N7)
+    }
+    list($ok, $fehlt, $nc_fehlt, $nc_zuviel, $da, $soll) = bl_v2_haken_abgleich($liste, $abo);
+    $txt = sprintf(bl_t('TEST.V2_ZAHL'), $da, $soll);
+    if ($fehlt) {
+        $txt .= ' ' . sprintf(bl_t('TEST.V2_FEHLT'), implode(', ', array_slice($fehlt, 0, 12))
+            . (count($fehlt) > 12 ? ' …' : ''));
+    }
+    if ($nc_fehlt) {
+        $txt .= ' ' . sprintf(bl_t('TEST.V2_NC_FEHLT'), implode(', ', $nc_fehlt));
+    }
+    if ($nc_zuviel) {
+        $txt .= ' ' . sprintf(bl_t('TEST.V2_NC_ZUVIEL'), implode(', ', $nc_zuviel));
+    }
+    return array($ok, $txt);
+}
+
 /* ---------------- Befehle fuer Loxone (Entwurf 3.2, 3.7; Musterprojekt Abschnitt 6) ---------------- */
 
 /** Der UDP-Eingang des MQTT-Gateways (general.json Mqtt.Udpinport), sonst 11884. */
