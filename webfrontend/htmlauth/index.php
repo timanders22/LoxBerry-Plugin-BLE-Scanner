@@ -428,6 +428,7 @@ if ($bl_ist_post && isset($_POST['download'])) {
         // Gruppe 13 (E12): statt der HTTP-Vorlage die Vorlage MQTT-Befehle (Virtueller Ausgang, UDP-Eingang
         // des MQTT-Gateways).
         list($name, $inhalt) = bl_vorlage_mqtt_out($bl_cfg, $bl_tags);
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/x-download');
         header('Content-Disposition: attachment; filename="' . $name . '"');
         header('Content-Length: ' . strlen($inhalt));
@@ -440,6 +441,7 @@ if ($bl_ist_post && isset($_POST['download'])) {
 if ($bl_ist_post && isset($_POST['verlauf_download'])) {
     $datei = $bl_p['verlauf'];
     if (is_file($datei)) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="ble_scanner_ng_verlauf.csv"');
         header('Content-Length: ' . (string) filesize($datei));
@@ -759,6 +761,7 @@ if ($bl_ist_post && isset($_POST['bl_sichern'])) {
     $bl_js = json_encode($bl_sich,
         JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     if ($bl_js !== false) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="ble_einstellungen_'
                . date('Ymd_His') . '.json"');
