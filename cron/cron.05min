@@ -208,11 +208,17 @@ zustand_setzen "neustarts" "$(echo "$LISTE $JETZT" | sed 's/^ *//')"
 # bereits als loxberry auf, und su verlangt dann ein Kennwort (Regeln/03, am
 # Geraet gemessen 06.09.2026). Der Benutzer wird gemessen, nicht angenommen.
 mkdir -p "$DATADIR" "$LOGDIR" 2>/dev/null
+# 1.3.31 (Nachzug 01.11.2026): ist die Datei nicht schreibbar, braeche die Umlenkung den Befehl ab, BEVOR er startet -
+# bis 1.3.30 kein Start und keine Spur. Dann geht die Ausgabe nach /dev/null. Eigene Variable: die Dateinamen
+# dienen unten auch anderem. Im su-Zweig prueft der Benutzer selbst, root kaeme ja immer durch.
 WER=$(id -un 2>/dev/null)
 if [ "$WER" = "loxberry" ]; then
-    [ -e "$STARTLOG" ] || : > "$STARTLOG"
-    [ -e "$LOG" ] || : > "$LOG"
-    nohup "$DIENST" >> "$STARTLOG" 2>&1 &
+    # In Klammern: unter dash beendet ": > datei" mit gescheiterter Umlenkung sonst die ganze Schale.
+    [ -e "$STARTLOG" ] || ( : > "$STARTLOG" ) 2>/dev/null
+    [ -e "$LOG" ] || ( : > "$LOG" ) 2>/dev/null
+    ZIEL="$STARTLOG"
+    ( : >>"$ZIEL" ) 2>/dev/null || ZIEL=/dev/null
+    nohup "$DIENST" >> "$ZIEL" 2>&1 &
     echo $! > "$PIDDATEI"
 elif [ "$(id -u 2>/dev/null)" = "0" ]; then
     chown loxberry:loxberry "$DATADIR" "$LOGDIR" 2>/dev/null
@@ -220,7 +226,7 @@ elif [ "$(id -u 2>/dev/null)" = "0" ]; then
         [ -e "$bl_f" ] || su loxberry -c "touch '$bl_f'" >/dev/null 2>&1
         [ -e "$bl_f" ] && chown loxberry:loxberry "$bl_f" 2>/dev/null
     done
-    su loxberry -c "nohup '$DIENST' >> '$STARTLOG' 2>&1 & echo \$! > '$PIDDATEI'" >/dev/null 2>&1
+    su loxberry -c "Z='$STARTLOG'; ( : >>\"\$Z\" ) 2>/dev/null || Z=/dev/null; nohup '$DIENST' >> \"\$Z\" 2>&1 & echo \$! > '$PIDDATEI'" >/dev/null 2>&1
     chown loxberry:loxberry "$PIDDATEI" 2>/dev/null
 else
     melde_gebremst "der Waechter laeuft als '$WER' - weder loxberry noch root. Es wird nicht nachgestartet."

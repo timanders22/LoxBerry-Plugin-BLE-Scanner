@@ -406,6 +406,19 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
  * ALLE Handler samt Downloads, dann erst lbheader(), dann HTML.
  * ================================================================== */
 /* ============ Loxone-Vorlage herunterladen ============ */
+/* Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+if ($bl_ist_post && isset($_POST['ansage_test'])) {
+    list($bl_at, $bl_ag) = bl_ansage_test();
+    if ($bl_at) { $bl_hinweis = bl_t('ANSAGEPLUGIN.M_TEST_OK'); } else { $bl_fehler[] = bl_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $bl_ag; }
+    $bl_tab = 'tab-settings';
+}
+if ($bl_ist_post && isset($_POST['ansage_speichern'])) {
+    list($bl_ao, $bl_af, $bl_ah) = bl_ansage_post($_POST);
+    if ($bl_af) { foreach ($bl_af as $bl_ax) { $bl_fehler[] = $bl_ax; } }
+    elseif ($bl_ao) { $bl_saved = true; list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read(); }
+    else { $bl_fehler[] = bl_t('ANSAGEPLUGIN.M_FEHL'); }
+    $bl_tab = 'tab-settings';
+}
 if ($bl_ist_post && isset($_POST['download'])) {
     $aktive = array_filter($bl_tags, function ($t) { return $t['aktiv'] === '1'; });
     if (!$aktive) {
@@ -1560,6 +1573,7 @@ foreach (array_merge(xc_regionen(), array('alle')) as $bl_cr) { ?>
 <p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.WEG2')) ?></p>
 </details>
 
+<?= bl_ansage_form_html(bl_fmt() . '<input data-role="none" type="hidden" name="activetab" value="tab-settings">') ?>
 <h2><?= bl_t('TEXT.H_SICHERUNG') ?></h2>
 <div class="sm-hinweis"><?= bl_t('TEXT.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= bl_t('TEXT.SICH_WARNUNG') ?></div>

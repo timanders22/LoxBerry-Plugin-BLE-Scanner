@@ -28,6 +28,7 @@ import json
 import os
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -118,6 +119,30 @@ def _log_einrichten():
 
 _log_einrichten()
 log = logging.getLogger("ble_scanner_ng")
+
+
+_ANSAGE_STAND = {}
+
+
+def ansage_lage(anlass, gestoert, name="", frist=0):
+    """Seit 1.3.31: den Zustand eines Anlasses an bl_ansage.php geben. Ausgabeart, Nachtruhe, Sperre und Schalter prueft die gemeinsame Sprachausgabe.
+    Die Flanke und den ersten Lauf merkt die Bruecke. name: nur fuer die Unterscheidung, nie eine Geraetekennung im Satz. Ein Fehler stoert den Dienst nicht."""
+    schluessel = anlass + "|" + name
+    alt = _ANSAGE_STAND.get(schluessel)
+    jetzt = time.monotonic()
+    if alt is not None and alt[0] == bool(gestoert) and (not gestoert or jetzt - alt[1] < 60):
+        return
+    _ANSAGE_STAND[schluessel] = (bool(gestoert), jetzt)
+    pfad = os.path.dirname(os.path.abspath(__file__))
+    aufruf = ["php", os.path.join(pfad, "bl_ansage.php"), anlass, "1" if gestoert else "0", os.path.basename(pfad), name, str(int(frist))]
+
+    def laufen():
+        try:
+            subprocess.run(aufruf, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    threading.Thread(target=laufen, name="ansage", daemon=True).start()
 
 
 class GleicheMeldungBremse(logging.Filter):
@@ -1343,6 +1368,7 @@ class Dienst:
         if not self.adapter_ok:
             log.info("Es kommen wieder Advertisements an - Adapter in Ordnung.")
             self.adapter_ok = True
+            ansage_lage("ausfall", False)
             self.wachhund_stufe = 0
 
         # Testmodus: jede Einzelmessung mitschreiben, damit sich die
@@ -2185,6 +2211,7 @@ class Dienst:
         """
         self.adapter_ok = False
         self.stoerung = str(grund)
+        ansage_lage("ausfall", True, "", 300)     # nur der Ausfall des Scanners, nie Ankunft oder Anwesenheit
         self._senden("server/ok", 0, erzwingen=True)
         self._senden("server/adapter_ok", 0, erzwingen=True)
         self._senden("server/ts", int(time.time()), erzwingen=True, abstand=30)
