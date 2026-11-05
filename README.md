@@ -1,11 +1,21 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.32
+Version 1.3.33
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.33
+
+- **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.
+- **Sprechtoken:** Ein von Hand eingetragenes Alexa- oder Google-Token wird nicht mehr vom Token des Nachbar-Plugins überschrieben.
+- **Anwesenheit:** Ein blinder oder stummer Bluetooth-Adapter meldet nicht mehr „alle abwesend“: `present`, `person/<P>/present` und `summary/present` stehen dann auf -1 (keine Aussage). In sehr stillen Umgebungen, in denen über die Frist gar kein Gerät zu hören ist, gilt das ebenfalls.
+- **Dienststart:** Nach einem Neustart oder Update bleibt der letzte Stand stehen, bis die Frist des Tags gelaufen ist; ein gehörter Tag meldet sich sofort. Kein kurzes „alle abwesend“ mehr.
+- **iBeacon- und IRK-Tags:** Sie fallen nicht mehr nach zehn Minuten heraus, Tag-Frist und `last_seen` stimmen.
+- **Reiter Test:** Die Zeile „Vorgaben“ ist im Normalzustand nicht mehr rot.
+- **Formular:** Ein beanstandeter Tafel- oder HomePod-Name bleibt zur Korrektur im Feld stehen.
 
 ## Neu in 1.3.32
 

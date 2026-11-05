@@ -876,6 +876,12 @@ class Dienst:
         self.letzte_sichtung_mono = None
         self.letzte_sichtung_zeit = 0
         self.adapter_ok = True
+        # 1.3.33 (BL-1, BL-2): seit wann der Dienst zuhoert (Start, Rueckkehr des Adapters). Vor Ablauf der Tag-Frist
+        # ab diesem Zeitpunkt sagt "nicht gehoert" nichts ueber den Tag. stille: (Ende, Dauer) der laengsten juengsten
+        # Luecke, in der nichts zu hoeren war - sie gilt fuer Tags, deren Frist kuerzer ist als die Luecke.
+        self.hoeren_seit_mono = time.monotonic()
+        self.stille = (0.0, 0.0)
+        self.haus_karenz = False
         self.wachhund_stufe = 0
         self.letzte_wiederbelebung = 0.0
         self.suchfilter = 0
@@ -1186,6 +1192,9 @@ class Dienst:
             w = str(wert)
             if not erzwingen and self.haus_stand.get(thema) == w:
                 continue
+            # 1.3.33 (BL-2): "-" nur, weil die Karenz noch laeuft, ist keine Aussage ueber das Haus.
+            if self.haus_karenz and w == "-" and thema not in self.haus_stand:
+                continue
             if self.mqtt.senden_haus(thema, w, retain=True):
                 self.haus_stand[thema] = w
                 if thema not in self.haus_eigen:
@@ -1363,11 +1372,18 @@ class Dienst:
             if self.irk and eintrag.get("kennung_irk") is None:
                 eintrag["kennung_irk"] = self.irk_zuordnen(mac, eintrag.get("adresstyp", ""))
 
+        # 1.3.33 (BL-1): nach einer Stille zaehlt die Frist der Tags neu, die kuerzer war als die Stille - die Sichtung
+        # eines anderen Geraets beweist nicht, dass der Tag in der tauben Zeit gegangen ist.
+        bezug = self.letzte_sichtung_mono if self.letzte_sichtung_mono is not None else self.hoeren_seit_mono
+        luecke = jetzt_m - bezug
+        if luecke >= self.stille[1] or jetzt_m - self.stille[0] >= self.stille[1]:
+            self.stille = (jetzt_m, luecke)
         self.letzte_sichtung_mono = jetzt_m
         self.letzte_sichtung_zeit = jetzt_w
         if not self.adapter_ok:
             log.info("Es kommen wieder Advertisements an - Adapter in Ordnung.")
             self.adapter_ok = True
+            self.hoeren_seit_mono = jetzt_m
             ansage_lage("ausfall", False)
             self.wachhund_stufe = 0
 
@@ -1513,6 +1529,8 @@ class Dienst:
         uebersicht = []
         personen = {}
         wechsel_runde = False     # hat in diesem Durchlauf ein Tag gewechselt?
+        schweigen_runde = False   # 1.3.33: mindestens ein Tag noch in der Karenz
+        ohne_aussage_runde = False   # 1.3.33: mindestens ein Tag ohne Aussage
 
         for tag in self.tags:
             kennung = tag["kennung"]
@@ -1547,6 +1565,22 @@ class Dienst:
             else:
                 anwesend = 1 if (frisch and zustand["ankunft"] >= noetig) else 0
 
+            # 1.3.33 (BL-1, BL-2): "nicht gehoert" heisst nur dann "weg", wenn der Dienst in der ganzen Frist des Tags
+            # zugehoert hat und dabei etwas zu hoeren war. Bis 1.3.32 ging bei blindem Adapter nach 30 s und nach jedem
+            # Dienststart present=0 retained hinaus: "alle abwesend", das niemand gemessen hat (Loxone schaltet darauf).
+            # Karenz: die Frist laeuft seit dem Beginn des Zuhoerens noch, der Tag schweigt, der Broker behaelt seinen
+            # Stand (kein Flackern, wie die Messwerte in _messwerte). Taub: Adapter blind oder in der Frist gar nichts
+            # gehoert - present -1, "keine Aussage" (Zahlenthema, Entscheidung 5 und E6 Gruppe 13: "-" laese ein
+            # analoger Eingang als 0). Der Zustand bleibt, ein "geht" im Verlauf entsteht erst nach gemessener Frist.
+            karenz = jetzt_m - self.hoeren_seit_mono < grenze \
+                or (self.stille[1] > grenze and jetzt_m - self.stille[0] < grenze)
+            taub = (not self.adapter_ok or self.letzte_sichtung_mono is None
+                    or jetzt_m - self.letzte_sichtung_mono > grenze)
+            ohne_aussage = not frisch and (karenz or taub)
+            if ohne_aussage:
+                anwesend = zustand["anwesend"]
+            schweigen = karenz and (ohne_aussage or not anwesend)
+
             if anwesend != zustand["anwesend"]:
                 zustand["anwesend"] = anwesend
                 zustand["seit_mono"] = jetzt_m
@@ -1558,12 +1592,12 @@ class Dienst:
                 zustand["seit_mono"] = jetzt_m
                 zustand["seit_zeit"] = jetzt_w
 
-            roh = eintrag.get("rssi") if (eintrag and anwesend) else None
-            avg = eintrag.get("rssi_avg") if (eintrag and anwesend) else None
+            roh = eintrag.get("rssi") if (eintrag and anwesend and not ohne_aussage) else None
+            avg = eintrag.get("rssi_avg") if (eintrag and anwesend and not ohne_aussage) else None
             if avg is None:
                 avg = roh
             stufe = gem.signalstufe(avg, nah, mittel,
-                                    zustand["stufe"] or None, hyst) if anwesend else 0
+                                    zustand["stufe"] or None, hyst) if (anwesend and not ohne_aussage) else 0
             zustand["stufe"] = stufe
 
             if tag.get("aktiv", "1") != "1":
@@ -1571,18 +1605,33 @@ class Dienst:
                     tag, zweig, eintrag, anwesend, roh, avg, stufe, alter, zustand))
                 continue
 
-            if anwesend:
+            person = (tag.get("opt") or {}).get("person", "").strip()
+            # 1.3.33 (BL-2): in der Karenz gehen vom Tag nur die Messwerte hinaus (die schuetzen sich selbst)
+            if schweigen:
+                schweigen_runde = True
+                if person:
+                    personen.setdefault(gem.thema_saeubern(person),
+                                        {"present": 0, "ts": 0, "namen": []})["offen"] = True
+                if eintrag and eintrag.get("beacon") or self.formate.get(kennung):
+                    self._messwerte(tag, zweig, eintrag, zustand, erzwingen)
+                uebersicht.append(self._uebersicht_zeile(
+                    tag, zweig, eintrag, anwesend, roh, avg, stufe, alter, zustand))
+                continue
+
+            if ohne_aussage:
+                ohne_aussage_runde = True
+            elif anwesend:
                 anwesend_gesamt += 1
                 namen_da.append(tag.get("name") or kennung)
 
-            geaendert = self._senden("{0}/present".format(zweig), anwesend, erzwingen)
+            geaendert = self._senden("{0}/present".format(zweig), -1 if ohne_aussage else anwesend, erzwingen)
             if geaendert:
                 wechsel_runde = True
             self._senden("{0}/rssi".format(zweig),
                          roh if roh is not None else -255, erzwingen)
             self._senden("{0}/rssi_avg".format(zweig),
                          avg if avg is not None else -255, erzwingen)
-            self._senden("{0}/level".format(zweig), stufe, erzwingen)
+            self._senden("{0}/level".format(zweig), -1 if ohne_aussage else stufe, erzwingen)
             self._senden("{0}/last_seen".format(zweig),
                          int(alter) if alter is not None else -1, erzwingen)
             # Der Zeitstempel ist der massgebliche Wert: MQTT ist ein
@@ -1628,7 +1677,7 @@ class Dienst:
                 self._senden("scanner/{0}/{1}/rssi".format(self.scanner, zweig),
                              (avg + ausgleich) if avg is not None else -255, erzwingen)
                 self._senden("scanner/{0}/{1}/present".format(self.scanner, zweig),
-                             anwesend, erzwingen)
+                             -1 if ohne_aussage else anwesend, erzwingen)
 
             if raum_an:
                 raum = self.raum_bestimmen(kennung, avg, ausgleich, jetzt_w, zustand)
@@ -1636,16 +1685,20 @@ class Dienst:
                 self._senden("{0}/raum_seit".format(zweig),
                              int(zustand["raum_seit"]), erzwingen)
 
-            person = (tag.get("opt") or {}).get("person", "").strip()
             if person:
                 p = gem.thema_saeubern(person)
                 eintragp = personen.setdefault(p, {"present": 0, "ts": 0, "namen": []})
-                eintragp["present"] = max(eintragp["present"], anwesend)
+                if ohne_aussage:
+                    eintragp["ohne"] = True     # 1.3.33: ein Tag ohne Aussage macht "weg" unbelegt, "da" bleibt da
+                else:
+                    eintragp["present"] = max(eintragp["present"], anwesend)
                 if eintrag and eintrag.get("zeit"):
                     eintragp["ts"] = max(eintragp["ts"], int(eintrag["zeit"]))
                 eintragp["namen"].append(tag.get("name") or kennung)
 
-            if geaendert and self.cfg.get("http_push", "0") == "1":
+            # 1.3.33: ohne Aussage kein Push - der Eingang behaelt seinen Wert (wie WiFi-Scanner ueber UDP); ein
+            # alter Digitaleingang der Originalfassung laese -1 als "ein".
+            if geaendert and not ohne_aussage and self.cfg.get("http_push", "0") == "1":
                 self.an_miniserver(tag, zweig, anwesend, roh, stufe, alter, eintrag)
 
             uebersicht.append(self._uebersicht_zeile(
@@ -1657,7 +1710,10 @@ class Dienst:
         # sonst hoechstens alle 60 s. Bis dahin ging es mit jeder neuen
         # Sichtung hinaus - in jedem Durchlauf, solange jemand da war.
         for name, p in personen.items():
-            p_wechsel = self._senden("person/{0}/present".format(name), p["present"], erzwingen)
+            ble_wert = self._person_ble(p)
+            if ble_wert is None and p.get("offen"):
+                continue     # 1.3.33: noch in der Karenz
+            p_wechsel = self._senden("person/{0}/present".format(name), -1 if ble_wert is None else ble_wert, erzwingen)
             self._senden("person/{0}/last_seen_ts".format(name), p["ts"], erzwingen,
                          abstand=60, wechsel=p_wechsel)
 
@@ -1667,14 +1723,17 @@ class Dienst:
 
         # -- Zusammenfassung
         aktive = sum(1 for t in self.tags if t.get("aktiv") == "1")
-        self._senden("summary/present", anwesend_gesamt, erzwingen)
+        # 1.3.33 (BL-2): eine Zahl, in der Tags der Karenz fehlen, waere zu klein - sie geht erst danach hinaus.
+        if not schweigen_runde:
+            self._senden("summary/present", -1 if ohne_aussage_runde else anwesend_gesamt, erzwingen)
         # Bis 1.2.10 zaehlte "tags" ALLE konfigurierten, "present" aber nur
         # die aktiven - "2 von 7" war damit falsch, sobald ein Tag abgehakt
         # war. Jetzt zaehlen beide dieselbe Menge; die Gesamtzahl steht
         # zusaetzlich unter summary/tags_gesamt.
         self._senden("summary/tags", aktive, erzwingen)
         self._senden("summary/tags_gesamt", len(self.tags), erzwingen)
-        self._senden("summary/names", ", ".join(namen_da), erzwingen)
+        if not schweigen_runde:
+            self._senden("summary/names", ", ".join(namen_da), erzwingen)
 
         # -- Herzschlag. Ohne ihn ist ein toter Dienst nicht von einem ruhigen
         #    Haus zu unterscheiden: es kommt schlicht nichts mehr, und die
@@ -1691,6 +1750,7 @@ class Dienst:
         self._senden("server/version", gem.VERSION, erzwingen)
         self._senden("server/scanner", self.scanner, erzwingen)
 
+        self.haus_karenz = schweigen_runde
         self.haus_senden(personen, erzwingen)
         self.letzte_uebersicht = uebersicht
         self.letzte_personen = personen
@@ -1881,6 +1941,13 @@ class Dienst:
                     self.wlan["personen"][rest] = wert[:8]
         return True
 
+    @staticmethod
+    def _person_ble(p):
+        """1.3.33: die BLE-Aussage einer Person: 1 da, 0 weg, None ohne Aussage (ein Tag in Karenz oder taub)."""
+        if p["present"]:
+            return 1
+        return None if (p.get("offen") or p.get("ohne")) else 0
+
     def wlan_zusammenfuehren(self, personen, erzwingen):
         """person/<P>/anwesend_gesamt und person/<P>/quelle je Zuordnung.
 
@@ -1894,7 +1961,10 @@ class Dienst:
             # BLE-Anwesenheit (quelle "ble"). Wer die Kopplung spaeter einschaltet, verdrahtet nichts um.
             self.wlan_lage = {"an": 0}
             for person in sorted(personen):
-                gesamt, quelle = gem.anwesenheit_gesamt(int(personen[person]["present"]), None)
+                ble_wert = self._person_ble(personen[person])
+                if ble_wert is None and personen[person].get("offen"):
+                    continue     # 1.3.33: noch in der Karenz
+                gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, None)
                 self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
                 self._senden("person/{0}/quelle".format(person), quelle, erzwingen)
             return
@@ -1932,7 +2002,9 @@ class Dienst:
         lage = {}
         for wlan_name, person in zuordnung:
             ble = personen.get(person)
-            ble_wert = int(ble["present"]) if ble is not None else None
+            ble_wert = self._person_ble(ble) if ble is not None else None
+            if ble_wert is None and ble is not None and ble.get("offen"):
+                continue     # 1.3.33: noch in der Karenz
             roh = werte.get(wlan_name) if (frisch and wlan_name is not None) else None
             wlan_wert = 1 if roh == "1" else (0 if roh == "0" else None)
             gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, wlan_wert)
@@ -2573,10 +2645,15 @@ class Dienst:
         auch sie nach zehn Minuten heraus, und last_seen sprang dann von 599
         auf -1 ("nie gesehen") - eine stille Falschaussage genau dort, wo der
         Wert erst interessant wird.
+
+        1.3.33 (BL-3): auch iBeacon- und IRK-Tags. Bis 1.3.32 fiel ihre Sichtung nach zehn Minuten heraus: present=0 bei
+        einer Tag-Frist bis 3600 s und last_seen=-1, last_seen_ts=0. Sie haben viele Eintraege (die Adresse wechselt);
+        geschuetzt ist der neueste je Tag.
         """
         jetzt_m = time.monotonic()
         grenze = max(600, self._zahl("abwesenheit_nach", 30) * 10)
         geschuetzt = {t["kennung"] for t in self.tags if t["art"] == "mac"}
+        geschuetzt |= {self._mac_der_kennung(t["kennung"]) for t in self.tags if t["art"] != "mac"}
         with self.sperre:
             for mac in [m for m, w in self.gesehen.items()
                         if m not in geschuetzt and jetzt_m - w.get("mono", 0) > grenze]:
@@ -3146,6 +3223,7 @@ class Dienst:
 
     def start(self):
         self.startzeit_mono = time.monotonic()
+        self.hoeren_seit_mono = self.startzeit_mono
         log.info("BLE-Scanner NG %s startet (Scanner %s)", gem.VERSION, self.scanner)
         log.info("Konfiguration: %s", gem.CONFIG_FILE)
         log.info("%d Tag(s) konfiguriert, davon %d aktiv",

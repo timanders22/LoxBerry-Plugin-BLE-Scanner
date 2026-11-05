@@ -376,6 +376,9 @@ function bl_vorgaben_vergleich()
         return array(null, $ausgabe);
     }
     $php = bl_defaults();
+    // 1.3.33 (K12): ansage_block fuehrt nur die Oberflaeche (Sprachansagen, base64), der Dienst liest das Feld nie. Bis
+    // 1.3.32 stand diese Zeile deshalb auf jedem Geraet im Normalzustand rot ("nur PHP: ansage_block").
+    unset($php['ansage_block']);
     $nur_php = array_diff(array_keys($php), array_keys($py['vorgaben']));
     $nur_py = array_diff(array_keys($py['vorgaben']), array_keys($php));
     $andere = array();

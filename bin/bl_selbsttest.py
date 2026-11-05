@@ -209,6 +209,10 @@ def _dienst_bauen(cfgtext, merker_ordner=None):
     d.intervall = 5
     d.letzte_vollmeldung = 0.0
     d.letztes_aufraeumen = time.time()
+    # 1.3.33: die Faelle pruefen den eingeschwungenen Dienst - er hoert seit langem zu, und es ist etwas zu hoeren.
+    # Start und Taubheit haben eigene Faelle (BL-1, BL-2).
+    d.hoeren_seit_mono = time.monotonic() - 1000000
+    d.letzte_sichtung_mono = time.monotonic()
     return d, gesendet, ordner
 
 
@@ -1123,6 +1127,61 @@ def alles_pruefen():
     p.gleich(G, "Abbild ohne Schluessel, mit sensor_lage",
              (bytes(range(16)).hex() in abbild, "ff" * 16 in abbild, '"sensor_lage": 2' in abbild), (False, False, True))
     p.merke(G, "AES-Weg: %s" % gem.aes_weg(), True)
+
+    # =====================================================================
+    # 1.3.33 (BL-1, BL-2, BL-3): gehoert nichts, sagt der Dienst nicht "weg".
+    G = "Ohne Aussage statt abwesend"
+    cfg_a = ("[CONFIG]\nabwesenheit_nach=30\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Anna|alias=anna,person=Anna\n")
+    frei = "11:22:33:44:55:66"
+    da, ga, _oa = _dienst_bauen(cfg_a)
+    _sichtung_setzen(da, "AA:BB:CC:DD:EE:FF", -60, 0)
+    da.auswerten(erzwingen=True)
+    p.gleich(G, "Paket: present 1", ga.get("anna/present"), "1")
+    _sichtung_setzen(da, "AA:BB:CC:DD:EE:FF", -60, 40)
+    da.adapter_ok = False
+    da.auswerten(erzwingen=True)
+    p.gleich(G, "BL-1 blinder Adapter, Frist um: present, Person, Summe, Gesamt je -1",
+             (ga.get("anna/present"), ga.get("person/Anna/present"), ga.get("summary/present"),
+              ga.get("person/Anna/anwesend_gesamt")), ("-1", "-1", "-1", "-1"))
+    p.gleich(G, "BL-1 Zustand bleibt, kein 'geht' ohne Messung", da._zustand("AA:BB:CC:DD:EE:FF")["anwesend"], 1)
+    da.sichtung(frei, {"rssi": -60, "adresstyp": "public"})
+    p.merke(G, "BL-1 Rueckkehr: die Frist zaehlt neu", bool(da.adapter_ok and time.monotonic() - da.hoeren_seit_mono < 5))
+    ga.clear()
+    da.auswerten(erzwingen=True)
+    p.gleich(G, "BL-1 Karenz nach der Rueckkehr: present nicht gesendet", ga.get("anna/present"), None)
+    da.hoeren_seit_mono = time.monotonic() - 1000
+    da.auswerten(erzwingen=True)
+    p.gleich(G, "BL-1 Frist nach der Rueckkehr gelaufen, Adapter hoert: present 0", ga.get("anna/present"), "0")
+    ds, gs, _os = _dienst_bauen(cfg_a)
+    _sichtung_setzen(ds, "AA:BB:CC:DD:EE:FF", -60, 40)
+    ds.letzte_sichtung_mono = time.monotonic() - 40
+    ds.auswerten(erzwingen=True)
+    p.gleich(G, "BL-1 Stille laenger als die Frist: present -1", gs.get("anna/present"), "-1")
+    ds.sichtung(frei, {"rssi": -60, "adresstyp": "public"})
+    gs.clear()
+    ds.auswerten(erzwingen=True)
+    p.gleich(G, "BL-1 Stille endet, nur fremdes Geraet: Tag schweigt in seiner Frist", gs.get("anna/present"), None)
+    dk, gk, _ok = _dienst_bauen(cfg_a)
+    dk.hoeren_seit_mono = time.monotonic()
+    dk.auswerten(erzwingen=True)
+    p.gleich(G, "BL-2 Dienststart: weder present noch Summe, Person, Gesamt",
+             (gk.get("anna/present"), gk.get("summary/present"), gk.get("person/Anna/present"),
+              gk.get("person/Anna/anwesend_gesamt"), gk.get("anna/last_seen_ts")), (None,) * 5)
+    p.gleich(G, "BL-2 Lebenszeichen laeuft in der Karenz", gk.get("server/ok"), "1")
+    _sichtung_setzen(dk, "AA:BB:CC:DD:EE:FF", -60, 0)
+    dk.auswerten(erzwingen=True)
+    p.gleich(G, "BL-2 Paket in der Karenz: present 1 sofort", gk.get("anna/present"), "1")
+    ib = "IB:FDA50693A4E24FB1AFCFC6EB07647825:1:2"
+    db, gb, _ob = _dienst_bauen("[CONFIG]\nabwesenheit_nach=30\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\n"
+                                "tag1=%s|1|Bake|alias=bake,abw=3000\n" % ib)
+    _sichtung_setzen(db, "C0:BB:CC:DD:EE:FF", -60, 700, kennung_ib=ib)
+    _sichtung_setzen(db, "C1:BB:CC:DD:EE:FF", -60, 900, kennung_ib=ib)
+    db.sichtungen_verfallen()
+    db.auswerten(erzwingen=True)
+    p.gleich(G, "BL-3 iBeacon: neuester Eintrag bleibt ueber 10 min, aeltere gehen",
+             (gb.get("bake/present"), gb.get("bake/last_seen"), sorted(db.gesehen)),
+             ("1", "700", ["C0:BB:CC:DD:EE:FF"]))
 
     return p.zeilen
 

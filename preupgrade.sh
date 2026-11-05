@@ -41,7 +41,7 @@ if [ -f "$BLH" ] && sh -n "$BLH" 2>/dev/null && grep -qx 'BL_HAKEN_FASSUNG=1' "$
     . "$BLH"
 else
     echo "<ERROR> Die gemeinsamen Hilfen $BLH fehlen oder sind defekt - preupgrade.sh bricht ab."
-    exit 1
+    exit 2
 fi
 # B7 (Gruppe 13): dieselbe Torbedingung wie preinstall.sh - auch config/system/general.json und ein Ordnername
 # ohne "/" und "..". Bis 1.3.27 genuegten hier config/plugins und data/plugins; in einem Pruefbaum ohne
@@ -49,7 +49,7 @@ fi
 if ! bl_wurzel_gilt "$BASE" "$PDIR"; then
     echo "<WARNING> Keine brauchbare LoxBerry-Wurzel (Ordner '$PDIR', Wurzel '$BASE', general.json"
     echo "<WARNING> noetig) - dieses Skript tut nichts."
-    exit 0
+    exit 2
 fi
 
 PDATA=$LBPDATA/$PDIR
@@ -119,6 +119,36 @@ MERK_LIEF="$PDATA.lief_vor_update"
 # ihn lese, pruefe sein Alter.)
 date +%s > "$MERK_UPGRADE" 2>/dev/null
 chown loxberry:loxberry "$MERK_UPGRADE" 2>/dev/null
+if ! grep -qx '[0-9][0-9]*' "$MERK_UPGRADE" 2>/dev/null; then
+    # 05.11.2026: ohne Marke haelt die Installation das Update fuer eine Neuinstallation und legt die Einstellungen beiseite; bis hierher nur eine Warnung.
+    rm -f "$MERK_UPGRADE" 2>/dev/null
+    echo "<FAIL> Die Marke $MERK_UPGRADE liess sich nicht anlegen - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt unveraendert installiert."
+    exit 2
+fi
+# ---------- Update-Schutz (05.11.2026, Bauart Govee 0.9.34) ----------
+# plugininstall.pl bricht nur bei Rueckgabewert >1 vor purge_installation ab. Die Kopie entsteht als <Ziel>.neu.<pid>, traegt 0600,
+# BEVOR Inhalt hineinkommt, wird mit cmp verglichen und erst dann per mv an ihren Platz gestellt: eine heile Sicherung bleibt heil.
+ZS_FEHL=""
+zs_hinlegen() {   # $1 Quelle, $2 Ziel
+    [ -d "$2" ] && return 1
+    zs_neu="$2.neu.$$"
+    rm -f "$zs_neu" 2>/dev/null
+    if ( : > "$zs_neu" ) 2>/dev/null && chmod 600 "$zs_neu" 2>/dev/null \
+       && cp "$1" "$zs_neu" 2>/dev/null && cmp -s "$1" "$zs_neu" \
+       && mv -f "$zs_neu" "$2" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$zs_neu" 2>/dev/null
+    return 1
+}
+zs_schluss() {   # Fehlschlag gesammelt: Marke weg, Abbruch vor purge_installation
+    [ -n "$ZS_FEHL" ] || return 0
+    echo "<FAIL> Nicht gesichert:$ZS_FEHL - die Aktualisierung wird abgebrochen, damit der Purge die Originale nicht loescht."
+    echo "<FAIL> Die bisherige Fassung bleibt installiert. Bitte Platz und Rechte unter config/plugins und data/plugins pruefen."
+    rm -f "$MERK_UPGRADE" 2>/dev/null
+    exit 2
+}
 chmod 0644 "$MERK_UPGRADE" 2>/dev/null
 
 # Gruppe 13 (3.5): die Befehlsbruecke NACH der Marke anhalten - befehlsbruecke.sh start und ihr Waechter pruefen
@@ -263,6 +293,7 @@ if [ "$ZU_SICHERN" = 1 ]; then
     else
         echo "<WARNING> Die Konfiguration liess sich NICHT vollstaendig sichern"
         echo "<WARNING> (cp Rueckgabewert $CP_RC; nicht in der Sicherung: ${ABWEICHEND:-keine})."
+        ZS_FEHL="$ZS_FEHL Konfiguration"
     fi
 else
     echo "<INFO> Weder Konfiguration noch Verlauf vorhanden - es gibt nichts zu sichern."
@@ -282,6 +313,7 @@ if [ "$SICHER_OK" = 1 ]; then
         rm -rf "$NEU" 2>/dev/null
         echo "<WARNING> Die neue Sicherung liess sich nicht an ihren Platz bringen."
         echo "<WARNING> Platz und Rechte in $LBPDATA pruefen."
+        ZS_FEHL="$ZS_FEHL Update-Sicherung"
     fi
 else
     rm -rf "$NEU" 2>/dev/null
@@ -318,14 +350,12 @@ NETZ_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.ble_scanner_ng.cfg"
 #    Protokoll, wenn gar nichts kopiert worden war (im zweiten Lauf der
 #    Messung d1 belegt) - eine Erfolgsmeldung ohne Wirkung.
 if bl_cfg_traegt_inhalt "$NETZ_QUELLE"; then
-    if cp -p "$NETZ_QUELLE" "$NETZ_ZIEL.neu" 2>/dev/null \
-       && chmod 0600 "$NETZ_ZIEL.neu" 2>/dev/null \
-       && cmp -s "$NETZ_QUELLE" "$NETZ_ZIEL.neu" \
-       && mv "$NETZ_ZIEL.neu" "$NETZ_ZIEL" 2>/dev/null; then
+    if zs_hinlegen "$NETZ_QUELLE" "$NETZ_ZIEL"; then
         echo "<INFO> Zweitschrift der Einstellungen angelegt ($NETZ_ZIEL)."
     else
         rm -f "$NETZ_ZIEL.neu" 2>/dev/null
         echo "<WARNING> Die Zweitschrift liess sich nicht anlegen ($NETZ_ZIEL)."
+        ZS_FEHL="$ZS_FEHL ble_scanner_ng.cfg"
         if [ -f "$NETZ_ZIEL" ]; then
             echo "<WARNING> Die bisherige Zweitschrift bleibt unangetastet."
         fi
@@ -343,14 +373,12 @@ NETZ_IRK="$NETZ_CFG/irk.json"
 NETZ_IRK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
 if [ -s "$NETZ_IRK" ] && [ "$(head -c 1 "$NETZ_IRK" 2>/dev/null)" = "{" ] \
    && tail -c 3 "$NETZ_IRK" 2>/dev/null | grep -q '}'; then
-    if cp "$NETZ_IRK" "$NETZ_IRK_ZIEL.neu" 2>/dev/null \
-       && chmod 0600 "$NETZ_IRK_ZIEL.neu" 2>/dev/null \
-       && cmp -s "$NETZ_IRK" "$NETZ_IRK_ZIEL.neu" \
-       && mv "$NETZ_IRK_ZIEL.neu" "$NETZ_IRK_ZIEL" 2>/dev/null; then
+    if zs_hinlegen "$NETZ_IRK" "$NETZ_IRK_ZIEL"; then
         echo "<INFO> Zweitschrift der IRK-Schluessel angelegt (0600)."
     else
         rm -f "$NETZ_IRK_ZIEL.neu" 2>/dev/null
         echo "<WARNING> Die Zweitschrift der IRK-Schluessel liess sich nicht anlegen."
+        ZS_FEHL="$ZS_FEHL irk.json"
     fi
 fi
 
@@ -359,15 +387,14 @@ NETZ_BK="$NETZ_CFG/bindkey.json"
 NETZ_BK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
 if [ -s "$NETZ_BK" ] && [ "$(head -c 1 "$NETZ_BK" 2>/dev/null)" = "{" ] \
    && tail -c 3 "$NETZ_BK" 2>/dev/null | grep -q '}'; then
-    if cp "$NETZ_BK" "$NETZ_BK_ZIEL.neu" 2>/dev/null \
-       && chmod 0600 "$NETZ_BK_ZIEL.neu" 2>/dev/null \
-       && cmp -s "$NETZ_BK" "$NETZ_BK_ZIEL.neu" \
-       && mv "$NETZ_BK_ZIEL.neu" "$NETZ_BK_ZIEL" 2>/dev/null; then
+    if zs_hinlegen "$NETZ_BK" "$NETZ_BK_ZIEL"; then
         echo "<INFO> Zweitschrift der Bind-Keys angelegt (0600)."
     else
         rm -f "$NETZ_BK_ZIEL.neu" 2>/dev/null
         echo "<WARNING> Die Zweitschrift der Bind-Keys liess sich nicht anlegen."
+        ZS_FEHL="$ZS_FEHL bindkey.json"
     fi
 fi
 
+zs_schluss
 exit 0
