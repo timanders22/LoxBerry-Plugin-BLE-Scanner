@@ -40,9 +40,14 @@ fi
 
 BK="$BASE/config/plugins/$PFOLDER.backup.ble_scanner_ng.cfg"
 SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
+# 1.3.36 (Fremdpruefung 09.11.2026, gemessen): auch die Zweitschriften der Identitaetsschluessel und der Bind-Keys.
+# Bis 1.3.35 blieben sie liegen, und postinstall.sh spielte irk.json und bindkey.json einer frueheren Installation
+# bei einer Neuinstallation zurueck, waehrend die Konfiguration beiseitegelegt war.
+BK_IRK="$BASE/config/plugins/$PFOLDER.backup.irk.json"
+BK_BIND="$BASE/config/plugins/$PFOLDER.backup.bindkey.json"
 BEISEITE=""
 FEST=""
-for ZIEL in "$BK" "$SICHER"; do
+for ZIEL in "$BK" "$SICHER" "$BK_IRK" "$BK_BIND"; do
     if [ -e "$ZIEL" ] || [ -L "$ZIEL" ]; then
         rm -rf "${ZIEL:?}.alt" 2>/dev/null
         if mv -f "$ZIEL" "$ZIEL.alt" 2>/dev/null; then
@@ -52,7 +57,9 @@ for ZIEL in "$BK" "$SICHER"; do
         fi
     fi
 done
-[ -f "$BK.alt" ] && [ ! -L "$BK.alt" ] && chmod 600 "$BK.alt" 2>/dev/null
+for ZIEL in "$BK" "$BK_IRK" "$BK_BIND"; do
+    [ -f "$ZIEL.alt" ] && [ ! -L "$ZIEL.alt" ] && chmod 600 "$ZIEL.alt" 2>/dev/null
+done
 # Ein Merker "Dienst lief vor dem Update" gehoert zu keinem Vorgang mehr.
 rm -f "$BASE/data/plugins/$PFOLDER.lief_vor_update" 2>/dev/null
 

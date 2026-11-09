@@ -1,11 +1,29 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.35
+Version 1.3.36
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.36
+
+**Anwesenheitserkennung je Raum.** Bis 1.3.35 sagte das Plugin, ob jemand zu Hause ist. Ab dieser Fassung kann es auch sagen, *in welchem Raum* eine Person ist. Dafür hört in jedem Raum eine kleine ESP32-Platine mit der freien Firmware ESPresense mit, und der Raum mit dem stärksten Signal gewinnt. Je Person kommt dann `person/<Person>/raum`, je Raum die Zahl und die Namen der anwesenden Personen. Dafür sind drei Schalter nötig, alle ab Werk aus: Raumzuordnung, ESPresense-Empfänger und „Personen und Räume melden“. Wer nichts einschaltet, merkt keinen Unterschied; die Anwesenheit „zu Hause / weg“ (`present`) arbeitet wie bisher. Gemessen ist der neue Weg bisher nur im Selbsttest, nicht mit echten Empfängern im Haus.
+
+- **ESPresense-Empfänger in der Raumzuordnung (ab Werk aus):** Kleine ESP32-Platinen mit der freien Firmware [ESPresense](https://espresense.com/) können in jedem Raum mithören. Mit dem neuen Haken im Reiter *Einstellungen* unter „Mehrere Scanner“ nimmt die Raumzuordnung ihre Meldungen `espresense/devices/<Kennung>/<Raum>` dazu. Der Raum des Empfängers mit dem stärksten Signal wird dann als `<Tag>/raum` gesendet, mit derselben Hysterese wie bei mehreren LoxBerrys. Das wirkt nur bei eingeschalteter Raumzuordnung und eingeschaltetem MQTT, und die Empfänger müssen am selben Broker hängen.
+- **Zuordnung:** Welche ESPresense-Kennung zu welchem Tag gehört, steht im Feld „Zuordnung ESPresense-Kennung = Tag-Alias“. Heißt die Kennung in ESPresense schon wie der Alias, braucht es keinen Eintrag. Gehörte Kennungen ohne Zuordnung nennt der Reiter *Test*; aus ihnen füllt man die Zuordnung.
+- **Anwesenheit:** `present` bleibt die Aussage dieses LoxBerry. Ein Empfänger nennt nur den Raum.
+- **Zuordnungen als Tabelle:** „Zuordnung WLAN-Name = Person“ und die neue ESPresense-Zuordnung stehen jetzt in einer Tabelle mit einer Zeile je Paar statt in einem einzeiligen Feld mit Kommas. Gespeichert wird unverändert dieselbe Liste; bestehende Zuordnungen bleiben, wie sie sind. Eine fehlerhafte Zeile wird einzeln gemeldet und behält ihren bisherigen Eintrag, die übrigen werden gespeichert. Wer beide Felder einer Zeile leert, löscht das Paar.
+- **Neuinstallation:** Auch die Zweitschriften der IRK-Schlüssel und der Bind-Keys einer früheren Installation werden jetzt beiseitegelegt und nicht ungefragt wieder eingespielt; die Deinstallation räumt deren `.alt`- und `.neu`-Reste mit ab.
+- **Zweitschriften:** `irk.json` und `bindkey.json` werden nur noch gesichert und zurückgespielt, wenn sie wirklich gültiges JSON sind – eine abgeschnittene Datei gilt nicht mehr.
+- **Einstellungen nach einer Beanstandung:** Eingetippte Werte und Haken bei Messwert-Frist, Xiaomi-Region, BTHome, IRK-Auflösung, Anwesenheit für andere Plugins und der Befehlsbrücke bleiben stehen, und die Felder für IRK und Bind-Key verschwinden nicht mehr aus der Tag-Tabelle.
+- **ESPresense ohne Raumzuordnung:** Der Haken wird gespeichert; der Hinweis darauf sperrt das Speichern nicht mehr.
+- **Reiter Test:** Ein Klick auf den Reiter startet die Selbstprüfung, statt nur auf „Jetzt prüfen“ zu verweisen.
+- **Kleinere Berichtigungen:** Die mitgelieferte Konfiguration trägt alle Vorgaben; die Fassung wird bei Bedarf auch aus der Plugin-Datenbank gelesen; der Dienststart über die Oberfläche erbt keine Eingabe und keine weiteren Deskriptoren des Webservers.
+- **Personen und Räume (ab Werk aus):** Mit dem neuen Haken „Personen und Räume melden“ und eingeschalteter Raumzuordnung kommen je Person mit Tag `person/<Person>/raum` (der Raum ihres zuletzt gesehenen anwesenden Tags, `-` wenn sie nicht da ist) und `person/<Person>/raum_seit`, dazu je Raum `summary/raum/<Raum>/anzahl` (zurückbehalten) und `summary/raum/<Raum>/namen` (flüchtig, leer wenn niemand da ist). Ein Raum erscheint, sobald einmal jemand darin war, und meldet danach 0 bis zum nächsten Dienststart. Beim Ausschalten räumt der Dienst die Themen aus dem Broker. Die Raumzeilen im Reiter *Einbindung in Loxone* erscheinen, sobald der Dienst den Raum einmal gemeldet hat.
+- **Xiaomi-Cloud, Captcha beim Codeversand:** Verlangt Xiaomi für den Versand des Zweitfaktor-Codes ein Captcha, steht das Bild jetzt im Reiter; die Zeichen gehen mit demselben Weg (Mail oder SMS) erneut hinaus. Eine Sperre wegen zu vieler Versuche wird als solche gemeldet, mit dem Code aus der Antwort.
+- **Xiaomi-Cloud, mehrere Geräte auf einmal:** In der Geräteliste lassen sich mehrere Thermometer anhaken und mit „Angehakte übernehmen“ in einem Griff übernehmen – bisher brauchte jedes weitere Gerät eine neue Anmeldung. Jedes Gerät bekommt seine eigene Meldung; ein Gerät ohne MAC oder ohne brauchbaren Schlüssel wird gemeldet und übersprungen.
 
 ## Neu in 1.3.35
 

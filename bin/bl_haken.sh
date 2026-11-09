@@ -93,6 +93,20 @@ bl_cfg_traegt_inhalt() {
     return 0
 }
 
+# 1.3.36 (Fremdpruefung 09.11.2026): Ist $1 ein JSON-Objekt? Mit python3 wirklich geladen - eine abgeschnittene Datei,
+# die mit "{" beginnt, gilt nicht. Ohne python3 der bisherige Rueckfall: erstes Byte "{" und "}" in den letzten drei.
+# Gebraucht fuer irk.json und bindkey.json in preupgrade.sh (Zweitschrift anlegen) und postinstall.sh (zurueckspielen).
+bl_json_objekt() {
+    [ -s "$1" ] || return 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+sys.exit(0 if isinstance(d, dict) else 1)' "$1" >/dev/null 2>&1
+        return $?
+    fi
+    [ "$(head -c 1 "$1" 2>/dev/null)" = "{" ] && tail -c 3 "$1" 2>/dev/null | grep -q '}'
+}
+
 # B7 (Gruppe 13): EINE Torbedingung wie preinstall.sh - Wurzel $1 mit config/plugins, data/plugins UND
 # config/system/general.json (ein Pruefbaum hat sie nie, ein LoxBerry immer; Regeln/06 Z. 531), Ordner $2 ohne "/"
 # und "..". Rueckgabe 0 = brauchbar.
@@ -119,6 +133,19 @@ if [ "${BL_HAKEN_LADEN:-}" != "1" ] && [ "${1:-}" = "--selbsttest" ]; then
         case "$bl_st_x" in gut) bl_st_s=0 ;; *) bl_st_s=1 ;; esac
         bl_st "bl_cfg_traegt_inhalt $bl_st_x" "$bl_st_s" "$bl_st_r"
     done
+    printf '{"tag1": "00112233445566778899aabbccddeeff"}\n' > "$bl_st_d/gut.json"
+    printf '{"tag1": "001122' > "$bl_st_d/halb.json"
+    printf '[1, 2]\n' > "$bl_st_d/liste.json"
+    : > "$bl_st_d/leer.json"
+    if command -v python3 >/dev/null 2>&1; then
+        for bl_st_x in gut halb liste leer fehlt; do
+            bl_json_objekt "$bl_st_d/$bl_st_x.json" && bl_st_r=0 || bl_st_r=1
+            case "$bl_st_x" in gut) bl_st_s=0 ;; *) bl_st_s=1 ;; esac
+            bl_st "bl_json_objekt $bl_st_x" "$bl_st_s" "$bl_st_r"
+        done
+    else
+        echo "  [INFO] bl_json_objekt: ohne python3 nur der Rueckfall - nicht pruefbar"
+    fi
     mkdir -p "$bl_st_d/lb/config/plugins" "$bl_st_d/lb/data/plugins" "$bl_st_d/rest/config/plugins" "$bl_st_d/rest/data/plugins"
     mkdir -p "$bl_st_d/lb/config/system" && echo '{}' > "$bl_st_d/lb/config/system/general.json"
     bl_wurzel_gilt "$bl_st_d/lb" ble_scanner_ng && bl_st_r=0 || bl_st_r=1; bl_st "Wurzel mit general.json" 0 "$bl_st_r"

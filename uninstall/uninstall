@@ -351,7 +351,9 @@ fi
 # .neu/.alt neben Zweitschrift und Sicherung. Alle tragen MAC-Adressen und
 # Namen. Jeder Rest wird einzeln gemeldet.
 if [ -n "$BASE" ] && [ -d "$BASE/data/plugins" ]; then
-    for bl_rest in "$ZWEIT.alt" "$ZWEIT.neu" \
+    # 1.3.36 (Fremdpruefung 09.11.2026): auch .alt/.neu der IRK- und Bind-Key-Zweitschriften - preinstall.sh legt
+    # sie seit 1.3.36 ebenfalls nach .alt, ein abgebrochener Lauf hinterlaesst .neu.
+    for bl_rest in "$ZWEIT.alt" "$ZWEIT.neu" "$ZWEIT_IRK.alt" "$ZWEIT_IRK.neu" "$ZWEIT_BK.alt" "$ZWEIT_BK.neu" \
                    "$BASE/data/plugins/$PDIR.upgrade_sicherung.alt" \
                    "$BASE/data/plugins/$PDIR.upgrade_sicherung.neu" \
                    "$BASE/data/plugins/$PDIR.upgrade_sicherung.vorher" \

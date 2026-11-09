@@ -289,13 +289,16 @@ netz_zurueck() {
 }
 # Gruppe 13: die Summe der Paket-cfg 1.3.28 (neue Schluessel befehle_mqtt_ein, befehle_eingreifend_ein,
 # haus_anwesenheit, bthome=1, irk_aufloesen) - mitgezogen wie verlangt (B18).
-netz_zurueck "ble_scanner_ng.cfg" "2426aeb33f82210a94d87326b9ca80816aab512532085417bb9a4fb724b515a8"
+# 1.3.36 (Fremdpruefung 09.11.2026): die Paket-cfg traegt jetzt alle Vorgaben (dazu ansage_block, wlan_kopplung,
+# wlan_zuordnung, messwert_frist, xiaomi_region, espresense, espresense_praefix, espresense_zuordnung) - Summe neu.
+# 1.3.36 (09.11.2026, raum_personen): Summe erneut nachgezogen.
+netz_zurueck "ble_scanner_ng.cfg" "c9892570666553e2fbab744a5a32fbe992fd08a7abf0762504dc2122e6104151"
 # V1 (Gruppe 13): irk.json liefert das Paket nicht mit. Fehlt sie nach dem Kopierschritt und liegt eine Zweitschrift,
 # kommt sie zurueck - mit 0600. Eine vorhandene wird nie ueberschrieben (postupgrade.sh spielt die Sicherung danach
 # ohnehin vollstaendig zurueck).
 NETZ_IRK="$NETZ_CFG/irk.json"
 NETZ_IRK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
-if [ ! -e "$NETZ_IRK" ] && [ -s "$NETZ_IRK_ZWEIT" ] && [ "$(head -c 1 "$NETZ_IRK_ZWEIT" 2>/dev/null)" = "{" ]; then
+if [ ! -e "$NETZ_IRK" ] && bl_json_objekt "$NETZ_IRK_ZWEIT"; then
     if cp "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" 2>/dev/null \
        && chmod 0600 "$NETZ_IRK.neu" 2>/dev/null \
        && cmp -s "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" \
@@ -310,7 +313,7 @@ fi
 # Gruppe 33 (1.3.29): bindkey.json genauso (Bind-Keys der Xiaomi-Thermometer, 0600; eine vorhandene bleibt).
 NETZ_BK="$NETZ_CFG/bindkey.json"
 NETZ_BK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
-if [ ! -e "$NETZ_BK" ] && [ -s "$NETZ_BK_ZWEIT" ] && [ "$(head -c 1 "$NETZ_BK_ZWEIT" 2>/dev/null)" = "{" ]; then
+if [ ! -e "$NETZ_BK" ] && bl_json_objekt "$NETZ_BK_ZWEIT"; then
     if cp "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" 2>/dev/null \
        && chmod 0600 "$NETZ_BK.neu" 2>/dev/null \
        && cmp -s "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" \

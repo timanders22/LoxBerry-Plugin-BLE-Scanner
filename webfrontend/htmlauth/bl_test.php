@@ -953,6 +953,48 @@ function bl_bt_abhilfe($f)
 }
 
 /**
+ * Lage der ESPresense-Empfaenger (1.3.36). Gelesen aus dem Abbild des Dienstes (Schluessel
+ * "espresense"). Haken: in der Frist "Abwesend nach" kam eine Meldung; Kreuz: Raumzuordnung oder MQTT
+ * aus, oder seit dem Start keine bzw. keine frische Meldung; Strich: der Dienst hat keine Aussage.
+ * Die Anmerkung nennt die Raeume mit dem Alter ihrer letzten Meldung und die gehoerten Kennungen
+ * ohne Zuordnung - aus ihnen fuellt man die Zuordnung. Rueckgabe: array(zustand, anmerkung).
+ */
+function bl_es_lage($cfg, $status, $gilt, $grund)
+{
+    if (bl_cfg($cfg, 'raum', '0') !== '1') {
+        return array(false, bl_t('PRUEF.ES_OHNE_RAUM'));
+    }
+    if (bl_cfg($cfg, 'mqtt', '1') !== '1') {
+        return array(false, bl_t('PRUEF.ES_OHNE_MQTT'));
+    }
+    if (!$gilt) {
+        return array(null, $grund);
+    }
+    $es = ($status && isset($status['espresense']) && is_array($status['espresense'])) ? $status['espresense'] : null;
+    if ($es === null || empty($es['an'])) {
+        return array(null, bl_t('PRUEF.ES_NOCH_NICHT'));
+    }
+    $praefix = isset($es['praefix']) ? (string) $es['praefix'] : 'espresense';
+    $meldungen = isset($es['meldungen']) ? (int) $es['meldungen'] : 0;
+    if ($meldungen === 0) {
+        return array(false, sprintf(bl_t('PRUEF.ES_KEINE'), $praefix,
+                                    isset($es['verworfen']) ? (int) $es['verworfen'] : 0));
+    }
+    $raeume = array();
+    foreach ((isset($es['empfaenger']) && is_array($es['empfaenger']) ? $es['empfaenger'] : array()) as $r => $a) {
+        $raeume[] = sprintf(bl_t('PRUEF.ES_RAUM'), (string) $r, (int) $a);
+    }
+    $alter = isset($es['alter']) ? (int) $es['alter'] : -1;
+    $frist = max(30, (int) bl_cfg($cfg, 'abwesenheit_nach', '30'));
+    $text = sprintf(bl_t('PRUEF.ES_LAGE'), $meldungen, count($raeume), implode(', ', $raeume), $alter, $frist);
+    $unbekannt = (isset($es['unbekannt']) && is_array($es['unbekannt'])) ? $es['unbekannt'] : array();
+    if ($unbekannt) {
+        $text .= "\n" . sprintf(bl_t('PRUEF.ES_UNBEKANNT'), implode(', ', array_map('strval', $unbekannt)));
+    }
+    return array($alter >= 0 && $alter <= $frist, $text);
+}
+
+/**
  * Lage der Kopplung mit dem WiFi-Scanner (Verbesserungsbau 30.09.2026,
  * Anwesenheit-1). Gelesen aus dem Abbild des Dienstes (Schluessel "wlan").
  * Haken: der WiFi-Scanner meldet sich; Kreuz: er schweigt (es zaehlt nur BLE),
@@ -1151,6 +1193,12 @@ function bl_pruefzeilen($cfg, $tags)
     if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
         list($ok, $meldung) = bl_wlan_lage($cfg, $status, $gilt, $grund);
         $zeilen[] = bl_zeile(bl_t('PRUEF.WLAN'), $ok, $meldung);
+    }
+
+    // --- ESPresense-Empfaenger (1.3.36, ab Werk aus): ohne den Schalter gibt es die Zeile nicht.
+    if (bl_cfg($cfg, 'espresense', '0') === '1') {
+        list($ok, $meldung) = bl_es_lage($cfg, $status, $gilt, $grund);
+        $zeilen[] = bl_zeile(bl_t('PRUEF.ES'), $ok, $meldung);
     }
 
     // --- HTTP

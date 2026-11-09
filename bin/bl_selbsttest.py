@@ -591,6 +591,123 @@ def alles_pruefen():
             ", ".join("%s=%s" % (k, v) for k, v in sorted(gw.items()) if k.startswith("person/")))
 
     # =====================================================================
+    G = "ESPresense-Empfaenger in der Raumzuordnung"
+    # 1.3.36, ab Werk aus. ESPresense sendet <praefix>/devices/<Kennung>/<Raum> mit JSON (id, rssi,
+    # distance, ...), nicht zurueckbehalten (espresense.com/configuration/mqtt/, gelesen 09.11.2026).
+    p.gleich(G, "Zuordnung lesen (Doppelpunkt und Punkt links, kaputtes Paar, doppelter Alias)",
+             gem.es_zuordnung_lesen("iBeacon:ab-1-1 = schluessel1, irk:9f.2=uhr,kaputt,x=uhr"),
+             [("iBeacon:ab-1-1", "schluessel1"), ("irk:9f.2", "uhr")])
+
+    class _EsN(object):
+        def __init__(self, thema, wert, retain=False):
+            self.topic = thema
+            self.payload = wert.encode("utf-8")
+            self.retain = retain
+
+    cfg_e = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nraum=1\nraum_hysterese_db=5\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1\n")
+    de0, _ge0, _oe0 = _dienst_bauen(cfg_e)
+    p.gleich(G, "Schalter aus (ab Werk): die Meldung gehoert nicht der Bruecke",
+             de0.es_nachricht(_EsN("espresense/devices/iBeacon:ab-1-1/wohnzimmer", '{"rssi": -60}')), False)
+    de, ge, _oe = _dienst_bauen(cfg_e + "espresense=1\nespresense_zuordnung=iBeacon:ab-1-1=schluessel1\n")
+
+    def _es(raum, rssi, kennung="iBeacon:ab-1-1", retain=False, roh=None):
+        de.nachricht(None, None, _EsN("espresense/devices/%s/%s" % (kennung, raum),
+                                      roh if roh is not None else '{"id": "x", "rssi": %s, "distance": 2.1}' % rssi,
+                                      retain))
+
+    _sichtung_setzen(de, "AA:BB:CC:DD:EE:FF", -70, 0)
+    _es("wohnzimmer", -60)
+    _es("kueche", -80)
+    de.auswerten(erzwingen=True)
+    p.gleich(G, "staerkster Empfaenger gewinnt gegen den eigenen Scanner (-60 gegen -70)",
+             ge.get("schluessel1/raum"), "wohnzimmer")
+    _es("kueche", -57)
+    de.auswerten(erzwingen=True)
+    p.gleich(G, "Hysterese 5 dB: 3 dB staerker wechselt nicht", ge.get("schluessel1/raum"), "wohnzimmer")
+    _es("kueche", -50)
+    de.auswerten(erzwingen=True)
+    p.gleich(G, "10 dB staerker wechselt", ge.get("schluessel1/raum"), "kueche")
+    vor = de.es["verworfen"]
+    _es("bad", -40, retain=True)
+    _es("bad", 0, roh="kein json")
+    _es("b/ad", -40)
+    _es("bad", -200)
+    de.auswerten(erzwingen=True)
+    p.gleich(G, "zurueckbehalten, kaputtes JSON, falscher Raum und rssi ausserhalb: verworfen, Raum bleibt",
+             (de.es["verworfen"] - vor, ge.get("schluessel1/raum")), (4, "kueche"))
+    _es("flur", -45, kennung="iBeacon:fremd-9-9")
+    lage = de._es_abbild()
+    p.gleich(G, "unbekannte Kennung im Abbild, kein Raum fuer sie",
+             (lage.get("unbekannt"), sorted(lage.get("empfaenger", {}))), (["iBeacon:fremd-9-9"], ["flur", "kueche", "wohnzimmer"]))
+    de2, ge2, _oe2 = _dienst_bauen(cfg_e + "espresense=1\n")
+    de2.nachricht(None, None, _EsN("espresense/devices/schluessel1/garage", '{"rssi": -30}'))
+    _sichtung_setzen(de2, "AA:BB:CC:DD:EE:FF", -70, 0)
+    de2.auswerten(erzwingen=True)
+    p.gleich(G, "Kennung gleich dem Alias braucht kein Paar", ge2.get("schluessel1/raum"), "garage")
+    p.merke(G, "das Abbild enthaelt keine MAC", "AA:BB" not in json.dumps(lage), json.dumps(lage)[:120])
+
+    # =====================================================================
+    G = "Personen und Raeume"
+    # 1.3.36, ab Werk aus, nur mit raum=1. Vorher festgelegt: Raum der Person = Raum ihres zuletzt gesehenen
+    # anwesenden Tags; weg -> "-"; je Raum Zahl (retained) und Namen (fluechtig); ein leer gewordener Raum meldet 0.
+    p.gleich(G, "Stamm summary/raum/<R>/anzahl", gem.thema_stamm("summary/raum/kueche/anzahl"), "summary/raum/anzahl")
+    p.gleich(G, "Stamm des Musters aus dem Sendecode", gem.thema_stamm("summary/raum/{0}/namen"), "summary/raum/namen")
+    p.gleich(G, "Retain: Raum der Person ja, Zahl je Raum ja, Namen je Raum nein",
+             (gem.retain_fuer("person/Anna/raum", "kueche"), gem.retain_fuer("summary/raum/kueche/anzahl", "1"),
+              gem.retain_fuer("summary/raum/kueche/namen", "Anna")), (True, True, False))
+    cfg_r = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nraum=1\nraum_hysterese_db=5\n"
+             "espresense=1\nespresense_zuordnung=k1=schluessel1,k2=uhr,k3=bernd1\n"
+             "tag1=D1:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1,person=Anna\n"
+             "tag2=D2:BB:CC:DD:EE:FF|1|Uhr|alias=uhr,person=Anna\n"
+             "tag3=D3:BB:CC:DD:EE:FF|1|Bernd|alias=bernd1,person=Bernd\n")
+    da, ga, _oa = _dienst_bauen(cfg_r)
+    _sichtung_setzen(da, "D1:BB:CC:DD:EE:FF", -70, 0)
+    da.nachricht(None, None, _EsN("espresense/devices/k1/wohnzimmer", '{"rssi": -50}'))
+    da.auswerten(erzwingen=True)
+    p.gleich(G, "Schalter aus (ab Werk): kein person/<P>/raum, kein summary/raum",
+             sorted(k for k in ga if (k.startswith("person/") and k.endswith(("/raum", "/raum_seit")))
+                    or k.startswith("summary/raum/")), [])
+    dr, gr, _or = _dienst_bauen(cfg_r + "raum_personen=1\n")
+
+    def _rn(kennung, raum, rssi):
+        dr.nachricht(None, None, _EsN("espresense/devices/%s/%s" % (kennung, raum), '{"rssi": %d}' % rssi))
+
+    _sichtung_setzen(dr, "D1:BB:CC:DD:EE:FF", -70, 0)
+    _sichtung_setzen(dr, "D2:BB:CC:DD:EE:FF", -70, 10)
+    _sichtung_setzen(dr, "D3:BB:CC:DD:EE:FF", -70, 0)
+    _rn("k1", "wohnzimmer", -50)
+    _rn("k2", "kueche", -50)
+    _rn("k3", "kueche", -50)
+    dr.auswerten(erzwingen=True)
+    p.gleich(G, "zwei Tags in zwei Raeumen: es gilt der zuletzt gesehene (Schluessel, wohnzimmer)",
+             gr.get("person/Anna/raum"), "wohnzimmer")
+    p.gleich(G, "je Raum Zahl und Namen",
+             (gr.get("summary/raum/wohnzimmer/anzahl"), gr.get("summary/raum/wohnzimmer/namen"),
+              gr.get("summary/raum/kueche/anzahl"), gr.get("summary/raum/kueche/namen")),
+             ("1", "Anna", "1", "Bernd"))
+    seit1 = gr.get("person/Anna/raum_seit")
+    p.merke(G, "raum_seit ist ein Zeitstempel", bool(seit1) and seit1.isdigit() and int(seit1) > 1700000000, str(seit1))
+    _sichtung_setzen(dr, "D1:BB:CC:DD:EE:FF", -70, 900)
+    _sichtung_setzen(dr, "D2:BB:CC:DD:EE:FF", -70, 900)
+    dr.person_raum["Anna"] = ("wohnzimmer", 1)      # Wechselzeit kenntlich machen
+    dr.auswerten(erzwingen=True)
+    p.gleich(G, "Anna weg: Raum -, wohnzimmer meldet 0 und leere Namen, Bernd bleibt in kueche",
+             (gr.get("person/Anna/raum"), gr.get("summary/raum/wohnzimmer/anzahl"),
+              gr.get("summary/raum/wohnzimmer/namen"), gr.get("summary/raum/kueche/anzahl")),
+             ("-", "0", "", "1"))
+    p.merke(G, "beim Wechsel springt raum_seit auf jetzt", gr.get("person/Anna/raum_seit") not in (None, "1"),
+            str(gr.get("person/Anna/raum_seit")))
+    p.gleich(G, "Abbild: Raeume und Raum je Person",
+             (sorted(dr.raeume_bekannt), {n: r for n, (r, _s) in dr.person_raum.items()}),
+             (["kueche", "wohnzimmer"], {"Anna": "", "Bernd": "kueche"}))
+    d0, g0, _o0 = _dienst_bauen(cfg_r.replace("raum=1\n", "raum=0\n") + "raum_personen=1\n")
+    _sichtung_setzen(d0, "D3:BB:CC:DD:EE:FF", -70, 0)
+    d0.auswerten(erzwingen=True)
+    p.gleich(G, "ohne Raumzuordnung wirkt der Schalter nicht",
+             sorted(k for k in g0 if k.startswith("summary/raum/") or k.endswith("/raum")), [])
+
+    # =====================================================================
     G = "HTTP-Weg"
     cfg7 = ("[CONFIG]\nhttp_push=1\nloxberry_id=haus\nglaettung=0\n"
             "ereignisse=0\nankunft_sichtungen=1\ntag1=AA:BB:CC:DD:EE:FF|1|Anna\n")

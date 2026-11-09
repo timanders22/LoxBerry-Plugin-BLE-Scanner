@@ -908,6 +908,13 @@ class Dienst:
         self.wlan_sperre = threading.Lock()
         self.wlan = {"ts_empfang": 0.0, "ts": 0, "ok": "", "intervall": 0, "personen": {}}
         self.wlan_lage = {"an": 0}
+        # ESPresense-Empfaenger (1.3.36, ab Werk aus): Zaehler fuer den Reiter Test. empfaenger: Raum ->
+        # Zeitpunkt der letzten Meldung; unbekannt: gehoerte Kennung ohne Zuordnung -> Zeitpunkt (hoechstens 20).
+        self.es = {"meldungen": 0, "verworfen": 0, "letzte": 0.0, "empfaenger": {}, "unbekannt": {}}
+        # Personen und Raeume (1.3.36, ab Werk aus): Raum je Person mit dem Zeitpunkt des Wechsels, und die
+        # Raeume, fuer die summary/raum/<R>/... schon hinausging (hoechstens 40; ein leerer Raum meldet 0).
+        self.person_raum = {}
+        self.raeume_bekannt = set()
         # -- Gruppe 13 (1.3.28)
         # Lebenszeichen status/zaehler (0-999, hoechstens alle 30 s, E8)
         self.zaehler = 0
@@ -1077,6 +1084,8 @@ class Dienst:
             if self.cfg.get("wlan_kopplung", "0") == "1":
                 gekoppelt |= {pn for _wn, pn in
                               gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
+            # 1.3.36: Personen- und Raumthemen nur, solange raum_personen und die Raumzuordnung an sind.
+            raum_personen = self._zahl("raum", 0) == 1 and self.cfg.get("raum_personen", "0") == "1"
         altlast = not self.altlast_erledigt
         entfall = not self.entfallen_erledigt
 
@@ -1088,9 +1097,13 @@ class Dienst:
             if gem.stamm_der_linie(rest, scanner) == "":
                 return False
             teile = rest.split("/")
+            if teile[0] == "summary" and len(teile) > 1 and teile[1] == "raum":
+                return not raum_personen
             if teile[0] in ("server", "summary"):
                 return False
             if teile[0] == "person":
+                if teile[-1] in ("raum", "raum_seit") and not raum_personen:
+                    return True
                 if teile[-1] in ("anwesend_gesamt", "quelle"):
                     return not (len(teile) == 3 and teile[1] in gekoppelt)
                 return not (len(teile) > 1 and teile[1] in personen)
@@ -1695,6 +1708,12 @@ class Dienst:
                 if eintrag and eintrag.get("zeit"):
                     eintragp["ts"] = max(eintragp["ts"], int(eintrag["zeit"]))
                 eintragp["namen"].append(tag.get("name") or kennung)
+                # 1.3.36 (raum_personen): der Raum der Person ist der Raum ihres zuletzt gesehenen anwesenden Tags.
+                if raum_an and anwesend and not ohne_aussage and zustand.get("raum"):
+                    z_raum = int(eintrag["zeit"]) if (eintrag and eintrag.get("zeit")) else 0
+                    if z_raum >= eintragp.get("raum_zeit", -1):
+                        eintragp["raum_zeit"] = z_raum
+                        eintragp["raum"] = zustand["raum"]
 
             # 1.3.33: ohne Aussage kein Push - der Eingang behaelt seinen Wert (wie WiFi-Scanner ueber UDP); ein
             # alter Digitaleingang der Originalfassung laese -1 als "ein".
@@ -1716,6 +1735,10 @@ class Dienst:
             p_wechsel = self._senden("person/{0}/present".format(name), -1 if ble_wert is None else ble_wert, erzwingen)
             self._senden("person/{0}/last_seen_ts".format(name), p["ts"], erzwingen,
                          abstand=60, wechsel=p_wechsel)
+
+        # -- Personen und Raeume (1.3.36, ab Werk aus, nur mit Raumzuordnung)
+        if raum_an and self.cfg.get("raum_personen", "0") == "1":
+            self.raum_personen_senden(personen, jetzt_w, schweigen_runde, erzwingen)
 
         # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
         #    ab Werk aus)
@@ -1878,6 +1901,116 @@ class Dienst:
         with self.sperre:      # B12 (Gruppe 13)
             self.raumdaten.setdefault(kennung, {})[scanner] = (time.time(), wert)
 
+    # -- Personen und Raeume (1.3.36, ab Werk aus) ----------------------------
+
+    RAEUME_HOECHSTENS = 40
+
+    def raum_personen_senden(self, personen, jetzt_w, schweigen_runde, erzwingen):
+        """person/<P>/raum und person/<P>/raum_seit je Person, summary/raum/<R>/anzahl und /namen je Raum.
+
+        Der Raum einer Person ist der Raum ihres zuletzt gesehenen anwesenden Tags (auswerten()). Ist sie
+        nicht da oder hat keiner ihrer Tags einen Raum, geht "-" hinaus (retained Zustand ohne Aussage,
+        Entscheidung 5). raum_seit ist der Zeitpunkt des letzten Wechsels der Person, nicht des Tags - wechselt
+        sie den Schluessel, bleibt die Angabe richtig. Eine Person in der Karenz sendet nichts, und die Zahlen je
+        Raum gehen in einer solchen Runde nicht hinaus (sie waeren zu klein, wie summary/present). Ein Raum, in
+        dem einmal jemand war, meldet danach 0 und eine leere Namensliste - bis zum Neustart des Dienstes.
+        """
+        in_raum = {}
+        for name in sorted(personen):
+            p = personen[name]
+            ble_wert = self._person_ble(p)
+            if ble_wert is None and p.get("offen"):
+                continue
+            raum = gem.thema_saeubern(p.get("raum", "")) if ble_wert == 1 else ""
+            alt = self.person_raum.get(name)
+            if alt is None or alt[0] != raum:
+                self.person_raum[name] = (raum, int(jetzt_w))
+            self._senden("person/{0}/raum".format(name), raum, erzwingen)
+            self._senden("person/{0}/raum_seit".format(name), self.person_raum[name][1], erzwingen)
+            if raum:
+                in_raum.setdefault(raum, []).append(name)
+        for name in [n for n in self.person_raum if n not in personen]:
+            del self.person_raum[name]
+        for raum in sorted(in_raum):
+            if raum not in self.raeume_bekannt and len(self.raeume_bekannt) < self.RAEUME_HOECHSTENS:
+                self.raeume_bekannt.add(raum)
+        if schweigen_runde:
+            return
+        for raum in sorted(self.raeume_bekannt):
+            namen = sorted(in_raum.get(raum, []))
+            self._senden("summary/raum/{0}/anzahl".format(raum), len(namen), erzwingen)
+            self._senden("summary/raum/{0}/namen".format(raum), ", ".join(namen), erzwingen)
+
+    # -- ESPresense-Empfaenger in der Raumzuordnung (1.3.36, ab Werk aus) ----
+
+    def _es_praefix(self):
+        p = str(self.cfg.get("espresense_praefix", "espresense") or "").strip()
+        return p if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", p) else "espresense"
+
+    def es_nachricht(self, nachricht):
+        """Eine Meldung <praefix>/devices/<Kennung>/<Raum> eines ESPresense-Knotens. Rueckgabe: war es eine?
+
+        ESPresense sendet je Geraet und Raum ein JSON mit id, rssi, distance, ... - nicht
+        zurueckbehalten. Ein zurueckbehaltener Wert waere eine alte Messung und zaehlt nicht. Die
+        Kennung wird ueber espresense_zuordnung (oder unmittelbar als Alias) einem Tag zugeordnet;
+        der Raum des Knotens tritt in der Raumzuordnung an die Stelle eines Scannernamens. Die
+        Anwesenheit (present) bleibt die Aussage dieses LoxBerry - der Empfaenger nennt nur den Raum.
+        """
+        if self.cfg.get("espresense", "0") != "1":
+            return False
+        vor = self._es_praefix() + "/devices/"
+        thema = str(getattr(nachricht, "topic", ""))
+        if not thema.startswith(vor):
+            return False
+        teile = thema[len(vor):].split("/")
+        jetzt = time.time()
+        if len(teile) != 2 or not gem.ES_KENNUNG.match(teile[0]) or not gem.ES_RAUM.match(teile[1]) \
+                or bool(getattr(nachricht, "retain", False)):
+            with self.sperre:
+                self.es["verworfen"] += 1
+            return True
+        kennung_es, raum = teile
+        try:
+            daten = json.loads(bytes(nachricht.payload or b"").decode("utf-8", "replace"))
+            rssi = int(round(float(daten.get("rssi"))))
+        except (ValueError, TypeError, AttributeError):
+            with self.sperre:
+                self.es["verworfen"] += 1
+            return True
+        if rssi < -120 or rssi > 0:
+            with self.sperre:
+                self.es["verworfen"] += 1
+            return True
+        zweig = dict(gem.es_zuordnung_lesen(self.cfg.get("espresense_zuordnung", ""))).get(kennung_es, kennung_es)
+        kennung = self._kennung_zum_zweig(zweig)
+        with self.sperre:
+            self.es["meldungen"] += 1
+            self.es["letzte"] = jetzt
+            if raum in self.es["empfaenger"] or len(self.es["empfaenger"]) < 40:
+                self.es["empfaenger"][raum] = jetzt
+            if not kennung:
+                if kennung_es in self.es["unbekannt"] or len(self.es["unbekannt"]) < 20:
+                    self.es["unbekannt"][kennung_es] = jetzt
+                return True
+            self.raumdaten.setdefault(kennung, {})[raum] = (jetzt, rssi)
+        return True
+
+    def _es_abbild(self):
+        """Die Lage fuer die Pruefzeile im Reiter Test - Zahlen und Namen, nie eine MAC."""
+        if self.cfg.get("espresense", "0") != "1":
+            return {"an": 0}
+        jetzt = time.time()
+        with self.sperre:
+            return {
+                "an": 1,
+                "praefix": self._es_praefix(),
+                "meldungen": self.es["meldungen"],
+                "verworfen": self.es["verworfen"],
+                "alter": int(jetzt - self.es["letzte"]) if self.es["letzte"] else -1,
+                "empfaenger": {r: int(jetzt - z) for r, z in sorted(self.es["empfaenger"].items())},
+                "unbekannt": sorted(self.es["unbekannt"])[:20],
+            }
+
     # -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026) ------
 
     def abonnieren(self, client):
@@ -1885,6 +2018,9 @@ class Dienst:
         Ein gemeinsamer Empfaenger verteilt die Nachrichten."""
         if self._zahl("raum", 0) == 1:
             self.raum_abonnieren(client)
+            if self.cfg.get("espresense", "0") == "1":
+                client.subscribe(self._es_praefix() + "/devices/+/+", qos=0)
+                log.info("ESPresense-Empfaenger: abonniert %s/devices/+/+", self._es_praefix())
         if self.cfg.get("wlan_kopplung", "0") == "1":
             client.subscribe(gem.WLAN_PRAEFIX + "/#", qos=0)
             log.info("Anwesenheit mit dem WLAN-Scanner: abonniert %s/#", gem.WLAN_PRAEFIX)
@@ -1896,6 +2032,12 @@ class Dienst:
                 return
         except Exception as fehler:      # noqa: BLE001
             log.warning("Nachricht des WLAN-Scanners nicht auswertbar: %s", fehler)
+            return
+        try:
+            if self.es_nachricht(nachricht):
+                return
+        except Exception as fehler:      # noqa: BLE001
+            log.warning("Nachricht eines ESPresense-Empfaengers nicht auswertbar: %s", fehler)
             return
         self.raum_nachricht(c, u, nachricht)
 
@@ -2253,6 +2395,12 @@ class Dienst:
             # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026):
             # die Lage fuer die Pruefzeile im Reiter Test.
             "wlan": self.wlan_lage,
+            # ESPresense-Empfaenger (1.3.36): Lage fuer die Pruefzeile im Reiter Test.
+            "espresense": self._es_abbild(),
+            # Personen und Raeume (1.3.36): die Raeume mit eigenen summary/raum/<R>/... (Reiter Einbindung) und der
+            # Raum je Person - leer, solange die Einstellung aus ist. Raumnamen sind Themennamen, nie eine MAC.
+            "raeume": sorted(self.raeume_bekannt),
+            "person_raum": {n: r for n, (r, _s) in sorted(self.person_raum.items())},
         }
         try:
             temp = gem.STATUS_FILE + ".tmp"
@@ -2786,6 +2934,8 @@ class Dienst:
         alter_adapter = self.cfg.get("adapter", "hci0")
         altes_mqtt = self.cfg.get("mqtt", "1")
         alte_wlan = (self.cfg.get("wlan_kopplung", "0"), self.cfg.get("wlan_zuordnung", ""))
+        alte_es = (self._zahl("raum", 0) == 1 and self.cfg.get("espresense", "0") == "1", self._es_praefix())
+        alte_rp = self._zahl("raum", 0) == 1 and self.cfg.get("raum_personen", "0") == "1"
 
         self.cfg, self.tags, _ = gem.konfiguration_lesen()
         self.ms = miniserver_liste()
@@ -2878,6 +3028,35 @@ class Dienst:
                 except Exception as fehler:      # noqa: BLE001
                     log.warning("MQTT-Abo des WLAN-Scanners nicht umgestellt: %s", fehler)
                 self.mqtt_aufraeumen_anstossen()
+        # Personen und Raeume (1.3.36): ausgeschaltet - die Themen mit Nachlesen abraeumen (mqtt_aufraeumen,
+        # "entfallen"); eingeschaltet - frisch beginnen.
+        neue_rp = self._zahl("raum", 0) == 1 and self.cfg.get("raum_personen", "0") == "1"
+        if neue_rp != alte_rp:
+            log.info("Personen und Raeume: Einstellung geaendert (%s).", "an" if neue_rp else "aus")
+            self.person_raum = {}
+            self.raeume_bekannt = set()
+            if not neue_rp:
+                self.entfallen_erledigt = False
+                if self.mqtt.client is not None and self.mqtt.verbunden:
+                    self.mqtt_aufraeumen_anstossen()
+        # ESPresense (1.3.36): Schalter, Raumzuordnung oder Praefix geaendert - Abo nachziehen, Zaehler neu.
+        neue_es = (self._zahl("raum", 0) == 1 and self.cfg.get("espresense", "0") == "1", self._es_praefix())
+        if neue_es != alte_es:
+            log.info("ESPresense-Empfaenger: Einstellung geaendert (%s, %s).",
+                     "an" if neue_es[0] else "aus", neue_es[1])
+            with self.sperre:
+                self.es = {"meldungen": 0, "verworfen": 0, "letzte": 0.0, "empfaenger": {}, "unbekannt": {}}
+            if neue_es[0]:
+                self.mqtt.abo_rueckruf = self.abonnieren
+            if self.mqtt.client is not None and self.mqtt.verbunden:
+                try:
+                    if alte_es[0]:
+                        self.mqtt.client.unsubscribe(alte_es[1] + "/devices/+/+")
+                    if neue_es[0]:
+                        self.mqtt.client.subscribe(neue_es[1] + "/devices/+/+", qos=0)
+                        self.mqtt.client.on_message = self.nachricht
+                except Exception as fehler:      # noqa: BLE001
+                    log.warning("MQTT-Abo der ESPresense-Empfaenger nicht umgestellt: %s", fehler)
         log.info("Konfiguration neu eingelesen: %d Tag(s), davon %d aktiv",
                  len(self.tags), sum(1 for t in self.tags if t.get("aktiv") == "1"))
 

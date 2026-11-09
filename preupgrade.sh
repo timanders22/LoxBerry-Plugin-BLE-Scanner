@@ -371,8 +371,7 @@ fi
 # (Identitaetsschluessel). Nur eine Datei, die als JSON-Objekt beginnt und endet; sonst bleibt die bisherige.
 NETZ_IRK="$NETZ_CFG/irk.json"
 NETZ_IRK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
-if [ -s "$NETZ_IRK" ] && [ "$(head -c 1 "$NETZ_IRK" 2>/dev/null)" = "{" ] \
-   && tail -c 3 "$NETZ_IRK" 2>/dev/null | grep -q '}'; then
+if bl_json_objekt "$NETZ_IRK"; then
     if zs_hinlegen "$NETZ_IRK" "$NETZ_IRK_ZIEL"; then
         echo "<INFO> Zweitschrift der IRK-Schluessel angelegt (0600)."
     else
@@ -385,8 +384,7 @@ fi
 # Gruppe 33 (1.3.29): Zweitschrift von bindkey.json (Bind-Keys der Xiaomi-Thermometer) - wie irk.json, 0600.
 NETZ_BK="$NETZ_CFG/bindkey.json"
 NETZ_BK_ZIEL="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
-if [ -s "$NETZ_BK" ] && [ "$(head -c 1 "$NETZ_BK" 2>/dev/null)" = "{" ] \
-   && tail -c 3 "$NETZ_BK" 2>/dev/null | grep -q '}'; then
+if bl_json_objekt "$NETZ_BK"; then
     if zs_hinlegen "$NETZ_BK" "$NETZ_BK_ZIEL"; then
         echo "<INFO> Zweitschrift der Bind-Keys angelegt (0600)."
     else

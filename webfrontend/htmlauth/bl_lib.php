@@ -206,13 +206,21 @@ function bl_fassung()
             return $f = $wert;
         }
     }
-    foreach (array(dirname(dirname(__DIR__)) . '/plugin.cfg', $p['home'] !== ''
-                   ? $p['home'] . '/data/system/plugindatabase.json' : '') as $k) {
-        if ($k === '' || substr($k, -10) !== 'plugin.cfg' || !is_file($k)) {
-            continue;
-        }
-        if (preg_match('/^\s*VERSION\s*=\s*"?([0-9]+(?:\.[0-9]+){0,3})"?\s*$/m', (string) @file_get_contents($k), $m)) {
-            return $f = $m[1];
+    $k = dirname(dirname(__DIR__)) . '/plugin.cfg';
+    if (is_file($k) && preg_match('/^\s*VERSION\s*=\s*"?([0-9]+(?:\.[0-9]+){0,3})"?\s*$/m', (string) @file_get_contents($k), $m)) {
+        return $f = $m[1];
+    }
+    // 1.3.36 (Fremdpruefung 09.11.2026): plugindatabase.json stand bis 1.3.35 in derselben Liste, wurde aber von der
+    // Pruefung auf "plugin.cfg" sofort uebersprungen. Jetzt gelesen: der Eintrag mit folder = eigener Ordner.
+    $db = $p['home'] !== '' ? $p['home'] . '/data/system/plugindatabase.json' : '';
+    if ($db !== '' && is_file($db)) {
+        $j = json_decode((string) @file_get_contents($db), true);
+        $eintraege = (is_array($j) && isset($j['plugins']) && is_array($j['plugins'])) ? $j['plugins'] : array();
+        foreach ($eintraege as $e) {
+            if (is_array($e) && isset($e['folder'], $e['version']) && $e['folder'] === $p['plugin']
+                && preg_match('/^\d+(\.\d+){0,3}$/', (string) $e['version'])) {
+                return $f = (string) $e['version'];
+            }
         }
     }
     return $f = '';
@@ -257,6 +265,12 @@ function bl_defaults()
         'raum'               => '0',
         'raum_hysterese_db'  => '5',
         'raum_ausgleich_db'  => '0',
+        // Personen und Raeume (1.3.36), ab Werk aus; wirkt nur mit raum=1
+        'raum_personen'      => '0',
+        // ESPresense-Empfaenger in der Raumzuordnung (1.3.36), ab Werk aus
+        'espresense'           => '0',
+        'espresense_praefix'   => 'espresense',
+        'espresense_zuordnung' => '',
         'entfernung'         => '0',
         'daempfung'          => '2.5',
         'beacon'             => '1',
@@ -287,7 +301,8 @@ function bl_defaults()
 function bl_schluessel_spaeter()
 {
     return array('wlan_kopplung', 'wlan_zuordnung', 'befehle_mqtt_ein', 'befehle_eingreifend_ein',
-                 'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region');
+                 'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region',
+                 'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen');
 }
 
 /**
@@ -334,6 +349,10 @@ function bl_regeln()
         'raum'               => array('schalter'),
         'raum_hysterese_db'  => array('zahl', 0, 30),
         'raum_ausgleich_db'  => array('zahl', -30, 30),
+        'raum_personen'      => array('schalter'),
+        'espresense'           => array('schalter'),
+        'espresense_praefix'   => array('muster', '/^[A-Za-z0-9_-]{1,32}$/'),
+        'espresense_zuordnung' => array('es_zuordnung'),
         'entfernung'         => array('schalter'),
         'daempfung'          => array('komma', 1.5, 6.0),
         'beacon'             => array('schalter'),
@@ -427,6 +446,31 @@ function bl_wert_pruefen($k, $roh)
                 }
                 $bl_wl[$bl_m[1]] = true;
                 $bl_pe[$bl_m[2]] = true;
+                $bl_zu[] = $bl_m[1] . '=' . $bl_m[2];
+            }
+            if (count($bl_zu) > 20) {
+                return array(false, '', 'grenze');
+            }
+            return array(true, implode(', ', $bl_zu), '');
+        case 'es_zuordnung':
+            // "<ESPresense-Kennung>=<Tag-Alias>, ..." (1.3.36): links die Kennung, wie ESPresense sie im
+            // Thema fuehrt (dazu Doppelpunkt und Punkt, z. B. iBeacon:...-100-1), rechts ein Tag-Alias.
+            // Dieselbe Regel wie es_zuordnung_lesen() in bin/bl_common.py; abgewiesen, nicht zurechtgebogen.
+            if ($w === '') {
+                return array(true, '', '');
+            }
+            $bl_zu = array();
+            $bl_li = array();
+            $bl_re = array();
+            foreach (preg_split('/\s*,\s*/', $w) as $bl_paar) {
+                if (!preg_match('/^([A-Za-z0-9:._-]{1,80})\s*=\s*([A-Za-z0-9_-]{1,40})$/', $bl_paar, $bl_m)) {
+                    return array(false, '', 'muster');
+                }
+                if (isset($bl_li[$bl_m[1]]) || isset($bl_re[$bl_m[2]])) {
+                    return array(false, '', 'doppelt');
+                }
+                $bl_li[$bl_m[1]] = true;
+                $bl_re[$bl_m[2]] = true;
                 $bl_zu[] = $bl_m[1] . '=' . $bl_m[2];
             }
             if (count($bl_zu) > 20) {
@@ -558,6 +602,11 @@ function bl_retain()
         // -- Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026)
         'person/anwesend_gesamt' => true,
         'person/quelle'          => true,
+        // -- Personen und Raeume (1.3.36, raum_personen); die Namensliste je Raum ist regelmaessig leer
+        'person/raum'            => true,
+        'person/raum_seit'       => true,
+        'summary/raum/anzahl'    => true,
+        'summary/raum/namen'     => false,
         'scanner/present'     => true,
 
         // -- Messwerte mit Zeitbezug: NICHT retained
@@ -608,6 +657,10 @@ function bl_thema_stamm($thema)
     if (in_array('sensor', $teile, true)) {
         // Gruppe 33: sensor/lage ist ein eigener Stamm (retained), alle anderen Messwerte "sensor".
         return $teile[count($teile) - 1] === 'lage' ? 'sensor/lage' : 'sensor';
+    }
+    if ($teile[0] === 'summary' && count($teile) >= 3 && $teile[1] === 'raum') {
+        // 1.3.36: summary/raum/<R>/anzahl -> summary/raum/anzahl (wie gem.thema_stamm())
+        return 'summary/raum/' . $teile[count($teile) - 1];
     }
     if (in_array($teile[0], array('server', 'summary', 'status'), true)) {
         return $teile[0] . '/' . (isset($teile[1]) ? $teile[1] : '');
@@ -1271,8 +1324,11 @@ function bl_dienst($aktion)
         @mkdir(dirname($datei), 0775, true);
         @mkdir($p['logdir'], 0775, true);
         // Die Prozessnummer wird von der Shell weggeschrieben, nicht geraten.
+        // 1.3.36 (Fremdpruefung 09.11.2026): Eingabe aus /dev/null und die Deskriptoren 3 bis 9 fuer den Dienst
+        // geschlossen - er soll nichts vom Webserver-Prozess erben (wie befehlsbruecke.sh 8<&-). Nicht gemessen,
+        // ob Apache dort etwas ohne O_CLOEXEC offen haelt (fdinfo der Arbeitsprozesse nicht lesbar).
         @exec('nohup ' . escapeshellarg($skript) . ' >> ' . escapeshellarg($log)
-            . ' 2>&1 & echo $! > ' . escapeshellarg($datei) . '; echo gestartet', $meldungen);
+            . ' 2>&1 < /dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- & echo $! > ' . escapeshellarg($datei) . '; echo gestartet', $meldungen);
         // Drei Sekunden, dann nachsehen, ob er NOCH lebt (Regeln/03 Z. 397:
         // an Python gemessen; bis 1.3.19 galt er nach 0,5 s als gestartet,
         // und ein spaeterer Tod blieb unbemerkt).
@@ -2117,6 +2173,140 @@ function bl_wlan_zuordnung($text)
         $aus[] = array($m[1], $m[2]);
     }
     return array_slice($aus, 0, 20);
+}
+
+/**
+ * Zuordnungen als Tabelle, eine Zeile je Paar (1.3.36, Hausherr 09.11.2026: das einzeilige Kommafeld
+ * war bei sieben Paaren nicht mehr lesbar). Gespeichert wird unveraendert die Kommaliste
+ * "<links>=<rechts>, ..." - Dienst, Sicherung und bestehende Anlagen merken nichts davon.
+ *
+ * bl_zuordnung_paare(): eine Kommaliste ungeprueft in Paare zerlegen, nur fuer die Anzeige.
+ */
+function bl_zuordnung_paare($text)
+{
+    $aus = array();
+    foreach (explode(',', (string) $text) as $s) {
+        $s = trim($s);
+        if ($s === '') {
+            continue;
+        }
+        $p = strpos($s, '=');
+        $aus[] = $p === false ? array($s, '') : array(trim(substr($s, 0, $p)), trim(substr($s, $p + 1)));
+    }
+    return $aus;
+}
+
+/**
+ * Die Zeilen <vor>_links[i], <vor>_rechts[i], <vor>_alt[i] aus $_POST lesen und jede einzeln gegen
+ * die Regel $regel halten (Regeln/03: bei Listen beanstanden, den bisherigen Eintrag stehen lassen,
+ * weitermachen). Eine leere Zeile ist kein Paar - wer beide Felder leert, loescht das Paar.
+ * Rueckgabe: null, wenn das Formular keine Tabelle schickte; sonst array(angenommen, getippt):
+ * angenommen = die Kommaliste zum Speichern, getippt = wie eingegeben (fuer die Anzeige nach einer
+ * Beanstandung). Jede Beanstandung kommt nach $fehler, mit Zeile, Eingabe, Grund und was bleibt.
+ */
+function bl_zuordnung_zeilen($vor, $regel, $titel, &$fehler)
+{
+    $feld = function ($name) use ($vor) {
+        return (isset($_POST[$vor . '_' . $name]) && is_array($_POST[$vor . '_' . $name]))
+               ? $_POST[$vor . '_' . $name] : null;
+    };
+    $li = $feld('links');
+    if ($li === null) {
+        return null;
+    }
+    $re = $feld('rechts');
+    $alt = $feld('alt');
+    $wert = function ($liste, $i) {
+        return (is_array($liste) && isset($liste[$i]) && is_string($liste[$i])) ? trim($liste[$i]) : '';
+    };
+    $angenommen = array();
+    $links_da = array();
+    $rechts_da = array();
+    $getippt = array();
+    $n = 0;
+    foreach ($li as $i => $_l) {
+        if (++$n > 60) {
+            break;
+        }
+        $l = $wert($li, $i);
+        $r = $wert($re, $i);
+        if ($l === '' && $r === '') {
+            continue;
+        }
+        $getippt[] = $l . '=' . $r;
+        $grund = '';
+        $wl = '';
+        $wr = '';
+        if ($l === '' || $r === '') {
+            $grund = 'HALB';
+        } else {
+            list($ok, $w) = bl_wert_pruefen($regel, $l . '=' . $r);
+            if (!$ok || strpos($w, ',') !== false) {
+                $grund = 'MUSTER';
+            } else {
+                list($wl, $wr) = explode('=', $w, 2);
+                if (isset($links_da[$wl]) || isset($rechts_da[$wr])) {
+                    $grund = 'DOPPELT';
+                }
+            }
+        }
+        if ($grund === '') {
+            $links_da[$wl] = true;
+            $rechts_da[$wr] = true;
+            $angenommen[] = $wl . '=' . $wr;
+            continue;
+        }
+        $bleibt = '-';
+        $a = $wert($alt, $i);
+        if ($a !== '') {
+            list($ok2, $w2) = bl_wert_pruefen($regel, $a);
+            if ($ok2 && strpos($w2, ',') === false && strpos($w2, '=') !== false) {
+                list($al, $ar) = explode('=', $w2, 2);
+                if (!isset($links_da[$al]) && !isset($rechts_da[$ar])) {
+                    $links_da[$al] = true;
+                    $rechts_da[$ar] = true;
+                    $angenommen[] = $al . '=' . $ar;
+                    $bleibt = $al . '=' . $ar;
+                }
+            }
+        }
+        // Steuerzeichen weg wie bl_saubere_eingabe() in index.php - hier eigens, damit die Bibliothek
+        // nicht von index.php abhaengt (der Pruefstand laedt sie allein).
+        $sauber = function ($s) {
+            return trim((string) preg_replace('/[\x00-\x1F\x7F]+/u', '', (string) $s));
+        };
+        $fehler[] = sprintf(bl_t('MANGEL.ZU_ZEILE'), $titel, (int) $i + 1, $sauber($l),
+                            $sauber($r), bl_t('MANGEL.ZU_GRUND_' . $grund), $bleibt);
+    }
+    return array(implode(', ', $angenommen), implode(', ', $getippt));
+}
+
+/**
+ * Die Tabelle zeichnen: die Paare aus $anzeige (nach einer Beanstandung das Eingetippte, sonst das
+ * Gespeicherte), dazu drei leere Zeilen, hoechstens 23. Das versteckte <vor>_alt[i] traegt das
+ * gespeicherte Paar derselben Zeile - es bleibt stehen, wenn die Zeile beanstandet wird.
+ * Ausgeschriebener Index (Regeln/04), jeder Wert durch bl_e().
+ */
+function bl_zuordnung_tabelle($vor, $anzeige, $gespeichert, $kopf_links, $kopf_rechts, $platz_links, $platz_rechts, $markierung)
+{
+    $paare = bl_zuordnung_paare($anzeige);
+    $alte = bl_zuordnung_paare($gespeichert);
+    $zeilen = min(23, count($paare) + 3);
+    $h = '<div' . $markierung . '><div class="sm-breit"><table class="sm-tbl">'
+       . '<tr><th style="width:3em;">' . bl_e(bl_t('FELD.ZU_SP_NR')) . '</th><th>' . bl_e($kopf_links)
+       . '</th><th>' . bl_e($kopf_rechts) . '</th></tr>';
+    for ($i = 0; $i < $zeilen; $i++) {
+        $l = isset($paare[$i]) ? $paare[$i][0] : '';
+        $r = isset($paare[$i]) ? $paare[$i][1] : '';
+        $a = isset($alte[$i]) ? $alte[$i][0] . '=' . $alte[$i][1] : '';
+        $h .= '<tr><td>' . (int) ($i + 1) . '</td>'
+            . '<td><input data-role="none" type="text" name="' . bl_e($vor) . '_links[' . (int) $i . ']" value="' . bl_e($l)
+            . '" placeholder="' . bl_e($i === 0 ? $platz_links : '') . '" style="width:100%;box-sizing:border-box;">'
+            . '<input data-role="none" type="hidden" name="' . bl_e($vor) . '_alt[' . (int) $i . ']" value="' . bl_e($a) . '"></td>'
+            . '<td><input data-role="none" type="text" name="' . bl_e($vor) . '_rechts[' . (int) $i . ']" value="' . bl_e($r)
+            . '" placeholder="' . bl_e($i === 0 ? $platz_rechts : '') . '" style="width:100%;box-sizing:border-box;"></td></tr>';
+    }
+    return $h . '</table></div></div>';
 }
 
 /**
@@ -3266,13 +3456,18 @@ function bl_eingabe_felder($form)
                              'aktualisierung', 'ankunft_sichtungen', 'rssi_minimum', 'rssi_nah',
                              'rssi_mittel', 'glaettung_fenster', 'hysterese_db', 'daempfung',
                              'batterie_uhrzeit', 'ereignisse_tage', 'scanner_name',
-                             'raum_hysterese_db', 'raum_ausgleich_db', 'wlan_zuordnung'),
+                             'raum_hysterese_db', 'raum_ausgleich_db', 'wlan_zuordnung',
+                             'espresense_praefix', 'espresense_zuordnung',
+                             // 1.3.36 (Fremdpruefung 09.11.2026): seit Gruppe 13/33 im Formular, hier vergessen -
+                             // nach einer Beanstandung stand der gespeicherte Wert statt der Eingabe da.
+                             'messwert_frist', 'xiaomi_region'),
             'haken' => array('http_push', 'wachhund', 'glaettung', 'beacon', 'entfernung',
-                             'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung'),
+                             'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung',
+                             'espresense', 'bthome', 'irk_aufloesen', 'haus_anwesenheit', 'raum_personen'),
         ),
         'mqtt' => array(
             'text'  => array('themenpraefix'),
-            'haken' => array('mqtt'),
+            'haken' => array('mqtt', 'befehle_mqtt_ein', 'befehle_eingreifend_ein'),
         ),
     );
     return isset($felder[$form]) ? $felder[$form] : null;
@@ -3396,12 +3591,18 @@ function bl_eingaben_setzen($roh = null)
             $tb = array();
             if (isset($t['bean']) && is_array($t['bean'])) {
                 foreach ($t['bean'] as $b) {
-                    if (is_string($b) && in_array($b, array_merge(array('kennung', 'name'), bl_tag_optionen()), true)) {
+                    // 1.3.36: auch irk und bindkey (bl_irk_aus_post/bl_bindkey_aus_post markieren sie) - sonst
+                    // fehlte nach der Umleitung der rote Rahmen, und die Zusatzangaben blieben zugeklappt.
+                    if (is_string($b) && in_array($b, array_merge(array('kennung', 'name', 'irk', 'bindkey'), bl_tag_optionen()), true)) {
                         $tb[] = $b;
                     }
                 }
             }
-            $tags[] = array('art' => '', 'kennung' => $s('kennung'), 'mac' => '', 'name' => $s('name'),
+            // 1.3.36 (Fremdpruefung 09.11.2026): die Art aus der eingetippten Kennung. Bis 1.3.35 stand 'art' => '' -
+            // nach jeder Beanstandung fehlten in allen Tag-Zeilen die Felder fuer IRK und Bind-Key (index.php fragt
+            // $tag['art'] === 'irk' bzw. 'mac').
+            list($bl_ea, $bl_ek) = bl_kennung($s('kennung'));
+            $tags[] = array('art' => $bl_ea, 'kennung' => $s('kennung'), 'mac' => $bl_ea === 'mac' ? $bl_ek : '', 'name' => $s('name'),
                             'aktiv' => $s('aktiv') === '1' ? '1' : '0', 'opt' => $opt,
                             '_alt' => $s('alt'), '_weg' => $s('weg') === '1', '_bean' => $tb);
         }
@@ -3544,6 +3745,11 @@ function bl_zweig_themen()
         // Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026); seit Gruppe 13 (V10) fuer jede Person
         'person/<P>/anwesend_gesamt' => array('s' => 'THEMA.P_GESAMT', 'art' => 'digital'),
         'person/<P>/quelle'          => array('s' => 'THEMA.P_QUELLE', 'art' => 'text'),
+        // 1.3.36: Personen und Raeume (nur mit raum_personen und Raumzuordnung)
+        'person/<P>/raum'            => array('s' => 'THEMA.P_RAUM', 'art' => 'text'),
+        'person/<P>/raum_seit'       => array('s' => 'THEMA.P_RAUM_SEIT', 'art' => 'analog'),
+        'summary/raum/<R>/anzahl'    => array('s' => 'THEMA.R_ANZAHL', 'art' => 'analog'),
+        'summary/raum/<R>/namen'     => array('s' => 'THEMA.R_NAMEN', 'art' => 'text'),
         'scanner/<S>/<T>/present' => array('s' => 'THEMA.SC_PRESENT', 'art' => 'digital'),
         'scanner/<S>/<T>/rssi'    => array('s' => 'THEMA.SC_RSSI', 'art' => 'analog'),
         // Gruppe 13 (E9): Lebenszeichen je Scanner, nur bei scanner_themen
@@ -3849,6 +4055,9 @@ function bl_mqtt_namen($cfg, $tags)
         }
     }
     $personen = bl_personen($tags);
+    $tag_personen = $personen;
+    // 1.3.36: Personen und Raeume nur mit raum_personen UND Raumzuordnung, und nur fuer Personen an Tags.
+    $raum_personen = bl_cfg($cfg, 'raum', '0') === '1' && bl_cfg($cfg, 'raum_personen', '0') === '1';
     if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
         foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) {
             if (!in_array($paar[1], $personen, true)) { $personen[] = $paar[1]; }
@@ -3859,9 +4068,26 @@ function bl_mqtt_namen($cfg, $tags)
             if (strpos($k, 'person/<P>/') !== 0) {
                 continue;
             }
+            if (in_array($k, array('person/<P>/raum', 'person/<P>/raum_seit'), true)
+                && (!$raum_personen || !in_array($pn, $tag_personen, true))) {
+                continue;
+            }
             $info['min'] = substr($k, -15) === 'anwesend_gesamt' ? -1 : 0;
             $info['max'] = $info['art'] === 'analog' ? 2147483647 : 1;
             $zeile(str_replace('<P>', $pn, $k), $info, $pn);
+        }
+    }
+    if ($raum_personen) {
+        // Die Raeume kennt erst der Dienst (Scannernamen, ESPresense-Raeume): aus dem Abbild, sobald einmal jemand
+        // darin war. Ohne Abbild fehlen diese Zeilen - sie kommen nach dem ersten Treffer.
+        $s = bl_status();
+        $raeume = ($s && isset($s['raeume']) && is_array($s['raeume'])) ? $s['raeume'] : array();
+        foreach ($raeume as $r) {
+            if (!is_string($r) || !preg_match('/^[A-Za-z0-9_-]{1,64}\z/', $r)) {
+                continue;
+            }
+            $zeile('summary/raum/' . $r . '/anzahl', array('s' => 'THEMA.R_ANZAHL', 'art' => 'analog', 'min' => 0, 'max' => 999), $r);
+            $zeile('summary/raum/' . $r . '/namen', array('s' => 'THEMA.R_NAMEN', 'art' => 'text'), $r);
         }
     }
     if (bl_cfg($cfg, 'scanner_themen', '0') === '1') {
@@ -4691,58 +4917,118 @@ function bl_cloud_uebernehmen($index)
     if ($a === null || !isset($a['geraet']) || !is_array($a['geraet'])) {
         return array(false, 'ABGELAUFEN', '', false);
     }
-    $g = $a['geraet'];
-    $name = isset($g['name']) && is_string($g['name']) ? trim($g['name']) : '';
-    $name = trim((string) preg_replace('/[\x00-\x1F\x7F"\'|,=<>\\\\]/u', '', $name));
-    $name = function_exists('mb_substr') ? mb_substr($name, 0, 40, 'UTF-8') : substr($name, 0, 40);
-    $mac = bl_mac(isset($g['mac']) ? (string) $g['mac'] : '');
-    $key = bl_bindkey_form(isset($g['bindkey']) ? (string) $g['bindkey'] : '');
-    $g = null;
-    if ($mac === '') {
-        return array(false, 'MAC', $name, false);
+    $erg = bl_cloud_geraete_eintragen(array($a['geraet']));
+    $a = null;
+    return $erg[0];
+}
+
+/**
+ * 1.3.36 (Fremdpruefung 09.11.2026, Funktionsluecke): MEHRERE Geraete der Auswahl in einem Griff uebernehmen. Bis
+ * dahin verbrauchte die erste Uebernahme die Liste, jedes weitere Thermometer brauchte eine neue Anmeldung samt
+ * Zweitfaktor. Das Stammmodul konnte es seit 1.0.1 (xc_auswahl_mehrere()), die Oberflaeche nutzte es nicht.
+ * $indizes: die angehakten Indizes. Rueckgabe: null = Auswahl abgelaufen oder verbraucht; array() = nichts angehakt
+ * (die Liste bleibt liegen); sonst je Geraet array(ok, Lage, Bezeichnung, alte_form) wie bl_cloud_uebernehmen().
+ */
+function bl_cloud_mehrere(array $indizes)
+{
+    bl_cloud_bereit();
+    $wahl = xc_auswahl_mehrere($indizes);
+    if ($wahl === null) {
+        return null;
     }
-    if ($key === '') {
-        return array(false, 'SCHLUESSEL', $name, false);
+    if (!$wahl) {
+        return array();
     }
+    $erg = bl_cloud_geraete_eintragen(array_values($wahl));
+    $wahl = null;
+    return $erg;
+}
+
+/**
+ * Der gemeinsame Kern (E-E7): je Geraet gibt es einen Tag mit dieser MAC -> er bekommt den Schluessel; sonst ein neuer
+ * aktiver Tag <MAC>|1|<Name aus der Cloud>|alias=<haus_name(Name)> - Alias nur, wenn frei und zulaessig (frei auch
+ * gegenueber den Aliasen, die in DIESEM Griff entstehen). Ein Geraet ohne MAC, ohne brauchbaren Schluessel oder mit
+ * unzulaessigem Namen wird gemeldet und uebersprungen, die uebrigen gehen hinein. Konfiguration und bindkey.json
+ * werden je EINMAL geschrieben; scheitert eines davon, scheitern alle Geraete dieses Schreibens (Lage SCHREIBEN).
+ */
+function bl_cloud_geraete_eintragen(array $geraete)
+{
     list($cfg, $tags, ) = bl_config_read();
-    $da = false;
     $aliase = array();
+    $macs = array();
     foreach ($tags as $t) {
-        if ($t['art'] === 'mac' && $t['mac'] === $mac) { $da = true; }
+        if ($t['art'] === 'mac') { $macs[$t['mac']] = true; }
         if (isset($t['opt']['alias']) && $t['opt']['alias'] !== '') { $aliase[] = strtolower(bl_saeubern($t['opt']['alias'])); }
     }
-    $lage = 'BESTEHEND';
-    if (!$da) {
-        $alias = bl_haus_name($name);
-        if ($alias === '' || trim($alias, '_') === '' || in_array($alias, bl_reservierte_zweige(), true)
-            || in_array($alias, $aliase, true)) {
-            $alias = '';
+    $erg = array();
+    $schluessel = array();
+    $neue_tags = false;
+    foreach ($geraete as $i => $g) {
+        $g = is_array($g) ? $g : array();
+        $name = isset($g['name']) && is_string($g['name']) ? trim($g['name']) : '';
+        $name = trim((string) preg_replace('/[\x00-\x1F\x7F"\'|,=<>\\\\]/u', '', $name));
+        $name = function_exists('mb_substr') ? mb_substr($name, 0, 40, 'UTF-8') : substr($name, 0, 40);
+        $mac = bl_mac(isset($g['mac']) ? (string) $g['mac'] : '');
+        $key = bl_bindkey_form(isset($g['bindkey']) ? (string) $g['bindkey'] : '');
+        $g = null;
+        if ($mac === '') {
+            $erg[$i] = array(false, 'MAC', $name, false);
+            continue;
         }
-        $neu = array('kennung' => $mac, 'aktiv' => '1', 'name' => $name,
-                     'opt' => $alias !== '' ? array('alias' => $alias) : array());
-        list($tag, $grund) = bl_tag_pruefen($neu);
-        if ($tag === null) {
-            $neu['opt'] = array();
-            $alias = '';
+        if ($key === '') {
+            $erg[$i] = array(false, 'SCHLUESSEL', $name, false);
+            continue;
+        }
+        $lage = 'BESTEHEND';
+        if (!isset($macs[$mac])) {
+            $alias = bl_haus_name($name);
+            if ($alias === '' || trim($alias, '_') === '' || in_array($alias, bl_reservierte_zweige(), true)
+                || in_array($alias, $aliase, true)) {
+                $alias = '';
+            }
+            $neu = array('kennung' => $mac, 'aktiv' => '1', 'name' => $name,
+                         'opt' => $alias !== '' ? array('alias' => $alias) : array());
             list($tag, $grund) = bl_tag_pruefen($neu);
+            if ($tag === null) {
+                $neu['opt'] = array();
+                $alias = '';
+                list($tag, $grund) = bl_tag_pruefen($neu);
+            }
+            if ($tag === null) {
+                $erg[$i] = array(false, 'TAG', $name, false);
+                continue;
+            }
+            $tags[] = $tag;
+            $macs[$mac] = true;
+            if ($alias !== '') { $aliase[] = $alias; }
+            $neue_tags = true;
+            $lage = $alias !== '' ? 'NEU' : 'NEU_OHNE_ALIAS';
         }
-        if ($tag === null) {
-            return array(false, 'TAG', $name, false);
-        }
-        $tags[] = $tag;
-        if (!bl_config_write($cfg, $tags)) {
-            return array(false, 'SCHREIBEN', $name, false);
-        }
-        $lage = $alias !== '' ? 'NEU' : 'NEU_OHNE_ALIAS';
+        $schluessel[$mac] = $key;
+        $erg[$i] = array(true, $lage, $name !== '' ? $name : $mac, strlen($key) === 24);
+        $key = '';
     }
-    $tab = bl_bindkey_lesen();
-    $tab[$mac] = $key;
-    $alt = strlen($key) === 24;
-    $key = '';
-    if (!bl_bindkey_schreiben($tab)) {
-        return array(false, 'SCHREIBEN', $name, false);
+    $fehl = false;
+    if ($neue_tags && !bl_config_write($cfg, $tags)) {
+        $fehl = true;
     }
-    return array(true, $lage, $name !== '' ? $name : $mac, $alt);
+    if (!$fehl && $schluessel) {
+        $tab = bl_bindkey_lesen();
+        foreach ($schluessel as $mac => $key) {
+            $tab[$mac] = $key;
+        }
+        if (!bl_bindkey_schreiben($tab)) {
+            $fehl = true;
+        }
+        $tab = null;
+    }
+    $schluessel = null;
+    if ($fehl) {
+        foreach ($erg as $i => $e) {
+            if ($e[0]) { $erg[$i] = array(false, 'SCHREIBEN', $e[2], false); }
+        }
+    }
+    return array_values($erg);
 }
 
 /** Meldung zur Uebernahme (je Lage ein fester Sprachschluessel - die Platzhalterpruefung sieht jeden Aufruf). */

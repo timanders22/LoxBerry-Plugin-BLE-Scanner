@@ -563,6 +563,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $neu['batterie']           = isset($_POST['batterie']) ? '1' : '0';
     $neu['scanner_themen']     = isset($_POST['scanner_themen']) ? '1' : '0';
     $neu['raum']               = isset($_POST['raum']) ? '1' : '0';
+    $neu['raum_personen']      = isset($_POST['raum_personen']) ? '1' : '0';     // 1.3.36
 
     $uhr_roh = isset($_POST['batterie_uhrzeit']) ? $_POST['batterie_uhrzeit'] : '';
     list($ok, $w) = bl_wert_pruefen('batterie_uhrzeit', $uhr_roh);
@@ -601,7 +602,16 @@ if ($bl_ist_post && isset($_POST['save'])) {
         $bl_fehler[] = sprintf(bl_t('MANGEL.REGION'), bl_saubere_eingabe($bl_reg_roh));
     }
     $bl_merk('xiaomi_region');
-    $zu_roh = isset($_POST['wlan_zuordnung']) ? $_POST['wlan_zuordnung'] : '';
+    // 1.3.36: eine Zeile je Paar. Die Tabelle liefert die Kommaliste; jede Zeile ist einzeln geprueft,
+    // eine beanstandete behaelt ihren bisherigen Eintrag. Das Eingetippte geht fuer die Anzeige nach
+    // einer Beanstandung unter dem alten Feldnamen mit. Ohne Tabelle (aelteres Formular) gilt das Textfeld.
+    $bl_zz = bl_zuordnung_zeilen('wlan_zu', 'wlan_zuordnung', bl_t('FELD.WLAN_ZUORDNUNG'), $bl_fehler);
+    if ($bl_zz !== null) {
+        $_POST['wlan_zuordnung'] = $bl_zz[1];
+        $zu_roh = $bl_zz[0];
+    } else {
+        $zu_roh = isset($_POST['wlan_zuordnung']) ? $_POST['wlan_zuordnung'] : '';
+    }
     list($ok, $w) = bl_wert_pruefen('wlan_zuordnung', $zu_roh);
     if ($ok) {
         $neu['wlan_zuordnung'] = $w;
@@ -614,6 +624,39 @@ if ($bl_ist_post && isset($_POST['save'])) {
                                $bl_cfg['wlan_zuordnung'] !== '' ? $bl_cfg['wlan_zuordnung'] : '-');
     }
     $bl_merk('wlan_zuordnung');
+
+    // ESPresense-Empfaenger in der Raumzuordnung (1.3.36, ab Werk aus). Ohne Raumzuordnung wird der
+    // Schalter trotzdem gespeichert und gemeldet, nicht verweigert (CLAUDE.md 4: melden, nicht blockieren).
+    $neu['espresense'] = isset($_POST['espresense']) ? '1' : '0';
+    $bl_es_roh = isset($_POST['espresense_praefix']) ? $_POST['espresense_praefix'] : '';
+    list($ok, $w) = bl_wert_pruefen('espresense_praefix', $bl_es_roh);
+    if ($ok) {
+        $neu['espresense_praefix'] = $w;
+    } else {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.ES_PRAEFIX'),
+                               is_string($bl_es_roh) ? bl_saubere_eingabe($bl_es_roh) : '',
+                               $bl_cfg['espresense_praefix']);
+    }
+    $bl_merk('espresense_praefix');
+    $bl_zz = bl_zuordnung_zeilen('es_zu', 'espresense_zuordnung', bl_t('FELD.ES_ZUORDNUNG'), $bl_fehler);
+    if ($bl_zz !== null) {
+        $_POST['espresense_zuordnung'] = $bl_zz[1];
+        $bl_es_zu = $bl_zz[0];
+    } else {
+        $bl_es_zu = isset($_POST['espresense_zuordnung']) ? $_POST['espresense_zuordnung'] : '';
+    }
+    list($ok, $w) = bl_wert_pruefen('espresense_zuordnung', $bl_es_zu);
+    if ($ok) {
+        $neu['espresense_zuordnung'] = $w;
+    } else {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.ES_ZUORDNUNG'),
+                               is_string($bl_es_zu) ? bl_saubere_eingabe($bl_es_zu) : '',
+                               $bl_cfg['espresense_zuordnung'] !== '' ? $bl_cfg['espresense_zuordnung'] : '-');
+    }
+    $bl_merk('espresense_zuordnung');
+    // Berichtigt in 1.3.36 (Fremdpruefung 09.11.2026): der Hinweis stand in $bl_fehler und sperrte damit nach
+    // Entscheidung 16 das ganze Speichern - im Widerspruch zu seinem eigenen Text. Jetzt ein Hinweis nach dem Speichern.
+    $bl_es_ohne_raum = ($neu['espresense'] === '1' && $neu['raum'] !== '1');
 
     if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
         // Vertauscht eingegeben. BERICHTIGT IN 1.3.20: bis 1.3.19 wurden die
@@ -666,6 +709,9 @@ if ($bl_ist_post && isset($_POST['save'])) {
         }
         if ($bl_alt_weg) {
             $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.ALTOPTION_WEG'), implode('; ', $bl_alt_weg));
+        }
+        if (!empty($bl_es_ohne_raum)) {
+            $bl_hinweis .= ' ' . bl_t('MANGEL.ES_OHNE_RAUM');
         }
         list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
     } else {
@@ -861,7 +907,13 @@ if ($bl_ist_post && (isset($_POST['cloud_holen']) || isset($_POST['cloud_code_se
         $bl_cerg = xc_captcha_loesen($bl_closung, $bl_cpass);
     } elseif (isset($_POST['cloud_weg'])) {
         $bl_cweg = (is_string($_POST['cloud_weg']) && in_array($_POST['cloud_weg'], array('mail', 'sms'), true)) ? $_POST['cloud_weg'] : '';
-        $bl_cerg = xc_code_anfordern($bl_cweg);
+        // 1.3.36: verlangte Xiaomi fuer den Versand ein Captcha, kommt hier die Loesung mit (Stammmodul 1.0.1, $icode).
+        // Ein leeres Feld zaehlt als Loesung "fehlt" - nie still ohne Captcha neu senden, sonst kommt dasselbe Bild.
+        $bl_cicode = null;
+        if (isset($_POST['cloud_icode'])) {
+            $bl_cicode = is_string($_POST['cloud_icode']) ? trim($_POST['cloud_icode']) : '';
+        }
+        $bl_cerg = xc_code_anfordern($bl_cweg, null, $bl_cicode);
     } elseif (isset($_POST['cloud_code_senden'])) {
         $bl_ccode = (isset($_POST['cloud_code']) && is_string($_POST['cloud_code'])) ? trim($_POST['cloud_code']) : '';
         $bl_cerg = xc_abruf('', '', 'de', 0, $bl_cfilter, $bl_ccode);
@@ -886,6 +938,17 @@ if ($bl_ist_post && (isset($_POST['cloud_holen']) || isset($_POST['cloud_code_se
         $bl_cloud['meldung'] = bl_t($bl_cerg['weg'] === 'sms' ? 'CLOUD.M_CODE_SMS' : 'CLOUD.M_CODE_MAIL');
     } elseif ($bl_clage === 'CAPTCHA') {
         $bl_cloud['meldung'] = bl_t('CLOUD.M_CAPTCHA');
+    } elseif ($bl_clage === 'SENDEN' && isset($bl_cerg['art']) && $bl_cerg['art'] === 'CAPTCHA') {
+        // 1.3.36: Xiaomi verlangt fuer den Versand des Codes ein Captcha - das Bild steht unten (Zweitfaktor-Block).
+        $bl_cloud['art'] = 'CAPTCHA';
+        $bl_cloud['meldung'] = bl_t('CLOUD.M_SENDE_CAPTCHA');
+    } elseif ($bl_clage === 'SENDEN' && isset($bl_cerg['art'])) {
+        // 1.3.36: Sperre (zu viele Versuche) oder unbekannt - mit Code und Grund aus der Antwort (vom Stammmodul
+        // gekuerzt, ohne Mailadressen, Telefonnummern und lange Ziffernfolgen).
+        $bl_cloud['art'] = $bl_cerg['art'] === 'SPERRE' ? 'SPERRE' : 'UNBEKANNT';
+        $bl_cgrund = sprintf(bl_t('CLOUD.F_SENDEN_GRUND'), isset($bl_cerg['code']) ? (int) $bl_cerg['code'] : 0,
+                             isset($bl_cerg['grund']) && is_string($bl_cerg['grund']) && $bl_cerg['grund'] !== '' ? $bl_cerg['grund'] : '-');
+        $bl_error = bl_e(bl_t($bl_cloud['art'] === 'SPERRE' ? 'CLOUD.F_SENDEN_SPERRE' : 'CLOUD.F_SENDEN') . ' ' . $bl_cgrund);
     } elseif ($bl_clage === 'KEINE') {
         $bl_error = bl_e(sprintf(bl_t('CLOUD.F_KEINE'), implode(', ', $bl_cerg['regionen'])));
     } else {
@@ -915,6 +978,65 @@ if ($bl_ist_post && isset($_POST['cloud_nehmen'])) {
     } else {
         $bl_error = bl_e(bl_cloud_text($bl_clage, $bl_cwer));
     }
+}
+/* 1.3.36: mehrere angehakte Geraete in einem Griff (bl_cloud_mehrere()). Jede Zeile bekommt ihre Meldung; gelungene
+ * stehen im Hinweis, misslungene im Fehler - beides zugleich, nicht nur das erste. Nichts angehakt: die Liste bleibt
+ * liegen und wird erneut gezeigt. */
+if ($bl_ist_post && isset($_POST['cloud_mehrere'])) {
+    $bl_tab = 'tab-settings';
+    $bl_cwahl = array();
+    if (isset($_POST['cloud_wahl']) && is_array($_POST['cloud_wahl'])) {
+        foreach ($_POST['cloud_wahl'] as $bl_cw) {
+            if (is_string($bl_cw) && preg_match('/^\d{1,3}\z/', $bl_cw)) { $bl_cwahl[] = $bl_cw; }
+        }
+    }
+    $bl_cmerg = bl_cloud_mehrere($bl_cwahl);
+    if ($bl_cmerg === null) {
+        $bl_error = bl_e(bl_cloud_text('ABGELAUFEN', ''));
+    } elseif (!$bl_cmerg) {
+        $bl_error = bl_e(bl_cloud_text('WAHL', ''));
+        bl_cloud_bereit();
+        $bl_cliste = xc_lesen('auswahl');
+        if ($bl_cliste !== null && isset($bl_cliste['liste']) && is_array($bl_cliste['liste'])) {
+            // Die Anzeige wie nach dem Abruf - ohne Schluessel (dieselben Felder wie xc_ergebnis()).
+            $bl_cgeraete = array();
+            foreach ($bl_cliste['liste'] as $bl_ci => $bl_cg) {
+                if (!is_array($bl_cg)) { continue; }
+                $bl_cgeraete[] = array('i' => (int) $bl_ci, 'name' => isset($bl_cg['name']) ? (string) $bl_cg['name'] : '',
+                                       'modell' => isset($bl_cg['modell']) ? (string) $bl_cg['modell'] : '',
+                                       'mac' => isset($bl_cg['mac']) ? (string) $bl_cg['mac'] : '',
+                                       'region' => isset($bl_cg['region']) ? (string) $bl_cg['region'] : '');
+            }
+            $bl_cloud = array('lage' => 'ok', 'geraete' => $bl_cgeraete);
+        }
+        unset($bl_cliste, $bl_cg);
+    } else {
+        $bl_cgut = array();
+        $bl_cschlecht = array();
+        $bl_calt_da = false;
+        foreach ($bl_cmerg as $bl_ce) {
+            if ($bl_ce[0]) {
+                $bl_cgut[] = bl_cloud_text($bl_ce[1], $bl_ce[2]);
+                $bl_calt_da = $bl_calt_da || $bl_ce[3];
+            } else {
+                $bl_cschlecht[] = bl_cloud_text($bl_ce[1], $bl_ce[2]);
+            }
+        }
+        if ($bl_cgut) {
+            $bl_saved = true;
+            $bl_hinweis = implode(' ', $bl_cgut) . ($bl_calt_da ? ' ' . bl_t('CLOUD.M_ALTE_FORM') : '');
+            require_once __DIR__ . '/bl_test.php';
+            if (bl_dienst_pid() > 0) {
+                bl_dienst('restart');
+                $bl_hinweis .= ' ' . (bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET') : bl_t('TEXT.DIENST_LAEUFT_NICHT'));
+            }
+            list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
+        }
+        if ($bl_cschlecht) {
+            $bl_error = bl_e(implode(' ', $bl_cschlecht));
+        }
+    }
+    unset($bl_cmerg);
 }
 
 /* ================= Nach jedem POST: umleiten (seit 1.3.20) =================
@@ -1446,6 +1568,24 @@ foreach (array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle') as $bl_rr) { ?>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.RAUM_AUSGLEICH')) ?></label>
 <input data-role="none" type="number" name="raum_ausgleich_db" min="-30" max="30" value="<?= bl_e(bl_eingabe('settings', 'raum_ausgleich_db', bl_cfg($bl_cfg, 'raum_ausgleich_db', '0'))) ?>"<?= bl_markierung('raum_ausgleich_db') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.AUSGLEICH_HILFE')) ?></p></div>
+<?php /* Personen und Raeume (1.3.36): ab Werk aus, wirkt nur mit eingeschalteter Raumzuordnung. */ ?>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="raum_personen" value="1"<?= bl_eingabe_an('settings', 'raum_personen', bl_cfg($bl_cfg, 'raum_personen', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.RAUM_PERSONEN')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RAUM_PERSONEN_HILFE')) ?></p></div>
+
+<?php /* ESPresense-Empfaenger in der Raumzuordnung (1.3.36): ab Werk aus. Gelesen wird nur
+         <praefix>/devices/<Kennung>/<Raum> am selben Broker, und nur bei eingeschalteter Raumzuordnung. */ ?>
+<h2><?= bl_e(bl_t('TEXT.ES_UEBERSCHRIFT')) ?></h2>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ES_HILFE')) ?></p>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="espresense" value="1"<?= bl_eingabe_an('settings', 'espresense', bl_cfg($bl_cfg, 'espresense', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.ESPRESENSE')) ?></label></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('FELD.ES_PRAEFIX')) ?></label>
+<input data-role="none" type="text" name="espresense_praefix" value="<?= bl_e(bl_eingabe('settings', 'espresense_praefix', bl_cfg($bl_cfg, 'espresense_praefix', 'espresense'))) ?>"<?= bl_markierung('espresense_praefix') ?> placeholder="espresense"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('FELD.ES_ZUORDNUNG')) ?></label>
+<?= bl_zuordnung_tabelle('es_zu', bl_eingabe('settings', 'espresense_zuordnung', bl_cfg($bl_cfg, 'espresense_zuordnung', '')),
+                          bl_cfg($bl_cfg, 'espresense_zuordnung', ''), bl_t('FELD.ZU_SP_ES_KENNUNG'), bl_t('FELD.ZU_SP_ES_ALIAS'),
+                          'iBeacon:e5ca1ade-f007-ba11-0000-000000000000-100-1', 'schluessel1', bl_markierung('espresense_zuordnung')) ?>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.ES_ZUORDNUNG_HILFE')) ?></p></div>
 
 <?php /* Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026,
          Anwesenheit-1): ab Werk aus. Gekoppelt wird nur ueber die MQTT-Themen
@@ -1455,7 +1595,9 @@ foreach (array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle') as $bl_rr) { ?>
 <div class="sm-feld">
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="wlan_kopplung" value="1"<?= bl_eingabe_an('settings', 'wlan_kopplung', bl_cfg($bl_cfg, 'wlan_kopplung', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.WLAN_KOPPLUNG')) ?></label></div>
 <div class="sm-feld"><label><?= bl_e(bl_t('FELD.WLAN_ZUORDNUNG')) ?></label>
-<input data-role="none" type="text" name="wlan_zuordnung" value="<?= bl_e(bl_eingabe('settings', 'wlan_zuordnung', bl_cfg($bl_cfg, 'wlan_zuordnung', ''))) ?>"<?= bl_markierung('wlan_zuordnung') ?> placeholder="Anna_Handy=Anna, Bernd=Bernd">
+<?= bl_zuordnung_tabelle('wlan_zu', bl_eingabe('settings', 'wlan_zuordnung', bl_cfg($bl_cfg, 'wlan_zuordnung', '')),
+                          bl_cfg($bl_cfg, 'wlan_zuordnung', ''), bl_t('FELD.ZU_SP_WLAN_NAME'), bl_t('FELD.ZU_SP_PERSON'),
+                          'Anna_Handy', 'Anna', bl_markierung('wlan_zuordnung')) ?>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.WLAN_ZUORDNUNG_HILFE')) ?></p></div>
 <?php /* Gruppe 13 (V6-V8/V12): Anwesenheit fuer andere Plugins ueber haus/... (Regeln/07 Nr. 15), ab Werk aus. */ ?>
 <h2><?= bl_e(bl_t('TEXT.HAUS_UEBERSCHRIFT')) ?></h2>
@@ -1489,10 +1631,11 @@ xc_aufraeumen(); ?>
 <?php echo bl_fmt(); ?>
 <div class="sm-breit">
 <table class="sm-tbl">
-<tr><th><?= bl_e(bl_t('CLOUD.SP_NAME')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_MODELL')) ?></th><th><?= bl_e(bl_t('TEXT.SP_ADRESSE')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_REGION')) ?></th><th></th></tr>
+<tr><th><?= bl_e(bl_t('CLOUD.SP_WAHL')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_NAME')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_MODELL')) ?></th><th><?= bl_e(bl_t('TEXT.SP_ADRESSE')) ?></th><th><?= bl_e(bl_t('CLOUD.SP_REGION')) ?></th><th></th></tr>
 <?php foreach ($bl_cloud['geraete'] as $bl_cg) {
     if (!is_array($bl_cg) || !isset($bl_cg['i'])) { continue; } ?>
-<tr><td><?= bl_e(isset($bl_cg['name']) ? (string) $bl_cg['name'] : '') ?></td>
+<tr><td><?php if (!empty($bl_cg['mac'])) { ?><input data-role="none" type="checkbox" name="cloud_wahl[]" value="<?= (int) $bl_cg['i'] ?>" aria-label="<?= bl_e(bl_t('CLOUD.SP_WAHL')) ?>"><?php } ?></td>
+<td><?= bl_e(isset($bl_cg['name']) ? (string) $bl_cg['name'] : '') ?></td>
 <td><span class="sm-mono"><?= bl_e(isset($bl_cg['modell']) ? (string) $bl_cg['modell'] : '') ?></span></td>
 <td><span class="sm-mono"><?= bl_e(isset($bl_cg['mac']) && $bl_cg['mac'] !== '' ? (string) $bl_cg['mac'] : bl_t('CLOUD.MAC_FEHLT')) ?></span></td>
 <td><?= bl_e(isset($bl_cg['region']) ? (string) $bl_cg['region'] : '') ?></td>
@@ -1500,7 +1643,10 @@ xc_aufraeumen(); ?>
 <?php } ?>
 </table>
 </div>
-<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.UEBERNEHMEN_TEXT')) ?></p>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="cloud_mehrere" value="1"><?= bl_e(bl_t('CLOUD.K_MEHRERE')) ?></button>
+</div>
+<p class="sm-hilfe"><?= bl_e(bl_t('CLOUD.UEBERNEHMEN_TEXT')) ?> <?= bl_e(bl_t('CLOUD.MEHRERE_TEXT')) ?></p>
 </form>
 <?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('CAPTCHA', 'CAPTCHA_FALSCH', 'LOESUNG'), true)
                 && ($bl_ccap = xc_lesen('captcha')) !== null && isset($bl_ccap['bild'], $bl_ccap['bildtyp'])
@@ -1521,9 +1667,29 @@ xc_aufraeumen(); ?>
 <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_captcha_senden" value="1"><?= bl_e(bl_t('CLOUD.K_CAPTCHA')) ?></button>
 </div>
 </form>
-<?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('ZWEITFAKTOR', 'SENDEN', 'WEG'), true)
+<?php } elseif ($bl_cloud && in_array($bl_cloud['lage'], array('ZWEITFAKTOR', 'SENDEN', 'WEG', 'LOESUNG'), true)
                 && ($bl_czf = xc_lesen('zweitfaktor')) !== null) {
-    /* Zweitfaktor, Schritt 1: der Hausherr waehlt, wohin Xiaomi den Code schickt (nur die Wege, die Xiaomi anbietet). */ ?>
+    /* Zweitfaktor, Schritt 1: der Hausherr waehlt, wohin Xiaomi den Code schickt (nur die Wege, die Xiaomi anbietet).
+     * 1.3.36: verlangte Xiaomi fuer den Versand ein Captcha (Stammmodul 1.0.1: zweitfaktor['sende_captcha']), steht
+     * das Bild hier; die Zeichen gehen mit demselben Weg erneut hinaus. Das Bild kommt aus dem 0600-Zwischenstand,
+     * kein Aufruf an Xiaomi aus dem Browser. */
+    $bl_csc = (isset($bl_czf['sende_captcha']) && is_array($bl_czf['sende_captcha'])) ? $bl_czf['sende_captcha'] : null;
+    if ($bl_csc !== null && isset($bl_csc['bild'], $bl_csc['bildtyp'], $bl_csc['weg'])
+        && in_array($bl_csc['bildtyp'], array('image/png', 'image/jpeg', 'image/gif'), true)
+        && in_array($bl_csc['weg'], array('mail', 'sms'), true)
+        && ((isset($bl_cloud['art']) && $bl_cloud['art'] === 'CAPTCHA') || $bl_cloud['lage'] === 'LOESUNG')) { ?>
+<div class="sm-warnung"><?= bl_e(bl_t('CLOUD.SENDE_CAPTCHA_TEXT')) ?></div>
+<form action="index.php" method="post" autocomplete="off">
+<input data-role="none" type="hidden" name="activetab" value="tab-settings">
+<?php echo bl_fmt(); ?>
+<div class="sm-feld"><img src="data:<?= bl_e($bl_csc['bildtyp']) ?>;base64,<?= bl_e(preg_replace('#[^A-Za-z0-9+/=]#', '', (string) $bl_csc['bild'])) ?>" alt="<?= bl_e(bl_t('CLOUD.CAPTCHA_BILD')) ?>" style="max-width:100%;border:1px solid #ccc;background:#fff;"></div>
+<div class="sm-feld"><label><?= bl_e(bl_t('CLOUD.CAPTCHA_LOESUNG')) ?></label>
+<input data-role="none" type="text" name="cloud_icode" value="" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="10"></div>
+<div class="sm-knopfreihe">
+<button data-role="none" class="sm-btn sm-b-technik" type="submit" name="cloud_weg" value="<?= bl_e($bl_csc['weg']) ?>"><?= bl_e(bl_t('CLOUD.K_SENDE_CAPTCHA')) ?></button>
+</div>
+</form>
+<?php } ?>
 <div class="sm-warnung"><?= bl_e(bl_t('CLOUD.ZWEITFAKTOR_WAHL')) ?>
 <?php if (!empty($bl_cloud['link']) && is_string($bl_cloud['link']) && preg_match('#^https://#', $bl_cloud['link'])) { ?>
 <br><a href="<?= bl_e($bl_cloud['link']) ?>" target="_blank" rel="noopener noreferrer"><?= bl_e(bl_t('CLOUD.ZWEITFAKTOR_LINK')) ?></a>
@@ -1928,7 +2094,7 @@ if (is_array($bl_zeilen)) {
 }
 ?>
 <?php if (!is_array($bl_zeilen)) { ?>
-<div class="sm-hinweis"><?= bl_e(bl_t('TEXT.PRUEFUNG_BEIM_OEFFNEN')) ?> <a href="index.php?form=test&amp;neu=1"><?= bl_e(bl_t('TEXT.PRUEFUNG_JETZT')) ?></a></div>
+<div class="sm-hinweis" id="bl-pruefung-offen"><?= bl_e(bl_t('TEXT.PRUEFUNG_BEIM_OEFFNEN')) ?> <a href="index.php?form=test&amp;neu=1"><?= bl_e(bl_t('TEXT.PRUEFUNG_JETZT')) ?></a></div>
 <?php } else { ?>
 <?php if ($bl_zeilen_alter > 0) { ?>
 <p class="sm-hilfe"><?= bl_e(sprintf(bl_t('TEXT.PRUEFUNG_STAND'), $bl_zeilen_alter)) ?> <a href="index.php?form=test&amp;neu=1"><?= bl_e(bl_t('TEXT.PRUEFUNG_JETZT')) ?></a></p>
@@ -2130,6 +2296,11 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
     for (var i = 0; i < reiter.length; i++) {
         (function (t) {
             t.addEventListener('click', function (ev) {
+                /* 1.3.36 (Fremdpruefung 09.11.2026): steht im Reiter Test noch keine Pruefung, folgt der Browser dem
+                   Verweis index.php?form=test - erst dann laeuft die Selbstpruefung, wie der Hinweis es zusagt. */
+                if (t.getAttribute('data-ziel') === 'tab-test' && document.getElementById('bl-pruefung-offen')) {
+                    return;
+                }
                 ev.preventDefault();
                 zeige(t.getAttribute('data-ziel'));
                 if (window.history && window.history.replaceState) {

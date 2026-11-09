@@ -346,6 +346,15 @@ VORGABEN = {
     "raum": "0",                  # Raumzuordnung aus mehreren Scannern bilden
     "raum_hysterese_db": "5",
     "raum_ausgleich_db": "0",     # Ausgleich DIESES Scanners
+    # -- Personen und Raeume (1.3.36, ab Werk AUS, wirkt nur mit raum=1): person/<P>/raum, person/<P>/raum_seit,
+    #    summary/raum/<R>/anzahl und summary/raum/<R>/namen aus der Raumzuordnung der Tags einer Person.
+    "raum_personen": "0",
+    # -- ESPresense-Empfaenger in der Raumzuordnung (1.3.36, ab Werk AUS): ESP32-Knoten mit der freien
+    #    Firmware ESPresense melden <praefix>/devices/<Kennung>/<Raum> mit rssi als JSON; gelesen wird nur
+    #    bei eingeschalteter Raumzuordnung. Zuordnung "<ESPresense-Kennung>=<Tag-Alias>, ...".
+    "espresense": "0",
+    "espresense_praefix": "espresense",
+    "espresense_zuordnung": "",
     # -- Abgeleitete Werte
     "entfernung": "0",            # Entfernungsschaetzung veroeffentlichen
     "daempfung": "2.5",           # Pfadverlustexponent n
@@ -475,6 +484,13 @@ RETAIN = {
     #    Zustaende, nie leer ("-" ohne Aussage, Entscheidung 5).
     "person/anwesend_gesamt": True,
     "person/quelle":          True,
+    # -- Personen und Raeume (1.3.36, raum_personen): der Raum einer Person und seit wann sind Zustaende; die Zahl
+    #    der Personen je Raum ebenso. Die Namensliste je Raum ist regelmaessig leer und geht deshalb fluechtig
+    #    hinaus (wie summary/names) - die Zahl daneben ist der retained Weg.
+    "person/raum":            True,
+    "person/raum_seit":       True,
+    "summary/raum/anzahl":    True,
+    "summary/raum/namen":     False,
     # -- zweiter Themenzweig je Scanner
     "scanner/present":      True,
 
@@ -530,6 +546,9 @@ def thema_stamm(unterthema):
     if "sensor" in teile:
         # Gruppe 33: sensor/lage ist ein eigener Stamm (retained), alle anderen Messwerte "sensor".
         return "sensor/lage" if teile[-1] == "lage" else "sensor"
+    if teile[0] == "summary" and len(teile) >= 3 and teile[1] == "raum":
+        # 1.3.36: summary/raum/<R>/anzahl -> summary/raum/anzahl (das Muster "summary/raum/{0}/anzahl" ebenso)
+        return "summary/raum/" + teile[-1]
     if teile[0] in ("server", "summary", "status"):
         return teile[0] + "/" + (teile[1] if len(teile) > 1 else "")
     if teile[0] in ("person", "scanner"):
@@ -639,6 +658,36 @@ def wlan_zuordnung_lesen(text):
             continue
         wl.add(m.group(1))
         pe.add(m.group(2))
+        aus.append((m.group(1), m.group(2)))
+    return aus[:20]
+
+
+# ESPresense (1.3.36): eine Kennung, wie ESPresense sie im Thema fuehrt - z. B.
+# "iBeacon:e5ca1ade-f007-ba11-0000-000000000000-100-1", "irk:..." oder ein selbst
+# vergebener Name. Ein Raum, wie er im Knoten eingetragen ist.
+ES_KENNUNG = re.compile(r"^[A-Za-z0-9:._-]{1,80}$")
+ES_RAUM = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+_ES_PAAR = re.compile(r"^([A-Za-z0-9:._-]{1,80})\s*=\s*([A-Za-z0-9_-]{1,40})$")
+
+
+def es_zuordnung_lesen(text):
+    """"iBeacon:abc-1-1=schluessel1, irk:12ab=uhr" -> [("iBeacon:abc-1-1", "schluessel1"), ...].
+
+    Links die Kennung aus ESPresense (espresense/devices/<Kennung>/<Raum>),
+    rechts der Alias eines Tags dieses Plugins. Dieselbe Regel wie
+    wlan_zuordnung_lesen(): ein Paar, das nicht so aussieht, wird uebergangen
+    (die Oberflaeche weist es beim Speichern ab), doppelte Namen: das erste
+    Paar gilt, hoechstens 20.
+    """
+    aus = []
+    links = set()
+    rechts = set()
+    for stueck in str(text or "").split(","):
+        m = _ES_PAAR.match(stueck.strip())
+        if not m or m.group(1) in links or m.group(2) in rechts:
+            continue
+        links.add(m.group(1))
+        rechts.add(m.group(2))
         aus.append((m.group(1), m.group(2)))
     return aus[:20]
 
