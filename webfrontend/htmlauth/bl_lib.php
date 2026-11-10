@@ -1549,11 +1549,38 @@ function bl_miniserver()
             'name' => !empty($ms['Name']) ? $ms['Name'] : ('Miniserver ' . $nr),
             'adresse' => $adresse,
             'port' => !empty($ms['Port']) ? (int) $ms['Port'] : 80,
-            'user' => !empty($ms['Admin']) ? $ms['Admin'] : (!empty($ms['Username']) ? $ms['Username'] : ''),
-            'pass' => !empty($ms['Pass']) ? $ms['Pass'] : (!empty($ms['Password']) ? $ms['Password'] : ''),
+            'user' => bl_ms_zugang($ms, 'Admin_raw', 'Admin', 'Username'),
+            'pass' => bl_ms_zugang($ms, 'Pass_raw', 'Pass', 'Password'),
         );
     }
     return $out;
+}
+
+/**
+ * Ein Zugangsfeld des Miniservers im Klartext.
+ *
+ * LoxBerry fuehrt Benutzer und Passwort zweimal: 'Admin'/'Pass' fuer die
+ * Adresse kodiert (aus '!' wird '%21'), 'Admin_raw'/'Pass_raw' im Klartext
+ * (LoxBerry::System, read_generaljson). Bis 1.3.36 nahm das Plugin das
+ * kodierte Feld fuer die Basic-Anmeldung - ein Passwort mit Sonderzeichen
+ * ergab HTTP 401. Gefunden als Bauart von Beschattungswaechter Issue #2
+ * (09.11.2026). Vorrang hat das Klartextfeld; fehlt es (aeltere Anlage),
+ * wird das kodierte Feld zurueckgewandelt. rawurldecode, nicht urldecode:
+ * ein '+' im Passwort bleibt ein '+'. Der dritte Name ist die alte
+ * Schreibweise und war nie kodiert.
+ */
+function bl_ms_zugang(array $ms, $roh, $kodiert, $alt)
+{
+    if (isset($ms[$roh]) && is_scalar($ms[$roh]) && (string) $ms[$roh] !== '') {
+        return (string) $ms[$roh];
+    }
+    if (isset($ms[$kodiert]) && is_scalar($ms[$kodiert]) && (string) $ms[$kodiert] !== '') {
+        return rawurldecode((string) $ms[$kodiert]);
+    }
+    if (isset($ms[$alt]) && is_scalar($ms[$alt]) && (string) $ms[$alt] !== '') {
+        return (string) $ms[$alt];
+    }
+    return '';
 }
 
 /**

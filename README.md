@@ -1,11 +1,15 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.36
+Version 1.3.37
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.37
+
+- Miniserver-Passwort mit Sonderzeichen: Dienst und Oberfläche melden sich beim HTTP-Weg jetzt mit dem Klartext aus `Admin_raw`/`Pass_raw` der LoxBerry-Einstellungen an. Bisher nahmen sie die für Adressen kodierte Form (aus `!` wurde `%21`), und der Miniserver antwortete mit HTTP 401. Fehlen die Klartextfelder, wird die kodierte Form zurückgewandelt.
 
 ## Neu in 1.3.36
 

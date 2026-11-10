@@ -759,10 +759,29 @@ def miniserver_liste():
             "name": ms.get("Name") or ("Miniserver " + str(nr)),
             "adresse": adresse,
             "port": port,
-            "user": ms.get("Admin") or ms.get("Username") or "",
-            "pass": ms.get("Pass") or ms.get("Password") or "",
+            "user": ms_zugang(ms, "Admin_raw", "Admin", "Username"),
+            "pass": ms_zugang(ms, "Pass_raw", "Pass", "Password"),
         })
     return out
+
+
+def ms_zugang(ms, roh, kodiert, alt):
+    """Ein Zugangsfeld des Miniservers im Klartext.
+
+    LoxBerry fuehrt Benutzer und Passwort zweimal: Admin/Pass fuer die
+    Adresse kodiert (aus '!' wird '%21'), Admin_raw/Pass_raw im Klartext
+    (LoxBerry::System, read_generaljson). Bis 1.3.36 nahm der Dienst das
+    kodierte Feld fuer die Basic-Anmeldung - ein Passwort mit Sonderzeichen
+    ergab HTTP 401. Gefunden als Bauart von Beschattungswaechter Issue #2
+    (09.11.2026). Vorrang hat das Klartextfeld; fehlt es, wird das kodierte
+    Feld zurueckgewandelt (unquote, nicht unquote_plus: ein '+' bleibt ein
+    '+'). Der dritte Name ist die alte Schreibweise und war nie kodiert.
+    """
+    for name, wandeln in ((roh, False), (kodiert, True), (alt, False)):
+        wert = ms.get(name)
+        if isinstance(wert, (str, int, float)) and not isinstance(wert, bool) and str(wert) != "":
+            return urllib.parse.unquote(str(wert)) if wandeln else str(wert)
+    return ""
 
 
 def http_push(ms, name, wert, zeitgrenze=4):
