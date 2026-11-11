@@ -1,11 +1,15 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.38
+Version 1.3.39
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.39
+
+- **Reiter „Einbindung in Loxone“, Seite „BLE-Scanner NG Tags“:** Bild und Tabelle zeigen jetzt auch die vier Eingänge für „Personen und Räume melden“ (Nr. 24 bis 27: `blescanner_person_Person1_raum`, `blescanner_person_Person1_raum_seit`, `blescanner_summary_raum_wohnzimmer_anzahl`, `blescanner_summary_raum_wohnzimmer_namen`), dazu ein Hinweis, dass der Schalter ab Werk aus ist. Die Themen gibt es seit 1.3.36; bisher fehlten sie auf dieser Seite. Bild und Bausteine stimmen jetzt mit der Seite im Musterprojekt überein. Am Verhalten des Plugins ändert sich nichts.
 
 ## Neu in 1.3.38
 

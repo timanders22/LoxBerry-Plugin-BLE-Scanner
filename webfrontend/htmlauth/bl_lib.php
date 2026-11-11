@@ -2451,6 +2451,10 @@ function bl_bausteinliste($cfg, $tags)
             bl_t('BAUSTEIN.Z2_21'),
             bl_t('BAUSTEIN.Z2_22'),
             bl_t('BAUSTEIN.Z2_23'),
+            bl_t('BAUSTEIN.Z2_24'),
+            bl_t('BAUSTEIN.Z2_25'),
+            bl_t('BAUSTEIN.Z2_26'),
+            bl_t('BAUSTEIN.Z2_27'),
         ), array(
             bl_t('BAUSTEIN.SEITE2_SCHRITT1'),
             bl_t('BAUSTEIN.SEITE2_SCHRITT2'),
@@ -2463,6 +2467,7 @@ function bl_bausteinliste($cfg, $tags)
             bl_t('BAUSTEIN.SEITE2_H2'),
             bl_t('BAUSTEIN.SEITE2_H3'),
             bl_t('BAUSTEIN.SEITE2_H4'),
+            bl_t('BAUSTEIN.SEITE2_H5'),
         )),
         array(3, 'BLE-Scanner NG Messwerte', 'einbindung_loxone_messwerte.png', array(
             bl_t('BAUSTEIN.Z3_01'),
