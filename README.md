@@ -1,11 +1,16 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.39
+Version 1.3.40
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.40
+
+- **Konfiguration wird nach einem Update vervollständigt:** Fehlen in der Konfigurationsdatei Einstellungen, die eine neuere Fassung mitbringt, trägt das Plugin sie jetzt einmal mit ihrer Vorgabe in die Datei ein – in `postupgrade.sh` nach dem Zurückspielen und beim Start des Dienstes. Das Installationsprotokoll bzw. das Dienstprotokoll nennt die ergänzten Namen. Bisher ergänzten Dienst und Oberfläche fehlende Einstellungen nur beim Lesen; in die Datei kamen sie erst beim nächsten Speichern im Formular. Gemessen am Gerät nach dem Update auf 1.3.38: es fehlten `espresense`, `espresense_praefix`, `espresense_zuordnung`, `raum_anwesenheit` und `raum_personen`; alle fünf sind ab Werk aus bzw. leer, das Verhalten war also richtig.
+- Eingefügt werden nur die fehlenden Zeilen, vor den Tag-Zeilen; alle übrigen Zeilen bleiben byteweise stehen, auch Schlüssel, die das Plugin nicht kennt, ebenso Zeilenenden und Rechte. Eine Datei ohne `[CONFIG]` wird nicht angefasst. Geschrieben wird über `bl_lib.php` (neu: `bin/bl_vervollstaendigen.php`); der Dienst schreibt die Datei weiterhin nicht selbst. Am LoxBerry an einer Kopie der echten Konfiguration gemessen (PHP 7.4.33: fünf Zeilen dazu, keine weg, 640 und Eigentümer unverändert, zweiter Lauf schreibt nichts); der Aufruf beim Dienststart ist am Gerät noch nicht gemessen.
 
 ## Neu in 1.3.39
 

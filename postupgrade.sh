@@ -195,6 +195,22 @@ if [ -d "$SICHER" ]; then
         echo "<WARNING> naechsten Update beiseitegelegt, nicht zurueckgespielt."
     fi
 fi
+# --- Konfiguration vervollstaendigen (1.3.40, Regeln/05) ---------------------
+# Gemessen am Geraet 11.11.2026: nach dem Update auf 1.3.38 fehlten fuenf
+# Vorgaben in der zurueckgespielten Datei. Fehlende Schluessel werden hier
+# einmal mit ihrer Vorgabe eingetragen - ueber bl_lib.php, den einzigen
+# Schreiber. VOR dem Richtigstellen der Eigentuemer, denn das Update laeuft
+# als root und die umbenannte Datei gehoerte sonst root.
+BL_VV="$LBPBIN/$PDIR/bl_vervollstaendigen.php"
+if [ -f "$PCONFIG/ble_scanner_ng.cfg" ] && [ -f "$BL_VV" ]; then
+    BL_VV_ZEILE=$(LBHOMEDIR="$BASE" php "$BL_VV" "$PDIR" 2>&1 | tail -1)
+    case "$BL_VV_ZEILE" in
+        *";STAND=ergaenzt;"*)     echo "<OK> Konfiguration vervollstaendigt: ${BL_VV_ZEILE#*SCHLUESSEL=}" ;;
+        *";STAND=vollstaendig;"*) echo "<OK> Konfiguration vollstaendig, nichts ergaenzt." ;;
+        *";STAND=ohne_merkwort;"*|*";STAND=ohne_datei;"*) echo "<INFO> Konfiguration nicht vervollstaendigt (keine lesbare Datei mit [CONFIG]) - das Speichern im Formular schreibt sie vollstaendig." ;;
+        *) echo "<WARNING> Konfiguration nicht vervollstaendigt: ${BL_VV_ZEILE:-keine Ausgabe}. Der Dienst versucht es beim Start erneut." ;;
+    esac
+fi
 # Eigentuemer richtigstellen. Das Update laeuft als root; alles, was dabei
 # entsteht, gehoerte danach root - und die Oberflaeche laeuft als loxberry
 # und koennte die Konfiguration nicht mehr schreiben. Bis 1.1.0 fehlte das

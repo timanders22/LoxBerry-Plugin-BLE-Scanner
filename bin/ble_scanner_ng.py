@@ -145,6 +145,31 @@ def ansage_lage(anlass, gestoert, name="", frist=0):
     threading.Thread(target=laufen, name="ansage", daemon=True).start()
 
 
+def konfiguration_vervollstaendigen():
+    """Seit 1.3.40 (Regeln/05): fehlende Vorgaben einmal in die Datei schreiben - beim Dienststart.
+
+    Geschrieben wird ueber bin/bl_vervollstaendigen.php und damit ueber bl_lib.php, nicht von hier:
+    ein Schreiber fuer ein Format (siehe bl_common.py nach konfiguration_lesen()). Gemessen am Geraet
+    11.11.2026 nach dem Update auf 1.3.38: fuenf Vorgaben fehlten in der Datei. Eine Zeile ins
+    Protokoll nur, wenn etwas ergaenzt wurde oder der Aufruf scheiterte; nie ein Wert.
+    Rueckgabe: die Ausgabezeile des Skripts oder "" (fuer die Pruefung)."""
+    pfad = os.path.dirname(os.path.abspath(__file__))
+    aufruf = ["php", os.path.join(pfad, "bl_vervollstaendigen.php"), os.path.basename(pfad)]
+    try:
+        r = subprocess.run(aufruf, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError) as fehler:
+        log.warning("Konfiguration nicht vervollstaendigt: Aufruf von bl_vervollstaendigen.php scheiterte (%s)", fehler)
+        return ""
+    zeile = r.stdout.decode("utf-8", "replace").strip().splitlines()
+    zeile = zeile[-1] if zeile else ""
+    if r.returncode != 0 or not zeile.startswith("VERVOLLSTAENDIGEN;"):
+        log.warning("Konfiguration nicht vervollstaendigt: Rueckgabe %s, Ausgabe %r", r.returncode, zeile[:200])
+    elif ";STAND=ergaenzt;" in zeile:
+        log.info("Konfiguration vervollstaendigt - fehlende Vorgaben in die Datei geschrieben: %s",
+                 zeile.split("SCHLUESSEL=", 1)[-1])
+    return zeile
+
+
 class GleicheMeldungBremse(logging.Filter):
     """Gleiche Meldung ab WARNING hoechstens einmal je Stunde (seit 1.3.20).
 
@@ -3709,6 +3734,8 @@ def main():
                     gem.SPERR_DATEI, fehler)
     for zeile in gem.alte_ramdisk_namen_uebernehmen():
         log.info("Ramdisk-Datei unter dem alten Namen: %s", zeile)
+    # 1.3.40: vor dem ersten Lesen der Konfiguration (Regeln/05, Bauform Docker NG 1.3.7)
+    konfiguration_vervollstaendigen()
     dienst = Dienst()
 
     def beenden(signum, rahmen):   # noqa: ARG001

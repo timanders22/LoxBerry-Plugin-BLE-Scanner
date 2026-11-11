@@ -1049,6 +1049,95 @@ function bl_config_write($werte, $tags)
     return bl_datei_schreiben($file, $txt, 0640);
 }
 
+/**
+ * Konfiguration vervollstaendigen (seit 1.3.40, Regeln/05 "Die Konfiguration
+ * wird vervollstaendigt, nicht nur ergaenzt").
+ *
+ * Gemessen am Geraet 11.11.2026 nach dem Update auf 1.3.38: in der Datei
+ * fehlten espresense, espresense_praefix, espresense_zuordnung,
+ * raum_anwesenheit und raum_personen. Beide Leser ergaenzten sie nur im
+ * Speicher; die Datei bekam sie erst beim naechsten Speichern im Formular.
+ *
+ * Bauform nach Regeln/05 (Docker NG 1.3.7):
+ * - nur, wenn die Datei das Merkwort [CONFIG] traegt - eine fehlende,
+ *   leere oder alte Datei ist Sache der Selbstheilung bzw. des Speicherns;
+ * - geschrieben werden die ZEILEN DER DATEI, unveraendert, plus je fehlender
+ *   Vorgabe eine Zeile "schluessel=vorgabe" vor den Tag-Zeilen - kein
+ *   Neubau ueber bl_config_write(), der fremde Schluessel verwerfen und
+ *   Tag-Zeilen umformen wuerde;
+ * - Zeilenenden der Datei bleiben, Rechte bleiben;
+ * - geschrieben wird nur, wenn etwas fehlt.
+ *
+ * Rueckgabe: array('stand' => ohne_datei|ohne_merkwort|vollstaendig|ergaenzt|fehler,
+ *                  'schluessel' => array(...))
+ */
+function bl_config_vervollstaendigen($datei = null)
+{
+    $file = $datei !== null ? $datei : bl_paths()['config'];
+    if (!is_file($file)) {
+        return array('stand' => 'ohne_datei', 'schluessel' => array());
+    }
+    $txt = @file_get_contents($file);
+    if (!is_string($txt) || $txt === '' || preg_match('/^[ \t]*\[CONFIG\]/m', $txt) !== 1) {
+        return array('stand' => 'ohne_merkwort', 'schluessel' => array());
+    }
+    $zeilen = preg_split('/(?<=\n)/', $txt, -1, PREG_SPLIT_NO_EMPTY);
+    $eol = (strpos($txt, "\r\n") !== false) ? "\r\n" : "\n";
+    $da = array();
+    $ersterTag = -1;
+    foreach ($zeilen as $i => $zeile) {
+        $t = trim($zeile);
+        if ($t === '' || $t[0] === ';' || $t[0] === '#' || $t[0] === '[') {
+            continue;
+        }
+        $pos = strpos($t, '=');
+        if ($pos === false) {
+            continue;
+        }
+        $schluessel = trim(substr($t, 0, $pos));
+        if (preg_match('/^(default\.)?TAG\d+$/i', $schluessel)) {
+            if ($ersterTag < 0) {
+                $ersterTag = $i;
+            }
+            continue;
+        }
+        $da[strtolower(preg_replace('/^default\./i', '', $schluessel))] = true;
+    }
+    $fehlend = array();
+    foreach (bl_defaults() as $k => $vorgabe) {
+        if (!isset($da[$k])) {
+            $fehlend[$k] = str_replace(array("\r", "\n", '|'), array('', ' ', '/'), (string) $vorgabe);
+        }
+    }
+    if (!$fehlend) {
+        return array('stand' => 'vollstaendig', 'schluessel' => array());
+    }
+    $neu = '';
+    foreach ($fehlend as $k => $v) {
+        $neu .= $k . '=' . trim($v) . $eol;
+    }
+    if ($ersterTag >= 0) {
+        // vor die Leerzeilen, die den Werteblock von den Tags trennen
+        $stelle = $ersterTag;
+        while ($stelle > 0 && trim($zeilen[$stelle - 1]) === '') {
+            $stelle--;
+        }
+        array_splice($zeilen, $stelle, 0, array($neu));
+    } else {
+        $letzte = count($zeilen) - 1;
+        if ($letzte >= 0 && substr($zeilen[$letzte], -1) !== "\n") {
+            $zeilen[$letzte] .= $eol;
+        }
+        $zeilen[] = $neu;
+    }
+    $rechte = @fileperms($file);
+    $rechte = ($rechte === false) ? 0640 : ($rechte & 0777);
+    if (!bl_datei_schreiben($file, implode('', $zeilen), $rechte)) {
+        return array('stand' => 'fehler', 'schluessel' => array_keys($fehlend));
+    }
+    return array('stand' => 'ergaenzt', 'schluessel' => array_keys($fehlend));
+}
+
 /** Zustandsdatei des Dienstes lesen. */
 function bl_status()
 {
