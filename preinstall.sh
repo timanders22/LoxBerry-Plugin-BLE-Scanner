@@ -62,6 +62,11 @@ for ZIEL in "$BK" "$BK_IRK" "$BK_BIND"; do
 done
 # Ein Merker "Dienst lief vor dem Update" gehoert zu keinem Vorgang mehr.
 rm -f "$BASE/data/plugins/$PFOLDER.lief_vor_update" 2>/dev/null
+# 1.3.38 (K2): ebenso der Sollmerker einer frueheren Installation (<Ordner>.soll_laufen, Inhalt 0 = "angehalten").
+# Bis 1.3.37 blieb er liegen. Der Waechter (cron.05min:89) und daemon/daemon:152 starten bei Inhalt 0 nicht, und
+# postinstall.sh entfernt ihn nur nach einem gelungenen Start - nach einem misslungenen blieb die neue Installation
+# also angehalten (Schluss aus dem Quelltext, nicht am Geraet gemessen).
+rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
 
 if [ -n "$BEISEITE" ] || [ -n "$FEST" ]; then
     BL_TEXT="<WARNING> Neuinstallation: Einstellungen einer frueheren Installation werden NICHT eingespielt."

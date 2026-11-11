@@ -589,6 +589,26 @@ def alles_pruefen():
     p.merke(G, "nie eine leere Nutzlast auf anwesend_gesamt oder quelle",
             all(v != "" for k, v in gw.items() if k.endswith(("/anwesend_gesamt", "/quelle"))),
             ", ".join("%s=%s" % (k, v) for k, v in sorted(gw.items()) if k.startswith("person/")))
+    # 1.3.38 (K4): verliert eine Person ihren letzten Tag, steht sie aber bei wlan_kopplung=1 noch in der Zuordnung,
+    # fallen beim Neueinlesen nur ihre BLE-Themen - anwesend_gesamt und quelle bleiben (wie entfallen()). Eine
+    # Person ohne Paar verliert den ganzen Zweig (F3, Gruppe 13).
+    cfg_k = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nwlan_kopplung=1\n"
+             "wlan_zuordnung=Anna_Handy=Anna\n")
+    dk, gk4, _ok4 = _dienst_bauen(cfg_k + "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel|person=Anna\n"
+                                  "tag2=11:22:33:44:55:66|1|Rucksack|person=Bernd\n")
+    _sichtung_setzen(dk, "AA:BB:CC:DD:EE:FF", -70, 0)
+    _sichtung_setzen(dk, "11:22:33:44:55:66", -70, 0)
+    dk.auswerten(erzwingen=True)
+    with open(gem.CONFIG_FILE, "w", encoding="utf-8") as fh:
+        fh.write(cfg_k + "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel\ntag2=11:22:33:44:55:66|1|Rucksack\n")
+    dk.konfiguration_neu_einlesen()
+    weg = sorted(k[len("__geloescht__"):] for k in gk4 if k.startswith("__geloescht__person/"))
+    p.gleich(G, "Person nur noch in der WLAN-Zuordnung: present und last_seen_ts geloescht, anwesend_gesamt "
+                "und quelle bleiben; Person ohne Paar: ganzer Zweig",
+             ([k for k in weg if k.startswith("person/Anna/")], [k for k in weg if k.startswith("person/Bernd/")]),
+             (["person/Anna/last_seen_ts", "person/Anna/present"],
+              ["person/Bernd/anwesend_gesamt", "person/Bernd/last_seen_ts", "person/Bernd/present",
+               "person/Bernd/quelle"]))
 
     # =====================================================================
     G = "ESPresense-Empfaenger in der Raumzuordnung"
@@ -647,6 +667,48 @@ def alles_pruefen():
     p.gleich(G, "Kennung gleich dem Alias braucht kein Paar", ge2.get("schluessel1/raum"), "garage")
     p.merke(G, "das Abbild enthaelt keine MAC", "AA:BB" not in json.dumps(lage), json.dumps(lage)[:120])
 
+    # 1.3.38 (K13): Schalter raum_anwesenheit. Erwartung vorher festgelegt: dieser LoxBerry hoert den Tag nicht (letzte
+    # eigene Sichtung 900 s alt), nur der Empfaenger k1 im Wohnzimmer. Aus (ab Werk) -> abwesend wie bisher; an ->
+    # anwesend, Raum wohnzimmer, quelle "empfaenger"; an, aber nur eine Modellkennung ohne Paar -> abwesend; an, aber
+    # rssi -95 unter rssi_minimum -90 -> abwesend; an und der eigene Scanner hoert ihn frisch -> quelle bleibt "ble".
+    cfg_k = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nraum=1\nraum_hysterese_db=5\n"
+             "rssi_minimum=-90\nespresense=1\nespresense_zuordnung=k1=schluessel1\n"
+             "tag1=D1:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1,person=Anna\n")
+
+    def _k13(an, kennung="k1", rssi=-60, eigen_alter=900, es_alter=0):
+        dk, gk, _ok = _dienst_bauen(cfg_k + ("raum_anwesenheit=1\n" if an else ""))
+        _sichtung_setzen(dk, "D1:BB:CC:DD:EE:FF", -70, eigen_alter)
+        dk.nachricht(None, None, _EsN("espresense/devices/%s/wohnzimmer" % kennung, '{"rssi": %d}' % rssi))
+        for melder in dk.raumdaten.values():
+            for raum_n, (z_n, r_n) in list(melder.items()):
+                melder[raum_n] = (z_n - es_alter, r_n)
+        dk.auswerten(erzwingen=True)
+        return tuple(gk.get(t) for t in ("schluessel1/present", "person/Anna/present", "schluessel1/raum",
+                                         "person/Anna/quelle"))
+
+    p.gleich(G, "K13 Schalter aus (ab Werk): nur vom Empfaenger gehoert -> abwesend, quelle ble",
+             _k13(False), ("0", "0", "wohnzimmer", "ble"))
+    p.gleich(G, "K13 Schalter an: anwesend, Raum gesetzt, quelle empfaenger", _k13(True),
+             ("1", "1", "wohnzimmer", "empfaenger"))
+    p.gleich(G, "K13 Schalter an, Modellkennung apple:1005:9-26 ohne Zuordnung: abwesend",
+             _k13(True, kennung="apple:1005:9-26")[:2], ("0", "0"))
+    p.gleich(G, "K13 Schalter an, rssi -95 unter rssi_minimum -90: abwesend", _k13(True, rssi=-95)[:2], ("0", "0"))
+    p.gleich(G, "K13 Schalter an, Meldung des Empfaengers 25 s alt (Frist 30 s): anwesend; 40 s alt: abwesend",
+             (_k13(True, es_alter=25)[0], _k13(True, es_alter=40)[0]), ("1", "0"))
+    p.gleich(G, "K13 Schalter an, der eigene Scanner hoert den Tag frisch: quelle bleibt ble",
+             _k13(True, eigen_alter=0)[::3], ("1", "ble"))
+    dks, gks, _oks = _dienst_bauen(cfg_k + "scanner_themen=1\nraum_anwesenheit=1\n")
+    _sichtung_setzen(dks, "D1:BB:CC:DD:EE:FF", -70, 900)
+    dks.nachricht(None, None, _EsN("espresense/devices/k1/wohnzimmer", '{"rssi": -60}'))
+    dks.auswerten(erzwingen=True)
+    p.gleich(G, "K13 Schalter an, nur der Empfaenger hoert: <T>/present 1, scanner/<dieser>/<T>/present 0 und rssi -255",
+             (gks.get("schluessel1/present"), gks.get("scanner/%s/schluessel1/present" % dks.scanner),
+              gks.get("scanner/%s/schluessel1/rssi" % dks.scanner)), ("1", "0", "-255"))
+    p.gleich(G, "K13 quelle-Werte: bestehende unveraendert, neuer daneben",
+             (gem.anwesenheit_gesamt(1, None), gem.anwesenheit_gesamt(1, 1), gem.anwesenheit_gesamt(0, None),
+              gem.anwesenheit_gesamt(1, 0, "empfaenger"), gem.anwesenheit_gesamt(0, 0, "empfaenger")),
+             ((1, "ble"), (1, "ble+wlan"), (0, "ble"), (1, "empfaenger"), (0, "ble+wlan")))
+
     # =====================================================================
     G = "Personen und Raeume"
     # 1.3.36, ab Werk aus, nur mit raum=1. Vorher festgelegt: Raum der Person = Raum ihres zuletzt gesehenen
@@ -680,7 +742,8 @@ def alles_pruefen():
     _rn("k2", "kueche", -50)
     _rn("k3", "kueche", -50)
     dr.auswerten(erzwingen=True)
-    p.gleich(G, "zwei Tags in zwei Raeumen: es gilt der zuletzt gesehene (Schluessel, wohnzimmer)",
+    p.gleich(G, "zwei Tags in zwei Raeumen, gleich lange dort, kein bisheriger Raum: es gilt der zuletzt gesehene "
+                "(Schluessel, wohnzimmer)",
              gr.get("person/Anna/raum"), "wohnzimmer")
     p.gleich(G, "je Raum Zahl und Namen",
              (gr.get("summary/raum/wohnzimmer/anzahl"), gr.get("summary/raum/wohnzimmer/namen"),
@@ -706,6 +769,84 @@ def alles_pruefen():
     d0.auswerten(erzwingen=True)
     p.gleich(G, "ohne Raumzuordnung wirkt der Schalter nicht",
              sorted(k for k in g0 if k.startswith("summary/raum/") or k.endswith("/raum")), [])
+    # 1.3.38 (K3): Raum der Person bei zwei Tags. Rang (raum_seit des Tags, bisheriger Raum der Person, letzte
+    # Sichtung). Fall S1: Schluessel ruht im Flur, Uhr im Wohnzimmer, die zuletzt gesehene wechselt mit jedem Paket -
+    # bis 1.3.37 sprang der Raum in jedem Durchlauf. Fall S2: beide im Flur, dann geht die Uhr ins Wohnzimmer.
+    cfg_s = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nraum=1\nraum_hysterese_db=5\n"
+             "espresense=1\nespresense_zuordnung=k1=schluessel1,k2=uhr\nraum_personen=1\n"
+             "tag1=D1:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1,person=Anna\n"
+             "tag2=D2:BB:CC:DD:EE:FF|1|Uhr|alias=uhr,person=Anna\n")
+
+    def _raumfolge(fall):
+        ds, gs, _os = _dienst_bauen(cfg_s)
+        folge = []
+        for runde in range(20):
+            _sichtung_setzen(ds, "D1:BB:CC:DD:EE:FF", -75, 0 if runde % 2 == 0 else 3)
+            _sichtung_setzen(ds, "D2:BB:CC:DD:EE:FF", -75, 3 if runde % 2 == 0 else 0)
+            ds.nachricht(None, None, _EsN("espresense/devices/k1/flur", '{"rssi": -55}'))
+            if fall == "S1":
+                ds.nachricht(None, None, _EsN("espresense/devices/k2/wohnzimmer", '{"rssi": -55}'))
+            elif runde < 10:
+                ds.nachricht(None, None, _EsN("espresense/devices/k2/flur", '{"rssi": -55}'))
+            else:
+                if runde == 10:
+                    for zs in ds.tagzustand.values():     # beide stehen schon eine Minute im Flur
+                        zs["raum_seit"] -= 60
+                ds.nachricht(None, None, _EsN("espresense/devices/k2/wohnzimmer", '{"rssi": -45}'))
+            ds.auswerten(erzwingen=False)
+            folge.append(gs.get("person/Anna/raum"))
+        return folge, sum(1 for a, b in zip(folge, folge[1:]) if a != b)
+
+    f_s1, w_s1 = _raumfolge("S1")
+    p.gleich(G, "S1: Schluessel ruht im Flur, Uhr im Wohnzimmer, abwechselnd zuletzt gesehen: der Raum bleibt "
+                "(Wechsel in 20 Durchlaeufen, Raum)", (w_s1, f_s1[-1]), (0, "flur"))
+    f_s2, w_s2 = _raumfolge("S2")
+    p.gleich(G, "S2: beide im Flur, dann geht die Uhr ins Wohnzimmer: genau ein Wechsel, danach wohnzimmer",
+             (w_s2, f_s2[9], f_s2[-1]), (1, "flur", "wohnzimmer"))
+
+    # 1.3.38 (K11): Neustart. Erwartung vorher festgelegt: der Broker traegt die Werte des ersten Laufs, die drei
+    # Zeitpunkte eine Stunde frueher. Gleicher Raum -> present_since, <T>/raum_seit und person/<P>/raum_seit bleiben;
+    # anderer Raum -> beide raum_seit neu, present_since bleibt (Anwesenheit unveraendert); unplausible Brokerwerte
+    # (kein Zahlwert, Zukunft, vor 2020) -> Startzeit wie bis 1.3.37. Bis 1.3.37 standen nach jedem Neustart alle drei
+    # auf der Startzeit.
+    cfg_n = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nraum=1\nraum_hysterese_db=5\n"
+             "espresense=1\nespresense_zuordnung=k1=schluessel1\nraum_personen=1\n"
+             "tag1=D1:BB:CC:DD:EE:FF|1|Schluessel|alias=schluessel1,person=Anna\n")
+    zeitthemen = ("schluessel1/present_since", "schluessel1/raum_seit", "person/Anna/raum_seit")
+
+    def _neustartlauf(raum, broker=None):
+        dn, gn, _on = _dienst_bauen(cfg_n)
+        vorgemerkt = dn.zeiten_uebernehmen(broker) if broker is not None else None
+        _sichtung_setzen(dn, "D1:BB:CC:DD:EE:FF", -70, 0)
+        dn.nachricht(None, None, _EsN("espresense/devices/k1/%s" % raum, '{"rssi": -50}'))
+        t0 = int(time.time())
+        dn.auswerten(erzwingen=True)
+        return gn, t0, vorgemerkt
+
+    g_n1, _t_n1, _v = _neustartlauf("wohnzimmer")
+    alt_n = int(time.time()) - 3600
+    broker_n = dict((k, v) for k, v in g_n1.items() if not k.startswith("__"))
+    for k in zeitthemen:
+        broker_n[k] = str(alt_n)
+    p.gleich(G, "K11 Vorlauf: erster Lauf meldet Raum und alle drei Zeitpunkte",
+             (g_n1.get("schluessel1/raum"), g_n1.get("person/Anna/raum"), all(g_n1.get(k, "").isdigit() for k in zeitthemen)),
+             ("wohnzimmer", "wohnzimmer", True))
+    g_n2, _t_n2, v_n2 = _neustartlauf("wohnzimmer", broker_n)
+    p.gleich(G, "K11 Neustart mit gleichem Raum: present_since, raum_seit und person/<P>/raum_seit bleiben (3 vorgemerkt)",
+             (v_n2,) + tuple(g_n2.get(k) for k in zeitthemen), (3, str(alt_n), str(alt_n), str(alt_n)))
+    g_n3, t_n3, _v = _neustartlauf("kueche", broker_n)
+    p.gleich(G, "K11 Neustart mit anderem Raum: beide raum_seit neu, present_since bleibt",
+             (g_n3.get("schluessel1/raum"), g_n3.get("schluessel1/present_since"),
+              t_n3 <= int(g_n3.get("schluessel1/raum_seit") or 0) <= t_n3 + 5,
+              t_n3 <= int(g_n3.get("person/Anna/raum_seit") or 0) <= t_n3 + 5),
+             ("kueche", str(alt_n), True, True))
+    broker_u = dict(broker_n)
+    broker_u["schluessel1/present_since"] = "gestern"
+    broker_u["schluessel1/raum_seit"] = str(int(time.time()) + 86400)
+    broker_u["person/Anna/raum_seit"] = "1500000000"
+    g_n4, t_n4, v_n4 = _neustartlauf("wohnzimmer", broker_u)
+    p.gleich(G, "K11 unplausible Brokerwerte (kein Zahlwert, Zukunft, vor 2020): Startzeit, nichts vorgemerkt",
+             (v_n4,) + tuple(t_n4 <= int(g_n4.get(k) or 0) <= t_n4 + 5 for k in zeitthemen), (0, True, True, True))
 
     # =====================================================================
     G = "HTTP-Weg"

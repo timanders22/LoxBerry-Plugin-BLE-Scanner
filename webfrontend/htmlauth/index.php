@@ -226,7 +226,7 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
             }
             continue;                      // leere neue Zeile: nichts eingetragen
         }
-        list($art, $kennung) = bl_unzulaessige_zeichen($roh) ? array('', '') : bl_kennung($roh);
+        list($art, $kennung) = bl_kennung_eingabe($roh);     // 1.3.38 (K12): dieselbe Funktion wie bl_tag_pruefen()
         if ($art === '') {
             $bean[$i][] = 'kennung';
             // ABWEISEN und melden, nicht stillschweigend verwerfen.
@@ -564,6 +564,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $neu['scanner_themen']     = isset($_POST['scanner_themen']) ? '1' : '0';
     $neu['raum']               = isset($_POST['raum']) ? '1' : '0';
     $neu['raum_personen']      = isset($_POST['raum_personen']) ? '1' : '0';     // 1.3.36
+    $neu['raum_anwesenheit']   = isset($_POST['raum_anwesenheit']) ? '1' : '0';  // 1.3.38 (K13)
 
     $uhr_roh = isset($_POST['batterie_uhrzeit']) ? $_POST['batterie_uhrzeit'] : '';
     list($ok, $w) = bl_wert_pruefen('batterie_uhrzeit', $uhr_roh);
@@ -795,7 +796,14 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
  * dieser Linie nicht; die Datei traegt aber MAC-Adressen und die Namen der
  * ueberwachten Personen - eine Anwesenheitsliste, und der Hinweis am Knopf
  * sagt das. Ein Download endet ohne Umleitung. */
-if ($bl_ist_post && isset($_POST['bl_sichern'])) {
+// 1.3.38 (K7b): ist bindkey.json oder irk.json vorhanden, aber kein lesbares JSON, wird das Sichern abgewiesen. Bis
+// 1.3.37 stand dafuer still {} in der Sicherung - sie sah vollstaendig aus und haette beim Zurueckspielen die Schluessel
+// geloescht. Eine wirklich leere Tabelle bleibt {} (vollstaendiger Stand).
+$bl_sk_kaputt = ($bl_ist_post && isset($_POST['bl_sichern'])) ? bl_schluesseldateien_kaputt() : array();
+if ($bl_sk_kaputt) {
+    $bl_error = sprintf(bl_t('TEXT.SICH_SCHLUESSELDATEI'), bl_e(implode(', ', $bl_sk_kaputt)));
+    $bl_tab = 'tab-settings';
+} elseif ($bl_ist_post && isset($_POST['bl_sichern'])) {
     // X-3 (Verbesserungsbau 30.09.2026): besteht ein gespeicherter Wert das
     // eigene Zurueckspielen nicht, steht die Warnung im Kopf der Datei (nur
     // Namen). Geliefert wird die Sicherung trotzdem vollstaendig.
@@ -843,8 +851,20 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
     } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
         $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
     } else {
-        list($bl_neu, $bl_gruende, $bl_n, $bl_neu_tags) = bl_sicherung_lesen(
-            (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']));
+        $bl_roh_sich = (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']);
+        list($bl_neu, $bl_gruende, $bl_n, $bl_neu_tags) = bl_sicherung_lesen($bl_roh_sich);
+        // 1.3.38 (K7a): Bind-Keys und IRK werden VOR bl_config_write() gelesen; jeden unpassenden Eintrag beanstandet
+        // schon bl_sicherung_lesen(). Bis 1.3.37 kamen sie erst nach dem Schreiben, und ein unpassender Eintrag wurde
+        // mit Hinweis uebergangen - die Datei war dann halb uebernommen. Die zweite Abfrage hier faellt geschlossen aus.
+        $bl_sbk = null;
+        $bl_sirk = null;
+        if ($bl_neu !== null) {
+            list($bl_sbk, $bl_sirk, $bl_shin) = bl_sicherung_schluessel($bl_roh_sich, $bl_neu_tags);
+            if ($bl_shin) {
+                $bl_neu = null;
+                $bl_gruende = $bl_shin;
+            }
+        }
         if ($bl_neu === null) {
             /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
              * nichts. Die Gruende sind in bl_sicherung_lesen() maskiert. */
@@ -854,9 +874,8 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
             $bl_saved = true;
             require_once __DIR__ . '/bl_test.php';
             $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n, count($bl_neu_tags));
-            // Gruppe 33 (E-E6): Bind-Keys und IRK aus der Sicherung; fehlt ein Abschnitt (1.3.28), bleibt der Bestand.
-            list($bl_sbk, $bl_sirk, $bl_shin) = bl_sicherung_schluessel(
-                (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']), $bl_neu_tags);
+            // Gruppe 33 (E-E6): Bind-Keys und IRK aus der Sicherung (oben gelesen); fehlt ein Abschnitt (1.3.28), bleibt
+            // der Bestand.
             if ($bl_sbk !== null && !bl_bindkey_schreiben($bl_sbk)) {
                 $bl_gescheitert[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_bindkey_datei());
             }
@@ -865,9 +884,6 @@ if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
             }
             $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.SICH_SCHLUESSEL'), $bl_sbk === null ? '-' : count($bl_sbk),
                                          $bl_sirk === null ? '-' : count($bl_sirk));
-            if ($bl_shin) {
-                $bl_hinweis .= ' ' . implode(' ', $bl_shin);
-            }
             if ($bl_neu['mqtt'] === '1') {
                 list($bl_abo_pfad, $bl_abo_da) = bl_abo_datei($bl_neu['themenpraefix'], true);
                 if (!$bl_abo_da) {
@@ -1572,6 +1588,10 @@ foreach (array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle') as $bl_rr) { ?>
 <div class="sm-feld">
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="raum_personen" value="1"<?= bl_eingabe_an('settings', 'raum_personen', bl_cfg($bl_cfg, 'raum_personen', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.RAUM_PERSONEN')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RAUM_PERSONEN_HILFE')) ?></p></div>
+<?php /* 1.3.38 (K13): Raum-Empfaenger halten den Anhaenger anwesend - ab Werk aus, wirkt nur mit Raumzuordnung. */ ?>
+<div class="sm-feld">
+<label style="font-weight:400;"><input data-role="none" type="checkbox" name="raum_anwesenheit" value="1"<?= bl_eingabe_an('settings', 'raum_anwesenheit', bl_cfg($bl_cfg, 'raum_anwesenheit', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.RAUM_ANWESENHEIT')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.RAUM_ANWESENHEIT_HILFE')) ?></p></div>
 
 <?php /* ESPresense-Empfaenger in der Raumzuordnung (1.3.36): ab Werk aus. Gelesen wird nur
          <praefix>/devices/<Kennung>/<Raum> am selben Broker, und nur bei eingeschalteter Raumzuordnung. */ ?>

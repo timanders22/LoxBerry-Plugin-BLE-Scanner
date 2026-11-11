@@ -295,8 +295,14 @@ def mqtt_zugangsdaten():
 # nach_loeschen(themen) laeuft unmittelbar nach den Loeschungen, vor dem
 # Nachlesen - dort geht der gueltige Wert hinterher.
 #
-# Rueckgabe {"rc", "geleert", "rest", "grund"}: rc 0 = nichts (mehr)
+# Rueckgabe {"rc", "geleert", "rest", "grund", "werte"}: rc 0 = nichts (mehr)
 # behalten, 1 = nach dem Loeschen stand noch etwas, 2 = nicht zu fragen.
+#
+# 1.3.38 (K11): nur_lesen=True loescht nichts - es liest nur das, was der
+# Broker beim ersten Abonnement behalten zurueckgibt, nach "werte" (Thema ->
+# Nutzlast als Text) und endet mit rc 0. Derselbe Weg mit denselben Wachen
+# (CONNACK, SUBACK); der Dienst liest so beim Start seine eigenen
+# zurueckbehaltenen Zeitpunkte (Dienst.zeiten_nachlesen()).
 #
 # Den Grund einer abgewiesenen Anmeldung nennt seit 1.3.20 mqtt_anmeldegrund()
 # oben - EINE Tabelle fuer 1-5 (paho 1.x) und 132-136 (paho 2.x). Bis 1.3.19
@@ -304,8 +310,8 @@ def mqtt_zugangsdaten():
 # die Deinstallation bei falschen Zugangsdaten "unbekannter Grund" (Pruefung
 # 29.09.2026, MQTT 7).
 
-def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
-    erg = {"rc": 2, "geleert": [], "rest": [], "grund": ""}
+def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None, nur_lesen=False):
+    erg = {"rc": 2, "geleert": [], "rest": [], "grund": "", "werte": {}}
     praefix = str(praefix or "").strip("/")
     if not praefix or "#" in praefix or "+" in praefix:
         erg["grund"] = "das Themenpraefix '{0}' taugt nicht fuer ein Abonnement".format(praefix)
@@ -341,6 +347,11 @@ def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
         thema = str(n.topic)
         if thema.startswith(praefix + "/") and auswahl(thema[len(praefix) + 1:]):
             gesehen.add(thema)
+            if nur_lesen:
+                try:
+                    erg["werte"][thema] = bytes(n.payload).decode("utf-8", "replace")[:64]
+                except (TypeError, ValueError):
+                    pass
 
     def bei_abo(_k, _d, mid, codes, *_rest):
         werte = []
@@ -410,6 +421,9 @@ def broker_leeren(praefix, auswahl, warten=1.5, nach_loeschen=None):
             return erg
         time.sleep(warten)
         k.unsubscribe(praefix + "/#")
+        if nur_lesen:
+            erg["rc"] = 0
+            return erg
         zu_leeren = sorted(gesehen)
         for thema in zu_leeren:
             info = k.publish(thema, b"", qos=1, retain=True)
@@ -934,6 +948,12 @@ class Dienst:
         # Raeume, fuer die summary/raum/<R>/... schon hinausging (hoechstens 40; ein leerer Raum meldet 0).
         self.person_raum = {}
         self.raeume_bekannt = set()
+        # 1.3.38 (K11): die eigenen zurueckbehaltenen Zeitpunkte (present_since, raum_seit) und die Zustaende dazu,
+        # beim Start einmal vom Broker gelesen (zeiten_nachlesen). broker_seit: Zeitthema -> Zeitpunkt (nur
+        # plausible), broker_zustand: Zustandsthema -> Wert; beide gelten bis broker_seit_bis (monotone Uhr).
+        self.broker_seit = {}
+        self.broker_zustand = {}
+        self.broker_seit_bis = 0.0
         # -- Gruppe 13 (1.3.28)
         # Lebenszeichen status/zaehler (0-999, hoechstens alle 30 s, E8)
         self.zaehler = 0
@@ -1319,6 +1339,90 @@ class Dienst:
         return gem.thema_der_kennung(tag["art"], tag["kennung"],
                                      (tag.get("opt") or {}).get("alias", ""))
 
+    # -- Zeitpunkte nach einem Neustart (1.3.38, K11) -----------------------
+    #
+    # Bis 1.3.37 begann jeder Dienststart mit leeren Zustaenden: <T>/present_since, <T>/raum_seit und
+    # person/<P>/raum_seit sprangen auf die Startzeit, obwohl sich nichts geaendert hatte (person_raum = {} im
+    # Konstruktor). Entscheidung des Hausherrn (11.11.2026): beim Start den eigenen zurueckbehaltenen Wert vom Broker
+    # nachlesen und uebernehmen, wenn der zugehoerige Zustand unveraendert ist; ein unplausibler Wert zaehlt nicht.
+
+    SEIT_AB = 1577836800        # 2020-01-01 00:00:00 UTC - ein frueherer Zeitpunkt stammt nicht von diesem Plugin
+
+    def _seit_themen(self):
+        """Die eigenen Zeitthemen dieser Bauart mit ihrem Zustandsthema {zeitthema: zustandsthema}, ohne Praefix:
+        <T>/present_since (present) und <T>/raum_seit (raum) je aktivem Tag, person/<P>/raum_seit (raum) je Person
+        eines aktiven Tags. Andere *_since/*_seit-Themen fuehrt der Dienst nicht."""
+        aus = {}
+        for t in self.tags:
+            if t.get("aktiv") != "1":
+                continue
+            z = self._zweig(t)
+            aus[z + "/present_since"] = z + "/present"
+            aus[z + "/raum_seit"] = z + "/raum"
+            pn = (t.get("opt") or {}).get("person", "").strip()
+            if pn:
+                p = "person/" + gem.thema_saeubern(pn)
+                aus[p + "/raum_seit"] = p + "/raum"
+        return aus
+
+    def zeiten_nachlesen(self):
+        """Beim Start: die eigenen zurueckbehaltenen Zeitpunkte und ihre Zustaende vom Broker lesen - mit
+        broker_leeren(nur_lesen=True), demselben Weg wie das Aufraeumen (CONNACK, SUBACK, eigene kurze Verbindung).
+        Scheitert das, gilt wie bis 1.3.37 die Startzeit. Rueckgabe: Zahl der vorgemerkten Zeitpunkte."""
+        themen = self._seit_themen()
+        gesucht = set(themen) | set(themen.values())
+        erg = broker_leeren(self.praefix, lambda rest: rest in gesucht, nur_lesen=True)
+        if erg["rc"] != 0:
+            log.info("Zeitpunkte vom Broker nicht gelesen (%s) - es gilt die Startzeit.", erg["grund"])
+            return 0
+        vor = self.praefix + "/"
+        return self.zeiten_uebernehmen({t[len(vor):]: w for t, w in erg["werte"].items() if t.startswith(vor)})
+
+    def zeiten_uebernehmen(self, werte, jetzt_w=None):
+        """werte: {Thema ohne Praefix: Nutzlast}, wie sie zurueckbehalten im Broker standen. Ein Zeitpunkt zaehlt nur,
+        wenn er eine ganze Zahl ist, nicht in der Zukunft liegt und nicht vor 2020, und wenn sein Zustandsthema
+        mitkam; sonst gilt die Startzeit. Vorgemerkt bis zum Ende der laengsten Tag-Frist (mindestens 30 s) und
+        weiteren 30 s - bis dahin hat jeder Tag einmal mit Aussage gesendet. Rueckgabe: Zahl der vorgemerkten."""
+        jetzt_w = time.time() if jetzt_w is None else jetzt_w
+        themen = self._seit_themen()
+        seit = {}
+        verworfen = []
+        for zt, st in sorted(themen.items()):
+            if zt not in werte or st not in werte:
+                continue
+            roh = str(werte[zt]).strip()
+            if re.fullmatch(r"[0-9]{1,12}", roh) and self.SEIT_AB <= int(roh) <= jetzt_w:
+                seit[zt] = int(roh)
+            else:
+                verworfen.append(zt)
+        fristen = [self._tagzahl(t, "abw", "abwesenheit_nach", 30) for t in self.tags]
+        self.broker_seit = seit
+        self.broker_zustand = {themen[zt]: str(werte[themen[zt]]).strip() for zt in seit}
+        self.broker_seit_bis = time.monotonic() + max([30, self._zahl("abwesenheit_nach", 30)] + fristen) + 30
+        if seit or verworfen:
+            log.info("Zeitpunkte vom Broker: %d vorgemerkt (gelten, wenn der Zustand gleich bleibt), %d unplausibel "
+                     "verworfen%s", len(seit), len(verworfen),
+                     (" (" + ", ".join(verworfen) + ")") if verworfen else "")
+        return len(seit)
+
+    def _seit_vom_broker(self, zustandsthema, zustandswert, zeitthema, seit):
+        """Den Zeitpunkt vom Broker nehmen, wenn er fuer zeitthema noch vorgemerkt ist, die Frist laeuft und der
+        Zustand so hinausgeht, wie er im Broker stand (dieselbe Form wie _senden: leer heisst "-"). Einmal genommen,
+        gilt er; nach der Frist verfallen alle offenen, und es bleibt bei seit."""
+        if zeitthema not in self.broker_seit:
+            return seit
+        if time.monotonic() > self.broker_seit_bis:
+            self.broker_seit.clear()
+            self.broker_zustand.clear()
+            return seit
+        wert = "" if zustandswert is None else str(zustandswert)
+        if wert == "" and gem.retain_fuer(zustandsthema, "-"):
+            wert = "-"
+        if self.broker_zustand.get(zustandsthema) != wert:
+            return seit
+        self.broker_zustand.pop(zustandsthema, None)
+        return self.broker_seit.pop(zeitthema)
+
     # -- Sichtungen ---------------------------------------------------------
 
     def sichtung(self, mac, werte):
@@ -1511,8 +1615,9 @@ class Dienst:
         def trifft(thema):
             # Genau auf Zweiggrenzen vergleichen. Ein blosses "in" wuerde bei
             # einem Alias namens "present" auch summary/present treffen.
+            # 1.3.38 (K4): ein ganzes Thema (person/<P>/present) trifft genau sich selbst.
             for z in zweige:
-                if thema.startswith(z + "/") or ("/" + z + "/") in thema:
+                if thema == z or thema.startswith(z + "/") or ("/" + z + "/") in thema:
                     return True
             return False
 
@@ -1555,6 +1660,7 @@ class Dienst:
         scannerthemen = self._zahl("scanner_themen", 0) == 1
         raum_an = self._zahl("raum", 0) == 1
         ausgleich = self._zahl("raum_ausgleich_db", 0)
+        raum_anw = raum_an and self.cfg.get("raum_anwesenheit", "0") == "1"     # 1.3.38 (K13), ab Werk aus
 
         anwesend_gesamt = 0
         namen_da = []
@@ -1578,12 +1684,22 @@ class Dienst:
                 alter = jetzt_m - eintrag["mono"]
 
             frisch = alter is not None and alter <= grenze
+            # 1.3.38 (K13, Schalter raum_anwesenheit, ab Werk aus): hoert dieser LoxBerry den Tag nicht frisch, zaehlt
+            # eine frische Meldung eines Raum-Empfaengers (ESPresense oder weiterer LoxBerry) als Sichtung - nur aus
+            # raumdaten (dort steht ein Tag nur ueber ein Paar aus espresense_zuordnung, eine Kennung gleich dem Zweig
+            # oder den Zweig im Thema eines weiteren LoxBerry), juenger als die Frist des Tags, rssi >= rssi_minimum.
+            empf = None
+            if raum_anw and not frisch:
+                empf = self._empfaenger_sichtung(kennung, grenze, jetzt_w)
+                frisch = empf is not None
             # B11 (Gruppe 13): hochgezaehlt wird nur, wenn seit der letzten Runde ein NEUES Paket kam
             # (anderer Zeitpunkt der Sichtung). Bis 1.3.27 zaehlte jede Runde mit frischer Sichtung - ein
             # einziges Paket schaltete bei ankunft_sichtungen 3 nach 10 s fuer 20 s auf anwesend (Probe b11).
             neu = eintrag is not None and eintrag.get("mono") != zustand.get("ankunft_mono")
+            if empf is not None:      # K13: neu ist eine neue Meldung des Empfaengers
+                neu = ("empfaenger", empf[0]) != zustand.get("ankunft_mono")
             if frisch and neu:
-                zustand["ankunft_mono"] = eintrag["mono"]
+                zustand["ankunft_mono"] = eintrag["mono"] if empf is None else ("empfaenger", empf[0])
                 zustand["ankunft"] = min(zustand["ankunft"] + 1, noetig)
             elif not frisch:
                 zustand["ankunft"] = 0
@@ -1626,6 +1742,8 @@ class Dienst:
 
             roh = eintrag.get("rssi") if (eintrag and anwesend and not ohne_aussage) else None
             avg = eintrag.get("rssi_avg") if (eintrag and anwesend and not ohne_aussage) else None
+            if empf is not None:      # K13: der eigene Pegel ist alt - er gilt nicht, der Raum kommt vom Empfaenger
+                roh = avg = None
             if avg is None:
                 avg = roh
             stufe = gem.signalstufe(avg, nah, mittel,
@@ -1675,6 +1793,9 @@ class Dienst:
             self._senden("{0}/last_seen_ts".format(zweig),
                          int(eintrag["zeit"]) if (eintrag and eintrag.get("zeit")) else 0,
                          erzwingen, abstand=60, wechsel=geaendert)
+            if self.broker_seit:      # 1.3.38 (K11): Zeitpunkt aus der Zeit vor dem Neustart
+                zustand["seit_zeit"] = self._seit_vom_broker("{0}/present".format(zweig), -1 if ohne_aussage else anwesend,
+                                                             "{0}/present_since".format(zweig), zustand["seit_zeit"])
             self._senden("{0}/present_since".format(zweig),
                          int(zustand["seit_zeit"]), erzwingen)
             self._senden("{0}/name".format(zweig),
@@ -1708,11 +1829,19 @@ class Dienst:
             if scannerthemen:
                 self._senden("scanner/{0}/{1}/rssi".format(self.scanner, zweig),
                              (avg + ausgleich) if avg is not None else -255, erzwingen)
-                self._senden("scanner/{0}/{1}/present".format(self.scanner, zweig),
-                             -1 if ohne_aussage else anwesend, erzwingen)
+                # 1.3.38 (K13): scanner/<dieser>/<T>/... zeigt nur das EIGENE Hoeren. Kommt die Anwesenheit allein vom
+                # Empfaenger, hat dieser LoxBerry den Tag nicht gehoert: 0, ohne Aussage (Karenz, taub) -1. rssi ist
+                # dann ohnehin -255 (avg None).
+                eigen_present = -1 if ohne_aussage else anwesend
+                if empf is not None:
+                    eigen_present = -1 if (karenz or taub) else 0
+                self._senden("scanner/{0}/{1}/present".format(self.scanner, zweig), eigen_present, erzwingen)
 
             if raum_an:
                 raum = self.raum_bestimmen(kennung, avg, ausgleich, jetzt_w, zustand)
+                if self.broker_seit:      # 1.3.38 (K11)
+                    zustand["raum_seit"] = self._seit_vom_broker("{0}/raum".format(zweig), raum,
+                                                                 "{0}/raum_seit".format(zweig), zustand["raum_seit"])
                 self._senden("{0}/raum".format(zweig), raum, erzwingen)
                 self._senden("{0}/raum_seit".format(zweig),
                              int(zustand["raum_seit"]), erzwingen)
@@ -1724,14 +1853,22 @@ class Dienst:
                     eintragp["ohne"] = True     # 1.3.33: ein Tag ohne Aussage macht "weg" unbelegt, "da" bleibt da
                 else:
                     eintragp["present"] = max(eintragp["present"], anwesend)
+                    if anwesend and raum_anw:      # 1.3.38 (K13): woher die Anwesenheit kommt - eigener Scanner/Empfaenger
+                        eintragp["empfaenger" if empf is not None else "eigen"] = True
                 if eintrag and eintrag.get("zeit"):
                     eintragp["ts"] = max(eintragp["ts"], int(eintrag["zeit"]))
                 eintragp["namen"].append(tag.get("name") or kennung)
-                # 1.3.36 (raum_personen): der Raum der Person ist der Raum ihres zuletzt gesehenen anwesenden Tags.
+                # 1.3.36 (raum_personen): der Raum der Person aus ihren anwesenden Tags mit Raum.
+                # 1.3.38 (K3): Rang (raum_seit des Tags, 1 wenn sein Raum der bisherige der Person ist, letzte
+                # Sichtung) statt nur der letzten Sichtung. Es gewinnt der Tag, der zuletzt den Raum gewechselt hat;
+                # bei gleichem Wechselzeitpunkt bleibt der bisherige Raum. Bis 1.3.37 sprang der Raum bei zwei ruhenden
+                # Tags in zwei Raeumen mit jedem Paket (gemessen: 15 bis 17 Wechsel in 40 Durchlaeufen, jetzt 0).
                 if raum_an and anwesend and not ohne_aussage and zustand.get("raum"):
                     z_raum = int(eintrag["zeit"]) if (eintrag and eintrag.get("zeit")) else 0
-                    if z_raum >= eintragp.get("raum_zeit", -1):
-                        eintragp["raum_zeit"] = z_raum
+                    bisher = 1 if gem.thema_saeubern(zustand["raum"]) == (self.person_raum.get(p) or ("",))[0] else 0
+                    rang = (int(zustand.get("raum_seit") or 0), bisher, z_raum)
+                    if rang >= eintragp.get("raum_rang", (-1, -1, -1)):
+                        eintragp["raum_rang"] = rang
                         eintragp["raum"] = zustand["raum"]
 
             # 1.3.33: ohne Aussage kein Push - der Eingang behaelt seinen Wert (wie WiFi-Scanner ueber UDP); ein
@@ -1854,6 +1991,24 @@ class Dienst:
 
     # -- Raumzuordnung ------------------------------------------------------
 
+    def _empfaenger_sichtung(self, kennung, grenze, jetzt_w):
+        """1.3.38 (K13): die juengste Meldung eines Raum-Empfaengers zu diesem Tag, die als Sichtung zaehlt:
+        (zeit, rssi, empfaenger) oder None. Zaehlt nur, was in raumdaten steht und nicht von diesem Scanner kommt,
+        nicht aelter ist als grenze (Frist des Tags) und rssi >= rssi_minimum hat. In raumdaten kommt ein Tag nur
+        ueber eine ausdrueckliche Zuordnung: es_nachricht() ueber ein Paar aus espresense_zuordnung oder eine
+        Kennung, die genau dem Zweig des Tags gleicht, raum_nachricht() ueber den Zweig im Thema - eine
+        Modellkennung wie apple:... ohne Paar trifft keinen Zweig (er enthaelt nie einen Doppelpunkt)."""
+        mindest = self._zahl("rssi_minimum", -100)
+        with self.sperre:
+            daten = dict(self.raumdaten.get(kennung) or {})
+        bester = None
+        for name, (zeit, rssi) in daten.items():
+            if name == self.scanner or jetzt_w - zeit > grenze or rssi < mindest:
+                continue
+            if bester is None or zeit > bester[0]:
+                bester = (zeit, rssi, name)
+        return bester
+
     def raum_bestimmen(self, kennung, eigener_rssi, ausgleich, jetzt_w, zustand):
         """Aus den Meldungen aller Scanner den staerksten waehlen.
 
@@ -1927,7 +2082,8 @@ class Dienst:
     def raum_personen_senden(self, personen, jetzt_w, schweigen_runde, erzwingen):
         """person/<P>/raum und person/<P>/raum_seit je Person, summary/raum/<R>/anzahl und /namen je Raum.
 
-        Der Raum einer Person ist der Raum ihres zuletzt gesehenen anwesenden Tags (auswerten()). Ist sie
+        Der Raum einer Person ist der Raum des anwesenden Tags, der zuletzt den Raum gewechselt hat; bei gleichem
+        Wechselzeitpunkt bleibt der bisherige Raum, sonst gilt der zuletzt gesehene Tag (auswerten(), 1.3.38). Ist sie
         nicht da oder hat keiner ihrer Tags einen Raum, geht "-" hinaus (retained Zustand ohne Aussage,
         Entscheidung 5). raum_seit ist der Zeitpunkt des letzten Wechsels der Person, nicht des Tags - wechselt
         sie den Schluessel, bleibt die Angabe richtig. Eine Person in der Karenz sendet nichts, und die Zahlen je
@@ -1944,6 +2100,9 @@ class Dienst:
             alt = self.person_raum.get(name)
             if alt is None or alt[0] != raum:
                 self.person_raum[name] = (raum, int(jetzt_w))
+            if self.broker_seit:      # 1.3.38 (K11): bis 1.3.37 stand hier nach jedem Neustart die Startzeit
+                self.person_raum[name] = (raum, self._seit_vom_broker(
+                    "person/{0}/raum".format(name), raum, "person/{0}/raum_seit".format(name), self.person_raum[name][1]))
             self._senden("person/{0}/raum".format(name), raum, erzwingen)
             self._senden("person/{0}/raum_seit".format(name), self.person_raum[name][1], erzwingen)
             if raum:
@@ -2109,6 +2268,12 @@ class Dienst:
             return 1
         return None if (p.get("offen") or p.get("ohne")) else 0
 
+    @staticmethod
+    def _ble_name(p):
+        """1.3.38 (K13): wie die BLE-Quelle in person/<P>/quelle heisst - "empfaenger", wenn die Person nur ueber
+        Raum-Empfaenger anwesend ist (Schalter raum_anwesenheit), sonst "ble" wie bisher."""
+        return "empfaenger" if (p and p.get("empfaenger") and not p.get("eigen")) else "ble"
+
     def wlan_zusammenfuehren(self, personen, erzwingen):
         """person/<P>/anwesend_gesamt und person/<P>/quelle je Zuordnung.
 
@@ -2125,7 +2290,7 @@ class Dienst:
                 ble_wert = self._person_ble(personen[person])
                 if ble_wert is None and personen[person].get("offen"):
                     continue     # 1.3.33: noch in der Karenz
-                gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, None)
+                gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, None, self._ble_name(personen[person]))
                 self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
                 self._senden("person/{0}/quelle".format(person), quelle, erzwingen)
             return
@@ -2168,7 +2333,7 @@ class Dienst:
                 continue     # 1.3.33: noch in der Karenz
             roh = werte.get(wlan_name) if (frisch and wlan_name is not None) else None
             wlan_wert = 1 if roh == "1" else (0 if roh == "0" else None)
-            gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, wlan_wert)
+            gesamt, quelle = gem.anwesenheit_gesamt(ble_wert, wlan_wert, self._ble_name(ble))
             self._senden("person/{0}/anwesend_gesamt".format(person), gesamt, erzwingen)
             self._senden("person/{0}/quelle".format(person), quelle, erzwingen)
             lage[person] = {"wlan_name": wlan_name, "ble": ble_wert, "wlan": wlan_wert,
@@ -2967,7 +3132,19 @@ class Dienst:
         entfallen = alte_zweige - neue_zweige
         # F3 (Gruppe 13): auch der Zweig person/<P> einer entfallenen Person - sonst bliebe
         # anwesend_gesamt (V10) bzw. present retained auf dem letzten Wert stehen.
-        entfallen |= {"person/" + p for p in alte_personen - self._personen_der_tags()}
+        # 1.3.38 (K4): steht die Person bei wlan_kopplung=1 noch in der wlan_zuordnung, sendet
+        # wlan_zusammenfuehren() ihre anwesend_gesamt/quelle weiter - dann fallen nur die Themen aus BLE
+        # (present, last_seen_ts, raum, raum_seit, ...), dieselbe Regel wie entfallen() in mqtt_aufraeumen().
+        # Bis 1.3.37 ging der ganze Zweig, und anwesend_gesamt/quelle fehlten bis zur naechsten Aenderung.
+        gekoppelt_wlan = set()
+        if self.cfg.get("wlan_kopplung", "0") == "1":
+            gekoppelt_wlan = {pn for _wn, pn in gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
+        for p in alte_personen - self._personen_der_tags():
+            if p in gekoppelt_wlan:
+                entfallen |= {t for t in self.veroeffentlicht if t.startswith("person/" + p + "/")
+                              and t.split("/")[-1] not in ("anwesend_gesamt", "quelle")}
+            else:
+                entfallen.add("person/" + p)
         self.irk_laden()
         self.bindkey_laden()       # Gruppe 33: neuer Schluessel ohne Neustart
         # Auch abgehakte Tags: fuer sie wird nichts mehr gesendet, ihr
@@ -3436,6 +3613,11 @@ class Dienst:
             if self._zahl("raum", 0) == 1 or self.cfg.get("wlan_kopplung", "0") == "1":
                 self.mqtt.abo_rueckruf = self.abonnieren
             self.abo_datei_nachziehen()
+            # 1.3.38 (K11): vor der ersten Runde die eigenen Zeitpunkte vom Broker (present_since, raum_seit).
+            try:
+                self.zeiten_nachlesen()
+            except Exception as fehler:  # noqa: BLE001
+                log.warning("Zeitpunkte vom Broker nicht gelesen (%s) - es gilt die Startzeit.", fehler)
             self.mqtt.start()
         else:
             log.info("MQTT ist ausgeschaltet")

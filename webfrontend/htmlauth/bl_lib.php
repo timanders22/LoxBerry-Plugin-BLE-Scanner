@@ -267,6 +267,8 @@ function bl_defaults()
         'raum_ausgleich_db'  => '0',
         // Personen und Raeume (1.3.36), ab Werk aus; wirkt nur mit raum=1
         'raum_personen'      => '0',
+        // Raum-Empfaenger halten den Anhaenger anwesend (1.3.38, K13), ab Werk aus; wirkt nur mit raum=1
+        'raum_anwesenheit'   => '0',
         // ESPresense-Empfaenger in der Raumzuordnung (1.3.36), ab Werk aus
         'espresense'           => '0',
         'espresense_praefix'   => 'espresense',
@@ -302,7 +304,7 @@ function bl_schluessel_spaeter()
 {
     return array('wlan_kopplung', 'wlan_zuordnung', 'befehle_mqtt_ein', 'befehle_eingreifend_ein',
                  'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region',
-                 'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen');
+                 'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen', 'raum_anwesenheit');
 }
 
 /**
@@ -350,6 +352,7 @@ function bl_regeln()
         'raum_hysterese_db'  => array('zahl', 0, 30),
         'raum_ausgleich_db'  => array('zahl', -30, 30),
         'raum_personen'      => array('schalter'),
+        'raum_anwesenheit'   => array('schalter'),
         'espresense'           => array('schalter'),
         'espresense_praefix'   => array('muster', '/^[A-Za-z0-9_-]{1,32}$/'),
         'espresense_zuordnung' => array('es_zuordnung'),
@@ -499,8 +502,8 @@ function bl_tag_pruefen($t)
             return array(null, $f);
         }
     }
-    list($art, $kennung) = bl_kennung($t['kennung']);
-    if ($art === '' || $kennung !== trim($t['kennung'])) {
+    list($art, $kennung) = bl_kennung_eingabe($t['kennung']);     // 1.3.38 (K12): dieselbe Regel wie das Formular
+    if ($art === '') {
         return array(null, 'kennung');
     }
     if (!in_array($t['aktiv'], array('0', '1'), true)) {
@@ -773,6 +776,21 @@ function bl_kennung($wert)
         return array('mac', $mac);
     }
     return array('', '');
+}
+
+/**
+ * 1.3.38 (K12): EINE Regel fuer die Kennung eines Tags - die Tag-Tabelle im Formular (bl_tags_aus_post()) und die
+ * Sicherung (bl_tag_pruefen()) rufen beide diese Funktion. Angenommen wird, was bl_kennung() deutet und keine
+ * unzulaessigen Zeichen traegt; zurueck kommt die genormte Kennung (MAC gross mit Doppelpunkten, IB:..., IRK:<Name>).
+ * Bis 1.3.37 verlangte die Sicherung zusaetzlich, dass die Datei die Kennung schon genormt fuehrt - "irk:handy" oder
+ * eine klein geschriebene MAC nahm das Formular an, das Zurueckspielen wies sie mit "Feld kennung" ab.
+ */
+function bl_kennung_eingabe($roh)
+{
+    if (!is_string($roh) || bl_unzulaessige_zeichen($roh)) {
+        return array('', '');
+    }
+    return bl_kennung($roh);
 }
 
 /** Namen in ein MQTT-taugliches Thema umformen (wie thema_saeubern in Python). */
@@ -2849,19 +2867,29 @@ function bl_ansage_anlass_an($a, $cfg = null)
     return !empty(array_key_exists($a, $h) ? $h[$a] : (isset($v[$a]) ? $v[$a] : 0));
 }
 
-/** Die Eingaben nach einer Beanstandung bis zur naechsten Seite aufheben, nie ein Sprechtoken. */
+/** Die Eingaben nach einer Beanstandung bis zur naechsten Seite aufheben, nie ein Sprechtoken.
+ *  1.3.38 (K5c): mit Zeitpunkt 'zeit'; aelter als BL_ANSAGE_EINGABEN_FRIST Sekunden gilt die Datei nicht mehr (bis 1.3.37
+ *  tauchte eine liegengebliebene Beanstandung beim naechsten Oeffnen wieder auf, auch Tage spaeter). Geschrieben ueber
+ *  bl_datei_schreiben() mit 0600 - Rechte vor Inhalt (Regeln/03); bis 1.3.37 file_put_contents() und chmod danach. */
+if (!defined('BL_ANSAGE_EINGABEN_FRIST')) { define('BL_ANSAGE_EINGABEN_FRIST', 120); }
 function bl_ansage_eingaben($setzen = null)
 {
     $f = bl_paths()['datadir'] . '/ansage_eingaben.json';
     if (is_array($setzen)) {
         if (!is_dir(dirname($f))) { @mkdir(dirname($f), 0775, true); }
-        @file_put_contents($f, (string) json_encode($setzen));
-        @chmod($f, 0600);
+        $js = json_encode(array('zeit' => time()) + $setzen);
+        if ($js !== false) { bl_datei_schreiben($f, $js, 0600); }
         return $setzen;
     }
-    $d = is_file($f) ? json_decode((string) @file_get_contents($f), true) : null;
-    if (is_array($d) && $d) { @file_put_contents($f, '{}'); return $d; }
-    return array();
+    if (!is_file($f)) { return array(); }
+    $d = json_decode((string) @file_get_contents($f), true);
+    if (!is_array($d) || !$d) { return array(); }
+    bl_datei_schreiben($f, '{}', 0600);
+    $z = (isset($d['zeit']) && is_int($d['zeit'])) ? $d['zeit'] : 0;
+    unset($d['zeit']);
+    $alter = time() - $z;
+    if ($z <= 0 || $alter < 0 || $alter > BL_ANSAGE_EINGABEN_FRIST) { return array(); }
+    return $d;
 }
 
 /** Das Formular lesen und speichern: array(gelungen, Fehlertexte, Hinweise). */
@@ -2878,9 +2906,14 @@ function bl_ansage_post(array $post)
         $t = array();
         foreach ($m as $x) { $t[] = $x['text']; }
         $e = array('_bean' => array_values($b));
+        // 1.3.38 (K5b): alle Sprechtoken aus ansage_geheim() bleiben draussen. Bis 1.3.37 standen hier zwei Namen fest;
+        // das HomePod-Token hat heute kein Feld, ein mitgeschicktes tts_homepod_token reiste aber in die Datei mit.
+        $geheim = array();
+        $fn = ansage_feldnamen();
+        foreach (ansage_geheim() as $s) { $geheim[] = isset($fn[$s]) ? $fn[$s] : 'tts_' . $s; }
         foreach ($post as $n => $w) {
             if (strncmp((string) $n, 'tts_', 4) === 0 || strncmp((string) $n, 'ansage_', 7) === 0) {
-                if ((string) $n !== 'tts_alexa_token' && (string) $n !== 'tts_google_token') { $e[$n] = $w; }
+                if (!in_array((string) $n, $geheim, true)) { $e[$n] = $w; }
             }
         }
         bl_ansage_eingaben($e);
@@ -2911,6 +2944,8 @@ function bl_ansage_form_html($felder)
     );
     $o = array();
     $o[] = '<h2>' . $e(bl_t('ANSAGEPLUGIN.H')) . '</h2>';
+    // 1.3.38 (K5a): nach einer Beanstandung sagen, dass das Eingetippte wieder dasteht (wie im Formular Einstellungen).
+    if ($ein) { $o[] = '<div class="sm-hinweis">' . $e(bl_t('TEXT.EINGABEN_ZURUECK')) . '</div>'; }
     $o[] = '<form action="index.php" method="post" autocomplete="off">' . $felder;
     $o[] = ansage_formular_html(bl_tts($cfg), $h + array('modi' => bl_ansage_modi(), 'ziele' => true, 'ziele_post' => isset($ein['tts_ziel_art']) ? $ein : null), $k);
     $o[] = ansage_regeln_html(bl_ansage_regeln($cfg), isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken']) ? $cfg['ansage_haken'] : array('ausfall' => 1), bl_ansage_anlaesse(), $h + array('token_vor_ort' => true), $k);
@@ -3291,6 +3326,11 @@ function bl_sicherung_lesen($roh, &$namen = null)
             $tags[] = $tag;
         }
     }
+    /* 1.3.38 (K7a): Bind-Keys und IRK gehoeren zur Datei wie die Tags. Ein Eintrag, der nicht passt, ist eine
+     * Beanstandung - geprueft HIER, also vor bl_config_write(); eine halb gueltige Datei aendert nichts. */
+    list(, , $bl_sch_mangel, $bl_sch_namen) = bl_sicherung_schluessel($roh, $tags);
+    foreach ($bl_sch_mangel as $bl_x) { $mangel[] = $bl_x; }
+    foreach ($bl_sch_namen as $bl_x) { $namen[] = $bl_x; }
     if ($anzahl === 0) {
         $mangel[] = bl_t('TEXT.SICH_LEER');
         $namen[] = '_';
@@ -3332,14 +3372,18 @@ function bl_sicherung_lesen($roh, &$namen = null)
 
 /**
  * Gruppe 33 (E-E6): die Abschnitte "bindkeys" (MAC -> 24/32 Hex) und "irk" (Name -> 32 Hex) einer Sicherung lesen.
- * Rueckgabe array(bindkeys|null, irk|null, hinweise): null = Abschnitt fehlt (Sicherung aus 1.3.28) - dann bleiben die
- * hinterlegten Schluessel unveraendert. Ein Eintrag mit falscher Form wird mit Hinweis (nur Name/MAC) uebergangen.
- * Nur Schluessel zu Tags der Sicherung bleiben (keine Waisen).
+ * Rueckgabe array(bindkeys|null, irk|null, beanstandungen, namen): null = Abschnitt fehlt (Sicherung aus 1.3.28) - dann
+ * bleiben die hinterlegten Schluessel unveraendert. Nur Schluessel zu Tags der Sicherung gelten (keine Waisen).
+ * 1.3.38 (K7a): ein Eintrag mit falscher Form, ohne Tag in der Datei oder ein Abschnitt, der kein Objekt ist, wird
+ * nicht mehr uebergangen, sondern beanstandet (maskiert, nur Name/MAC, nie ein Schluessel); bl_sicherung_lesen() lehnt
+ * die Datei dann ganz ab. Bis 1.3.37 wurde der Eintrag NACH bl_config_write() mit Hinweis weggelassen - die Datei war
+ * halb uebernommen, und ein Abschnitt "bindkeys": "x" loeschte alle hinterlegten Bind-Keys.
  */
 function bl_sicherung_schluessel($roh, $tags)
 {
     $d = json_decode((string) $roh, true);
-    $hinweise = array();
+    $mangel = array();
+    $bean = array();
     $bk = null;
     $irk = null;
     $macs = array();
@@ -3348,30 +3392,61 @@ function bl_sicherung_schluessel($roh, $tags)
         if ($t['art'] === 'mac') { $macs[] = $t['mac']; }
         if ($t['art'] === 'irk') { $namen[] = substr($t['kennung'], 4); }
     }
+    $falsch = function ($abschnitt, $eintrag, $laenge) use (&$mangel, &$bean) {
+        $mangel[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), $abschnitt,
+                            htmlspecialchars(bl_kuerzen((string) $eintrag, $laenge), ENT_QUOTES, 'UTF-8'));
+        $bean[] = $abschnitt;
+    };
     if (is_array($d) && array_key_exists('bindkeys', $d)) {
         $bk = array();
-        foreach (is_array($d['bindkeys']) ? $d['bindkeys'] : array() as $mac => $v) {
-            $m = bl_mac((string) $mac);
-            $k = is_string($v) ? bl_bindkey_form($v) : '';
-            if ($m === '' || $k === '' || !in_array($m, $macs, true)) {
-                $hinweise[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_UEBERGANGEN'), 'bindkeys', bl_kuerzen((string) $mac, 20));
-                continue;
+        if (!is_array($d['bindkeys'])) {
+            $falsch('bindkeys', '-', 20);
+        } else {
+            foreach ($d['bindkeys'] as $mac => $v) {
+                $m = bl_mac((string) $mac);
+                $k = is_string($v) ? bl_bindkey_form($v) : '';
+                if ($m === '' || $k === '' || !in_array($m, $macs, true)) {
+                    $falsch('bindkeys', $mac, 20);
+                    continue;
+                }
+                $bk[$m] = $k;
             }
-            $bk[$m] = $k;
         }
     }
     if (is_array($d) && array_key_exists('irk', $d)) {
         $irk = array();
-        foreach (is_array($d['irk']) ? $d['irk'] : array() as $n => $v) {
-            if (!preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) || !is_string($v) || !preg_match('/^[0-9A-Fa-f]{32}$/', $v)
-                || !in_array((string) $n, $namen, true)) {
-                $hinweise[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_UEBERGANGEN'), 'irk', bl_kuerzen((string) $n, 40));
-                continue;
+        if (!is_array($d['irk'])) {
+            $falsch('irk', '-', 40);
+        } else {
+            foreach ($d['irk'] as $n => $v) {
+                if (!preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) || !is_string($v) || !preg_match('/^[0-9A-Fa-f]{32}$/', $v)
+                    || !in_array((string) $n, $namen, true)) {
+                    $falsch('irk', $n, 40);
+                    continue;
+                }
+                $irk[(string) $n] = strtolower($v);
             }
-            $irk[(string) $n] = strtolower($v);
         }
     }
-    return array($bk, $irk, $hinweise);
+    return array($bk, $irk, $mangel, array_values(array_unique($bean)));
+}
+
+/**
+ * 1.3.38 (K7b): bindkey.json und irk.json, die vorhanden, aber nicht lesbar oder kein JSON-Objekt sind. Beim Sichern
+ * schrieben bl_bindkey_lesen()/bl_irk_lesen() dafuer still {} in die Datei - die Sicherung sah vollstaendig aus und
+ * haette beim Zurueckspielen die Schluessel geloescht. Eine fehlende Datei ist eine leere Tabelle (kein Befund).
+ * Rueckgabe: Liste der Pfade (leer = in Ordnung).
+ */
+function bl_schluesseldateien_kaputt()
+{
+    $aus = array();
+    foreach (array(bl_bindkey_datei(), bl_irk_datei()) as $f) {
+        if (!file_exists($f) && !is_link($f)) { continue; }
+        $roh = (is_file($f) && is_readable($f)) ? @file_get_contents($f) : false;
+        $j = ($roh === false) ? null : json_decode((string) $roh, true);
+        if (!is_array($j)) { $aus[] = $f; }
+    }
+    return $aus;
 }
 
 /**
@@ -3490,7 +3565,8 @@ function bl_eingabe_felder($form)
                              'messwert_frist', 'xiaomi_region'),
             'haken' => array('http_push', 'wachhund', 'glaettung', 'beacon', 'entfernung',
                              'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung',
-                             'espresense', 'bthome', 'irk_aufloesen', 'haus_anwesenheit', 'raum_personen'),
+                             'espresense', 'bthome', 'irk_aufloesen', 'haus_anwesenheit', 'raum_personen',
+                             'raum_anwesenheit'),
         ),
         'mqtt' => array(
             'text'  => array('themenpraefix'),
@@ -3993,6 +4069,30 @@ function bl_haus_name($text)
     $t = strtr($t, array('ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss', 'Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue'));
     $t = preg_replace('/[^a-z0-9]/', '_', $t);
     return substr($t, 0, 40);
+}
+
+/** 1.3.38 (K6): je Eintrag der Haus-Name, gleiche Namen bekommen _2, _3 ... in der Reihenfolge der Liste - dieselbe
+ *  Regel wie haus_namen() in bl_common.py (Nr. 15). Leer bleibt leer. */
+function bl_haus_namen(array $liste)
+{
+    $aus = array();
+    $gesehen = array();
+    foreach ($liste as $x) {
+        $n = bl_haus_name($x);
+        if ($n === '') {
+            $aus[] = '';
+            continue;
+        }
+        if (isset($gesehen[$n])) {
+            $gesehen[$n]++;
+            $k = (string) $gesehen[$n];
+            $aus[] = substr($n, 0, 40 - strlen($k) - 1) . '_' . $k;
+        } else {
+            $gesehen[$n] = 1;
+            $aus[] = $n;
+        }
+    }
+    return $aus;
 }
 
 /**
@@ -4722,14 +4822,25 @@ function bl_pruef_haus($cfg, $tags, $status, $gilt)
         return array(null, bl_t('TEST.HAUS_UNKLAR'));
     }
     $th = (array) $status['haus']['themen'];
-    // Dieselbe Namensregel in zwei Sprachen (Nr. 15): jede Person der aktiven Tags muss unter dem Namen im Abbild
-    // stehen, den bl_haus_name() hier rechnet (haus_name() im Dienst). Gleichnamige (_2 ...) sind hier nicht nachgerechnet.
+    // Dieselbe Namensregel in zwei Sprachen (Nr. 15): jede Person muss unter dem Namen im Abbild stehen, den der
+    // Dienst rechnet. 1.3.38 (K6): dieselbe Namenmenge wie haus_sollstand() im Dienst - die Personen der aktiven Tags
+    // und bei wlan_kopplung=1 die der WLAN-Zuordnung, eindeutig, sortiert wie Python sorted() (SORT_STRING), mit den
+    // _2-Zusaetzen aus bl_haus_namen(). Bis 1.3.37 nur die Personen der Tags ohne Zusatz: "anna_2" und Personen nur
+    // aus der Zuordnung wurden nie geprueft, und ein doppelter Name stand zweimal in der Meldung.
     $fehlt = array();
     if (bl_cfg($cfg, 'haus_anwesenheit', '0') === '1') {
-        foreach (bl_personen($tags) as $pn) {
-            $soll = 'haus/anwesenheit/' . bl_haus_name($pn);
+        $namen = bl_personen($tags);
+        if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
+            foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) { $namen[] = $paar[1]; }
+        }
+        $namen = array_values(array_unique($namen, SORT_STRING));
+        sort($namen, SORT_STRING);
+        foreach (bl_haus_namen($namen) as $hn) {
+            if ($hn === '') { continue; }
+            $soll = 'haus/anwesenheit/' . $hn;
             if (!in_array($soll, $th, true)) { $fehlt[] = $soll; }
         }
+        $fehlt = array_values(array_unique($fehlt));
     }
     if ($fehlt) {
         return array(false, sprintf(bl_t('TEST.HAUS_NAMEN'), implode(', ', $fehlt)));

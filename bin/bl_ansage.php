@@ -17,9 +17,20 @@ if (!in_array($bl_a, array('ausfall'), true) || ($bl_g !== '0' && $bl_g !== '1')
     echo "ANSAGE;STAND=0;KENNUNG=AUFRUF\n";
     exit(1);
 }
+// 1.3.38 (K8): eine LoxBerry-Wurzel nur mit config/plugins, data/plugins und config/system/general.json - dieselbe
+// Torbedingung wie preinstall.sh und bl_wurzel_gilt(). Bis 1.3.37 genuegte config/plugins, und der Rueckfall
+// (drei Ebenen ueber bin/plugins/<ordner>) galt ungeprueft.
+$bl_wurzel = function ($h) {
+    return is_string($h) && $h !== '' && is_dir($h . '/config/plugins') && is_dir($h . '/data/plugins')
+        && is_file($h . '/config/system/general.json');
+};
 $bl_h = getenv('LBHOMEDIR');
-if (!$bl_h || !is_dir($bl_h . '/config/plugins')) {
+if (!$bl_wurzel($bl_h)) {
     $bl_h = dirname(dirname(dirname(__DIR__)));
+    if (!$bl_wurzel($bl_h)) {
+        echo "ANSAGE;STAND=0;KENNUNG=WURZEL\n";
+        exit(1);
+    }
 }
 $bl_lib = $bl_h . '/webfrontend/htmlauth/plugins/' . $bl_o . '/bl_lib.php';
 if (!is_file($bl_lib)) {

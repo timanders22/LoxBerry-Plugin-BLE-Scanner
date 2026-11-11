@@ -349,6 +349,10 @@ VORGABEN = {
     # -- Personen und Raeume (1.3.36, ab Werk AUS, wirkt nur mit raum=1): person/<P>/raum, person/<P>/raum_seit,
     #    summary/raum/<R>/anzahl und summary/raum/<R>/namen aus der Raumzuordnung der Tags einer Person.
     "raum_personen": "0",
+    # -- 1.3.38 (K13, ab Werk AUS, wirkt nur mit raum=1): eine frische Meldung eines Raum-Empfaengers (ESPresense oder
+    #    weiterer LoxBerry) zu einem ausdruecklich zugeordneten Tag mit rssi >= rssi_minimum haelt den Tag anwesend;
+    #    person/<P>/quelle sagt dann "empfaenger".
+    "raum_anwesenheit": "0",
     # -- ESPresense-Empfaenger in der Raumzuordnung (1.3.36, ab Werk AUS): ESP32-Knoten mit der freien
     #    Firmware ESPresense melden <praefix>/devices/<Kennung>/<Raum> mit rssi als JSON; gelesen wird nur
     #    bei eingeschalteter Raumzuordnung. Zuordnung "<ESPresense-Kennung>=<Tag-Alias>, ...".
@@ -705,8 +709,11 @@ def wlan_frist(intervall_min):
     return max(180, 3 * takt * 60)
 
 
-def anwesenheit_gesamt(ble, wlan):
+def anwesenheit_gesamt(ble, wlan, ble_name="ble"):
     """Beide Quellen zu einer Aussage: (gesamt, quelle).
+
+    1.3.38 (K13): ble_name nennt die BLE-Quelle in quelle. "ble" wie bisher; "empfaenger", wenn die Person nur
+    ueber Raum-Empfaenger anwesend ist (Schalter raum_anwesenheit). Die bestehenden Werte behalten ihre Bedeutung.
 
     ble, wlan: 1 da, 0 weg, None ohne Aussage (WiFi-Scanner schweigt, Person
     ohne aktiven Tag). 1, wenn eine Quelle "da" sagt; 0, wenn alle Quellen mit
@@ -715,7 +722,7 @@ def anwesenheit_gesamt(ble, wlan):
     Aussage bei schweigenden Quellen). quelle nennt die Quellen, die das Ergebnis tragen;
     ohne Aussage "-" (Text, Entscheidung 5 vom 29.09.2026).
     """
-    da = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 1]
+    da = [n for n, w in ((ble_name, ble), ("wlan", wlan)) if w == 1]
     weg = [n for n, w in (("ble", ble), ("wlan", wlan)) if w == 0]
     if da:
         return 1, "+".join(da)

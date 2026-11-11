@@ -292,38 +292,54 @@ netz_zurueck() {
 # 1.3.36 (Fremdpruefung 09.11.2026): die Paket-cfg traegt jetzt alle Vorgaben (dazu ansage_block, wlan_kopplung,
 # wlan_zuordnung, messwert_frist, xiaomi_region, espresense, espresense_praefix, espresense_zuordnung) - Summe neu.
 # 1.3.36 (09.11.2026, raum_personen): Summe erneut nachgezogen.
-netz_zurueck "ble_scanner_ng.cfg" "c9892570666553e2fbab744a5a32fbe992fd08a7abf0762504dc2122e6104151"
-# V1 (Gruppe 13): irk.json liefert das Paket nicht mit. Fehlt sie nach dem Kopierschritt und liegt eine Zweitschrift,
-# kommt sie zurueck - mit 0600. Eine vorhandene wird nie ueberschrieben (postupgrade.sh spielt die Sicherung danach
-# ohnehin vollstaendig zurueck).
+# 1.3.38 (K13, 11.11.2026, raum_anwesenheit): Summe erneut nachgezogen.
+#
+# 1.3.38 (K1): Zweitschriften werden NUR bei einem Update eingespielt. Ob es eines ist, entscheidet allein die Marke
+# <Ordner>.upgrade_laeuft neben dem Datenordner (preupgrade.sh legt sie an; Begruendung weiter unten). Bis 1.3.37 lief
+# dieser Block auch bei einer Neuinstallation: eine Zweitschrift, die preinstall.sh nicht beiseitelegen konnte
+# ("Nicht zu verschieben"), kam ungefragt zurueck - preinstall.sh sagt aber, sie werde NICHT eingespielt.
+MERK_UPGRADE="$PDATA.upgrade_laeuft"
+MERK_SOLL="$PDATA.soll_laufen"
 NETZ_IRK="$NETZ_CFG/irk.json"
 NETZ_IRK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.irk.json"
-if [ ! -e "$NETZ_IRK" ] && bl_json_objekt "$NETZ_IRK_ZWEIT"; then
-    if cp "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" 2>/dev/null \
-       && chmod 0600 "$NETZ_IRK.neu" 2>/dev/null \
-       && cmp -s "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" \
-       && mv "$NETZ_IRK.neu" "$NETZ_IRK" 2>/dev/null; then
-        echo "<OK> irk.json aus der Zweitschrift wiederhergestellt (0600)."
-    else
-        rm -f "$NETZ_IRK.neu" 2>/dev/null
-        echo "<WARNING> irk.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_IRK_ZWEIT."
-    fi
-fi
-[ -f "$NETZ_IRK" ] && chmod 0600 "$NETZ_IRK" 2>/dev/null
-# Gruppe 33 (1.3.29): bindkey.json genauso (Bind-Keys der Xiaomi-Thermometer, 0600; eine vorhandene bleibt).
 NETZ_BK="$NETZ_CFG/bindkey.json"
 NETZ_BK_ZWEIT="$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.bindkey.json"
-if [ ! -e "$NETZ_BK" ] && bl_json_objekt "$NETZ_BK_ZWEIT"; then
-    if cp "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" 2>/dev/null \
-       && chmod 0600 "$NETZ_BK.neu" 2>/dev/null \
-       && cmp -s "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" \
-       && mv "$NETZ_BK.neu" "$NETZ_BK" 2>/dev/null; then
-        echo "<OK> bindkey.json aus der Zweitschrift wiederhergestellt (0600)."
-    else
-        rm -f "$NETZ_BK.neu" 2>/dev/null
-        echo "<WARNING> bindkey.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_BK_ZWEIT."
+if [ -f "$MERK_UPGRADE" ]; then
+    netz_zurueck "ble_scanner_ng.cfg" "700050bd7c2d28f2ece38f4a004984b1fd0a20831f4cf8c88156f20882439922"
+    # V1 (Gruppe 13): irk.json liefert das Paket nicht mit. Fehlt sie nach dem Kopierschritt und liegt eine
+    # Zweitschrift, kommt sie zurueck - mit 0600. Eine vorhandene wird nie ueberschrieben (postupgrade.sh spielt die
+    # Sicherung danach ohnehin vollstaendig zurueck).
+    if [ ! -e "$NETZ_IRK" ] && bl_json_objekt "$NETZ_IRK_ZWEIT"; then
+        if cp "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" 2>/dev/null \
+           && chmod 0600 "$NETZ_IRK.neu" 2>/dev/null \
+           && cmp -s "$NETZ_IRK_ZWEIT" "$NETZ_IRK.neu" \
+           && mv "$NETZ_IRK.neu" "$NETZ_IRK" 2>/dev/null; then
+            echo "<OK> irk.json aus der Zweitschrift wiederhergestellt (0600)."
+        else
+            rm -f "$NETZ_IRK.neu" 2>/dev/null
+            echo "<WARNING> irk.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_IRK_ZWEIT."
+        fi
     fi
+    # Gruppe 33 (1.3.29): bindkey.json genauso (Bind-Keys der Xiaomi-Thermometer, 0600; eine vorhandene bleibt).
+    if [ ! -e "$NETZ_BK" ] && bl_json_objekt "$NETZ_BK_ZWEIT"; then
+        if cp "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" 2>/dev/null \
+           && chmod 0600 "$NETZ_BK.neu" 2>/dev/null \
+           && cmp -s "$NETZ_BK_ZWEIT" "$NETZ_BK.neu" \
+           && mv "$NETZ_BK.neu" "$NETZ_BK" 2>/dev/null; then
+            echo "<OK> bindkey.json aus der Zweitschrift wiederhergestellt (0600)."
+        else
+            rm -f "$NETZ_BK.neu" 2>/dev/null
+            echo "<WARNING> bindkey.json liess sich nicht zurueckspielen; die Zweitschrift liegt unter $NETZ_BK_ZWEIT."
+        fi
+    fi
+else
+    for bl_zweit in "$NETZ_BASE/config/plugins/$NETZ_PDIR.backup.ble_scanner_ng.cfg" "$NETZ_IRK_ZWEIT" "$NETZ_BK_ZWEIT"; do
+        if [ -e "$bl_zweit" ] || [ -L "$bl_zweit" ]; then
+            echo "<WARNING> Neuinstallation: die Zweitschrift $bl_zweit wird nicht eingespielt."
+        fi
+    done
 fi
+[ -f "$NETZ_IRK" ] && chmod 0600 "$NETZ_IRK" 2>/dev/null
 [ -f "$NETZ_BK" ] && chmod 0600 "$NETZ_BK" 2>/dev/null
 
 # --- Den Dienst starten, wenn dies eine NEUINSTALLATION ist -----------------
@@ -351,9 +367,8 @@ fi
 # Darin wurde er zwischen preupgrade.sh und diesem Skript vom Installer
 # mitabgeraeumt, und dieser Zweig hat deshalb NIE gegriffen - jedes Upgrade
 # lief hier als "Neuinstallation" durch. Begruendung und Messung stehen in
-# preupgrade.sh.
-MERK_UPGRADE="$PDATA.upgrade_laeuft"
-MERK_SOLL="$PDATA.soll_laufen"
+# preupgrade.sh. MERK_UPGRADE und MERK_SOLL stehen seit 1.3.38 weiter oben
+# (vor dem Zurueckspielen der Zweitschriften, K1).
 
 # BERICHTIGT IN 1.3.20 (Entscheidung 1 vom 29.09.2026; Pruefung B6): ob dies
 # ein Upgrade ist, entscheidet allein, ob die Marke DA ist - kein
