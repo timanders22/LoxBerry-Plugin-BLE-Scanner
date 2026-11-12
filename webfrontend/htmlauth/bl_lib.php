@@ -242,6 +242,10 @@ function bl_defaults()
         'themenpraefix'      => 'blescanner',
         'mqtt'               => '1',
         'http_push'          => '0',
+        // Verbindung zum Miniserver fuer den HTTP-Weg (1.3.41, Punkt G1, Entscheidung des Hausherrn 11.11.2026):
+        // 'auto' = wie LoxBerry, '0' unverschluesselt, '1' verschluesselt. Fehlt der Schluessel, gilt 'auto';
+        // ein stehendes '0' bleibt (G3) - gemeldet wird der Widerspruch, umgedeutet wird nichts.
+        'tls'                => 'auto',
         'loxberry_id'        => '',
         'intervall'          => '5',
         'abwesenheit_nach'   => '30',
@@ -304,7 +308,9 @@ function bl_schluessel_spaeter()
 {
     return array('wlan_kopplung', 'wlan_zuordnung', 'befehle_mqtt_ein', 'befehle_eingreifend_ein',
                  'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region',
-                 'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen', 'raum_anwesenheit');
+                 'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen', 'raum_anwesenheit',
+                 // 1.3.41: eine Sicherung bis 1.3.40 kennt tls nicht - beim Zurueckspielen gilt dann 'auto'.
+                 'tls');
 }
 
 /**
@@ -318,7 +324,9 @@ function bl_schluessel_spaeter()
  *
  * Art: 'zahl' (ganze Zahl, Muster statt (int), min/max), 'komma' (min/max),
  * 'schalter' ("0"/"1"), 'wahl' (Liste), 'muster' (regulaerer Ausdruck),
- * 'text' (ohne Steuerzeichen und Anfuehrungszeichen).
+ * 'text' (ohne Steuerzeichen und Anfuehrungszeichen), 'genau' (seit 1.3.41:
+ * nur eine Zeichenkette aus der Liste, ohne trim und ohne Umwandlung einer
+ * Zahl - fuer tls, bl_wert_tls()).
  */
 function bl_regeln()
 {
@@ -328,6 +336,7 @@ function bl_regeln()
         'themenpraefix'      => array('muster', '/^[A-Za-z0-9_-]+$/'),
         'mqtt'               => array('schalter'),
         'http_push'          => array('schalter'),
+        'tls'                => array('genau', array('auto', '0', '1')),    // 1.3.41, bl_wert_tls()
         'loxberry_id'        => array('text'),
         'intervall'          => array('zahl', 2, 600),
         'abwesenheit_nach'   => array('zahl', 5, 3600),
@@ -395,6 +404,13 @@ function bl_wert_pruefen($k, $roh)
     $regeln = bl_regeln();
     if (!isset($regeln[$k])) {
         return array(false, '', 'unbekannt');
+    }
+    if ($regeln[$k][0] === 'genau') {
+        // Seit 1.3.41: vor der Umwandlung einer Zahl und vor trim - 1, true und " 1" sind kein "1".
+        if (!is_string($roh)) {
+            return array(false, '', 'kein_text');
+        }
+        return in_array($roh, $regeln[$k][1], true) ? array(true, $roh, '') : array(false, '', 'muster');
     }
     if (is_int($roh)) {
         $roh = (string) $roh;
@@ -1625,12 +1641,99 @@ function bl_mqtt_autostart()
     return !empty($j['Mqtt']['Gatewayautostart']);
 }
 
-/** Miniserver aus general.json - fuer die Anzeige und den Probewert. */
-function bl_miniserver()
+/**
+ * Ist tls ein erlaubter Wert? Nur genau 'auto', '0' und '1' (seit 1.3.41, Punkt G1) - kein 1, kein true,
+ * kein " 1", kein ''. Dieselbe Regel wie verbindungsart() in bin/ble_scanner_ng.py und 'genau' in
+ * bl_wert_pruefen() (Formular, Zurueckspielen).
+ */
+function bl_wert_tls($w)
+{
+    return is_string($w) && in_array($w, array('auto', '0', '1'), true);
+}
+
+/** Ein Port aus general.json: 1 bis 65535 in Ziffern, sonst der Ersatz (wie _port_aus() im Dienst). */
+function bl_ms_port($roh, $ersatz)
+{
+    $t = is_scalar($roh) && !is_bool($roh) ? trim((string) $roh) : '';
+    if (preg_match('/^\d{1,5}$/', $t) && (int) $t >= 1 && (int) $t <= 65535) {
+        return (int) $t;
+    }
+    return $ersatz;
+}
+
+/**
+ * Die Verbindung zu einem Miniserver, wie der Dienst sie waehlt (seit 1.3.41, Punkt G; dieselbe Regel wie
+ * verbindungsart() in bin/ble_scanner_ng.py, Bauart db_ms_verbindung() im Dashboard 0.9.44).
+ * general.json Miniserver.<nr>: Preferhttps "1" oder Transport "https" heisst, der LoxBerry fuehrt den
+ * Miniserver verschluesselt (gemessen am Geraet 11.11.2026: Transport https, Preferhttps 1, Porthttps 443,
+ * Port 80). Port bei TLS Porthttps (fehlt oder ungueltig: 443), sonst Port (fehlt oder ungueltig: 80).
+ * Rueckgabe: wahl, lb_https, tls (null bei ungueltiger Wahl), port, widerspruch (tls '0', der LoxBerry
+ * sagt aber https).
+ */
+function bl_ms_verbindung(array $ms, $wahl)
+{
+    $pref = isset($ms['Preferhttps']) ? $ms['Preferhttps'] : null;
+    $lb_https = ($pref === true || (is_scalar($pref) && !is_bool($pref) && trim((string) $pref) === '1'))
+        || (isset($ms['Transport']) && is_string($ms['Transport']) && strtolower(trim($ms['Transport'])) === 'https');
+    $aus = array('wahl' => $wahl, 'lb_https' => $lb_https, 'tls' => null,
+                 'port' => bl_ms_port(isset($ms['Port']) ? $ms['Port'] : null, 80), 'widerspruch' => false);
+    if (!bl_wert_tls($wahl)) {
+        return $aus;
+    }
+    $aus['tls'] = $wahl === 'auto' ? $lb_https : ($wahl === '1');
+    if ($aus['tls']) {
+        $aus['port'] = bl_ms_port(isset($ms['Porthttps']) ? $ms['Porthttps'] : null, 443);
+    }
+    $aus['widerspruch'] = ($wahl === '0' && $lb_https);
+    return $aus;
+}
+
+/**
+ * Die Adresse eines Miniserver-Aufrufs - an EINER Stelle (seit 1.3.41). $m ist ein Eintrag von
+ * bl_miniserver(); das Schema kommt aus 'tls', der Port ist schon der passende. Bis 1.3.40 stand hier
+ * immer http:// und der gewoehnliche Port.
+ */
+function bl_ms_url(array $m, $pfad)
+{
+    return ($m['tls'] === true ? 'https' : 'http') . '://' . $m['adresse'] . ':' . (int) $m['port'] . '/'
+         . ltrim((string) $pfad, '/');
+}
+
+/**
+ * Die Optionen fuer stream_context_create() eines Miniserver-Aufrufs (seit 1.3.41). Keiner Umleitung wird
+ * gefolgt: PHP truege die Kopfzeilen samt Authorization an die Adresse aus der Location (Bauart Raumklima
+ * rk_holen()). Mit TLS wird das Zertifikat nicht beglaubigt - es lautet auf einen Namen unter
+ * dyndns.loxonecloud.com, angesprochen wird die IP (gemessen 10.11.2026, Raumklima 0.11.33); LoxBerry selbst
+ * schaltet die Pruefung fuer den Miniserver ab (loxberry_io.php). Dieselbe Abwaegung wie ms_ssl_kontext()
+ * im Dienst.
+ */
+function bl_ms_kontext(array $m, $kopf, $frist = 5)
+{
+    $o = array('http' => array('method' => 'GET', 'header' => $kopf, 'timeout' => $frist,
+                               'ignore_errors' => true, 'follow_location' => 0, 'max_redirects' => 1));
+    if ($m['tls'] === true) {
+        $o['ssl'] = array('verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true);
+    }
+    return $o;
+}
+
+/**
+ * Miniserver aus general.json - fuer die Anzeige, den Probewert und den Reiter Test.
+ *
+ * Seit 1.3.41 mit der Verbindungsart aus der Einstellung tls ($cfg, sonst die gespeicherte Konfiguration):
+ * 'tls' (true/false, null bei ungueltigem Wert), 'port' (der zur Verbindungsart passende), 'verbindung'
+ * (das Ergebnis von bl_ms_verbindung()).
+ */
+function bl_miniserver($cfg = null)
 {
     if (bl_paths()['home'] === '') {
         return array();
     }
+    if (!is_array($cfg)) {
+        list($cfg, , ) = bl_config_read();
+    }
+    // Roh aus der Konfiguration, nicht ueber bl_cfg(): das setzte einen leeren Wert still auf die Vorgabe.
+    $bl_wahl = array_key_exists('tls', $cfg) ? $cfg['tls'] : 'auto';
     $f = bl_paths()['home'] . '/config/system/general.json';
     if (!is_file($f)) {
         return array();
@@ -1651,11 +1754,14 @@ function bl_miniserver()
         if ($adresse === '') {
             continue;
         }
+        $bl_vb = bl_ms_verbindung($ms, $bl_wahl);
         $out[] = array(
             'nr' => (string) $nr,
             'name' => !empty($ms['Name']) ? $ms['Name'] : ('Miniserver ' . $nr),
             'adresse' => $adresse,
-            'port' => !empty($ms['Port']) ? (int) $ms['Port'] : 80,
+            'port' => $bl_vb['port'],
+            'tls' => $bl_vb['tls'],
+            'verbindung' => $bl_vb,
             'user' => bl_ms_zugang($ms, 'Admin_raw', 'Admin', 'Username'),
             'pass' => bl_ms_zugang($ms, 'Pass_raw', 'Pass', 'Password'),
         );
@@ -3656,7 +3762,9 @@ function bl_eingabe_felder($form)
                              'espresense_praefix', 'espresense_zuordnung',
                              // 1.3.36 (Fremdpruefung 09.11.2026): seit Gruppe 13/33 im Formular, hier vergessen -
                              // nach einer Beanstandung stand der gespeicherte Wert statt der Eingabe da.
-                             'messwert_frist', 'xiaomi_region'),
+                             'messwert_frist', 'xiaomi_region',
+                             // 1.3.41 (G2): die Auswahl Verbindung zum Miniserver
+                             'tls'),
             'haken' => array('http_push', 'wachhund', 'glaettung', 'beacon', 'entfernung',
                              'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung',
                              'espresense', 'bthome', 'irk_aufloesen', 'haus_anwesenheit', 'raum_personen',

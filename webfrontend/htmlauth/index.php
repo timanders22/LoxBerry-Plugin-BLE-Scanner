@@ -534,6 +534,16 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $bl_merk('betriebsart');
 
     $neu['http_push']   = isset($_POST['http_push']) ? '1' : '0';
+    // 1.3.41 (G1/G2): Verbindung zum Miniserver - genau 'auto', '0' oder '1', sonst abgewiesen und gemeldet
+    // (dieselbe Regel wie das Zurueckspielen, bl_wert_pruefen() Art 'genau').
+    $bl_tls_roh = isset($_POST['tls']) ? $_POST['tls'] : null;
+    list($ok, $w) = bl_wert_pruefen('tls', $bl_tls_roh);
+    if ($ok) {
+        $neu['tls'] = $w;
+    } else {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.TLS'), is_string($bl_tls_roh) ? bl_saubere_eingabe($bl_tls_roh) : '');
+    }
+    $bl_merk('tls');
     $neu['loxberry_id'] = bl_text_feld(isset($_POST['loxberry_id']) ? $_POST['loxberry_id'] : '',
                                        $bl_cfg['loxberry_id'], bl_t('FELD.LOXBERRY_ID'), $bl_fehler);
     $bl_merk('loxberry_id');
@@ -713,6 +723,12 @@ if ($bl_ist_post && isset($_POST['save'])) {
         }
         if (!empty($bl_es_ohne_raum)) {
             $bl_hinweis .= ' ' . bl_t('MANGEL.ES_OHNE_RAUM');
+        }
+        // 1.3.41 (G2): eine geaenderte Verbindungsart sagt es; das Protokoll des Dienstes nennt sie beim Neustart.
+        if ((string) (array_key_exists('tls', $bl_cfg) ? $bl_cfg['tls'] : 'auto') !== $neu['tls']) {
+            $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.TLS_GEAENDERT'),
+                                         bl_saubere_eingabe((string) (array_key_exists('tls', $bl_cfg) ? $bl_cfg['tls'] : 'auto')),
+                                         $neu['tls']);
         }
         list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
     } else {
@@ -1460,14 +1476,37 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 <label style="font-weight:400;"><input data-role="none" type="checkbox" name="http_push" value="1"<?= bl_eingabe_an('settings', 'http_push', bl_cfg($bl_cfg, 'http_push', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HTTP_PUSH')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HTTP_HILFE')) ?></p>
 </div>
+<?php /* 1.3.41 (G2): Verbindung zum Miniserver. Nach einer Beanstandung steht der eingetippte Wert da; ein
+       * ungueltiger Wert aus der Datei bleibt als eigene Auswahl sichtbar und wird beim Speichern abgewiesen. */
+$bl_tls_w = bl_eingabe('settings', 'tls', array_key_exists('tls', $bl_cfg) ? (string) $bl_cfg['tls'] : 'auto');
+$bl_ms = bl_miniserver($bl_cfg);
+$bl_tls_wider = false;
+foreach ($bl_ms as $m) { if (!empty($m['verbindung']['widerspruch'])) { $bl_tls_wider = true; } } ?>
+<div class="sm-feld">
+<label for="tls"><?= bl_e(bl_t('FELD.TLS')) ?></label>
+<select data-role="none" name="tls" id="tls"<?= bl_markierung('tls') ?>>
+<option value="auto"<?= $bl_tls_w === 'auto' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.TLS_AUTO')) ?></option>
+<option value="0"<?= $bl_tls_w === '0' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.TLS_AUS')) ?></option>
+<option value="1"<?= $bl_tls_w === '1' ? ' selected' : '' ?>><?= bl_e(bl_t('TEXT.TLS_EIN')) ?></option>
+<?php if (!bl_wert_tls($bl_tls_w)) { ?>
+<option value="<?= bl_e($bl_tls_w) ?>" selected><?= bl_e($bl_tls_w . ' ' . bl_t('TEXT.TLS_UNGUELTIG')) ?></option>
+<?php } ?>
+</select>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.TLS_HILFE')) ?></p>
+<?php if ($bl_tls_wider) { ?><div class="sm-warnung"><?= bl_e(bl_t('TEXT.TLS_WIDERSPRUCH')) ?></div><?php } ?>
+</div>
 <div class="sm-feld">
 <label><?= bl_e(bl_t('FELD.LOXBERRY_ID')) ?></label>
 <input data-role="none" type="text" name="loxberry_id" value="<?= bl_e(bl_eingabe('settings', 'loxberry_id', bl_cfg($bl_cfg, 'loxberry_id', ''))) ?>"<?= bl_markierung('loxberry_id') ?>>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.LOXBERRY_ID_HILFE')) ?></p>
 </div>
-<?php $bl_ms = bl_miniserver(); if ($bl_ms) { ?>
+<?php /* Seit 1.3.41 die Adresse, an die der HTTP-Weg wirklich sendet (bl_ms_url()), und was der LoxBerry sagt.
+       * Bis 1.3.40 lief hier ' &rarr; ' durch bl_e() und stand woertlich als &rarr; auf der Seite. */
+if ($bl_ms) { ?>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.MINISERVER_IST')) ?>
-<?php foreach ($bl_ms as $m) { ?><span class="sm-mono"><?= bl_e($m['name'] . ' &rarr; ' . $m['adresse'] . ':' . $m['port']) ?></span> <?php } ?></p>
+<?php foreach ($bl_ms as $m) { ?><span class="sm-mono"><?= bl_e($m['name'] . ' → ' . ($m['tls'] === null
+    ? $m['adresse'] . ' ' . bl_t('TEXT.TLS_UNGUELTIG') : bl_ms_url($m, ''))
+    . ' (' . sprintf(bl_t('TEXT.TLS_LB_SAGT'), $m['verbindung']['lb_https'] ? 'https' : 'http') . ')') ?></span> <?php } ?></p>
 <?php } ?>
 
 <h2><?= bl_e(bl_t('TEXT.ADAPTER_UND_BETRIEB')) ?></h2>

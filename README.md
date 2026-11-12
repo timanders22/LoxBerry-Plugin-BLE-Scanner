@@ -1,11 +1,20 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.40
+Version 1.3.41
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.41
+
+- **Verbindung zum Miniserver wie LoxBerry:** Im Reiter *Einstellungen* steht unter dem HTTP-Weg die neue Auswahl *Verbindung zum Miniserver* mit *wie LoxBerry*, *unverschlüsselt* und *verschlüsselt (TLS)* (Schlüssel `tls` in `ble_scanner_ng.cfg`: `auto`, `0`, `1`). Jeder andere Wert wird abgewiesen, im Formular wie beim Zurückspielen einer Sicherung; steht er von Hand in der Datei, sendet das Plugin nichts an den Miniserver und sagt es im Reiter *Test* und einmal je Lauf im Protokoll. *Wie LoxBerry* verbindet verschlüsselt, wenn `general.json` den Miniserver mit `Preferhttps` 1 oder `Transport` `https` führt, und nimmt dann `Porthttps` (fehlt er oder ist er ungültig: 443), sonst `Port` (fehlt er oder ist er ungültig: 80). Das gilt für den HTTP-Weg des Dienstes und für den Knopf *Probewert an Miniserver senden* im Reiter *Test*; beide bauen die Adresse an einer Stelle (`ms_url()` im Dienst, `bl_ms_url()` in der Oberfläche). Bisher sprach das Plugin den Miniserver immer mit `http://<Adresse>:<Port>` an und las `Porthttps` und `Preferhttps` nicht. Das Zertifikat des Miniservers wird nicht beglaubigt, wie beim LoxBerry selbst. Eine Änderung startet den laufenden Dienst neu; das Protokoll nennt beim Start, wohin der HTTP-Weg sendet, und eine Änderung gegenüber dem vorigen Lauf.
+- **Bestehende Anlagen:** Die Einstellung gab es bisher nicht. Nach dem Update gilt *wie LoxBerry*, und die Vervollständigung trägt `tls=auto` in die Konfigurationsdatei ein. Führt der LoxBerry den Miniserver mit https, sendet ein eingeschalteter HTTP-Weg ab dieser Fassung verschlüsselt an den https-Port. Wer *unverschlüsselt* ausdrücklich wählt, behält das; führt der LoxBerry den Miniserver aber mit https, zeigen das Formular und die Zeile *Passt die Verbindungsart zum LoxBerry?* im Reiter *Test* das rot mit dem Rat, auf *wie LoxBerry* zu stellen, und das Protokoll nennt den Widerspruch einmal je Lauf. Eine Sicherung aus einer früheren Fassung wird weiter zurückgespielt; dann gilt *wie LoxBerry*. Die Zeile im Reiter *Test* vergleicht außerdem die Einstellung mit dem, womit der laufende Dienst wirklich sendet.
+- **Umleitung auf https:** Einer Umleitung wird nicht mehr gefolgt. Bisher folgte der Dienst ihr und trug dabei Benutzer und Kennwort zur Adresse aus der Umleitung mit (auf dem Arbeitsrechner gegen einen eigenen Server gemessen); auch der Probewert folgte ihr. Leitet der Miniserver auf https um, schreibt der Dienst das einmal je Lauf als eigene Zeile ins Protokoll („Der Miniserver verlangt eine verschluesselte Verbindung (Umleitung auf https) …“), der Reiter *Test* zeigt die Zeile *Leitet der Miniserver auf https um?* rot, und der Probewert sagt es unter der Antwort. Anlass: nach dem Update der Miniserver-Firmware auf 17.3 am 11.11.2026 leitete der Miniserver `http://…:80` mit 308 auf eine https-Adresse unter `dyndns.loxonecloud.com` um.
+- **Reiter Einstellungen:** Die Zeile *Angesprochen wird:* zeigt jetzt die Adresse mit Schema und Port, an die gesendet wird, und was der LoxBerry sagt; bisher stand dort wörtlich `&rarr;` statt eines Pfeils.
+- Die Einstellung betrifft den MQTT-Weg nicht; er läuft über das MQTT-Gateway des LoxBerry.
+- Geprüft im Selbsttest des Dienstes (neue Gruppe *Verbindung zum Miniserver*) und in einem Prüfstand auf dem Arbeitsrechner mit einer `general.json` wie am Gerät gemessen, unter PHP 7.4, 8.4 und 8.5, dazu gegen eigene Server auf dem Arbeitsrechner (Umleitung, https mit selbstsigniertem Zertifikat); am Gerät ist die neue Fassung noch nicht gemessen.
 
 ## Neu in 1.3.40
 

@@ -1201,9 +1201,61 @@ function bl_pruefzeilen($cfg, $tags)
         $zeilen[] = bl_zeile(bl_t('PRUEF.ES'), $ok, $meldung);
     }
 
+    // --- Verbindungsart (seit 1.3.41, Punkt G2/G3): die Einstellung tls gegen den LoxBerry, und - laeuft der
+    // Dienst - gegen das, womit er wirklich sendet (ms_verbindung im Abbild). tls '0' gegen einen LoxBerry mit
+    // https ist rot mit Rat; umgedeutet wird nichts. Ein ungueltiger Wert ist rot. Ohne Miniserver ein Strich.
+    $bl_vms = bl_miniserver($cfg);
+    if (!$bl_vms) {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.VERBINDUNG'), null, bl_t('PRUEF.VB_KEIN_MS'));
+    } else {
+        $bl_vz = array();
+        $bl_vok = true;
+        $bl_dienst_vb = array();
+        if ($gilt && $status && isset($status['ms_verbindung']) && is_array($status['ms_verbindung'])) {
+            foreach ($status['ms_verbindung'] as $bl_d) {
+                if (is_array($bl_d) && isset($bl_d['nr'])) { $bl_dienst_vb[(string) $bl_d['nr']] = $bl_d; }
+            }
+        }
+        foreach ($bl_vms as $m) {
+            $vb = $m['verbindung'];
+            if ($vb['tls'] === null) {
+                $bl_vok = false;
+                $bl_vz[] = $m['name'] . ': ' . sprintf(bl_t('MANGEL.TLS'), bl_kuerzen((string) $vb['wahl'], 40));
+                continue;
+            }
+            if ($vb['widerspruch']) {
+                $bl_vok = false;
+                $bl_vz[] = $m['name'] . ': ' . bl_t('TEXT.TLS_WIDERSPRUCH');
+                continue;
+            }
+            $bl_soll = bl_ms_url($m, '');
+            $bl_satz = sprintf(bl_t('PRUEF.VB_OK'), (string) $vb['wahl'], $vb['lb_https'] ? 'https' : 'http', $bl_soll);
+            if (isset($bl_dienst_vb[$m['nr']])) {
+                $bl_d = $bl_dienst_vb[$m['nr']];
+                if (!array_key_exists('tls', $bl_d) || $bl_d['tls'] !== $vb['tls']
+                    || (int) (isset($bl_d['port']) ? $bl_d['port'] : 0) !== (int) $vb['port']) {
+                    $bl_vok = false;
+                    $bl_satz .= ' ' . sprintf(bl_t('PRUEF.VB_DIENST_ANDERS'),
+                        (isset($bl_d['tls']) && $bl_d['tls'] === true ? 'https' : 'http') . ':' . (int) (isset($bl_d['port']) ? $bl_d['port'] : 0));
+                } else {
+                    $bl_satz .= ' ' . bl_t('PRUEF.VB_DIENST_GLEICH');
+                }
+            } else {
+                $bl_satz .= ' ' . bl_t('PRUEF.VB_OHNE_DIENST');
+            }
+            $bl_vz[] = $m['name'] . ': ' . $bl_satz;
+        }
+        $zeilen[] = bl_zeile(bl_t('PRUEF.VERBINDUNG'), $bl_vok, implode("\n", $bl_vz));
+    }
+    // G4 (seit 1.3.41): hat der letzte Versuch des HTTP-Wegs eine Umleitung auf https getroffen? Die Zeile steht
+    // nur in diesem Fall; der Dienst schreibt dann umleitung=1 ins Abbild.
+    if ($gilt && $status && !empty($status['umleitung'])) {
+        $zeilen[] = bl_zeile(bl_t('PRUEF.UMLEITUNG'), false, bl_t('PRUEF.UMLEITUNG_JA'));
+    }
+
     // --- HTTP
     if (bl_cfg($cfg, 'http_push', '0') === '1') {
-        $ms = bl_miniserver();
+        $ms = $bl_vms;
         $zeilen[] = bl_zeile(bl_t('PRUEF.MINISERVER'), count($ms) > 0,
                              $ms ? $ms[0]['name'] . ' (' . $ms[0]['adresse'] . ')' : '');
         if ($status) {
@@ -1606,7 +1658,7 @@ function bl_test_ausfuehren($was, $zusatz = '')
             return array(bl_t('TEST.T_MQTT'), $t);
 
         case 'probewert':
-            $ms = bl_miniserver();
+            $ms = bl_miniserver($cfg);
             if (!$ms) {
                 return array(bl_t('TEST.T_PROBEWERT'), bl_t('TEST.KEIN_MINISERVER'));
             }
@@ -1614,8 +1666,14 @@ function bl_test_ausfuehren($was, $zusatz = '')
             $name = $kennung . 'BLE_SELBSTTEST';
             $t = '';
             foreach ($ms as $m) {
-                $url = 'http://' . $m['adresse'] . ':' . $m['port'] . '/dev/sps/io/'
-                     . rawurlencode($name) . '/1';
+                // Seit 1.3.41 (Punkt G): Schema und Port aus der Einstellung tls (bl_ms_url()), keiner Umleitung
+                // wird gefolgt (bl_ms_kontext()). Ein ungueltiger Wert sendet nichts.
+                if ($m['tls'] === null) {
+                    $t .= $m['name'] . ' (' . $m['adresse'] . ")\n  "
+                        . sprintf(bl_t('MANGEL.TLS'), bl_kuerzen((string) $m['verbindung']['wahl'], 40)) . "\n\n";
+                    continue;
+                }
+                $url = bl_ms_url($m, 'dev/sps/io/' . rawurlencode($name) . '/1');
                 $t .= $m['name'] . ' (' . $m['adresse'] . ':' . $m['port'] . ")\n";
                 $t .= '  ' . $url . "\n";
                 $kopf = "User-Agent: LoxBerry-BLE-Scanner-NG/" . bl_fassung() . "\r\nAccept: */*\r\n";
@@ -1623,9 +1681,7 @@ function bl_test_ausfuehren($was, $zusatz = '')
                     $kopf .= 'Authorization: Basic '
                            . base64_encode($m['user'] . ':' . $m['pass']) . "\r\n";
                 }
-                $ctx = stream_context_create(array('http' => array(
-                    'method' => 'GET', 'header' => $kopf, 'timeout' => 5,
-                    'ignore_errors' => true)));
+                $ctx = stream_context_create(bl_ms_kontext($m, $kopf, 5));
                 // Seit 1.3.19 ueber fopen und stream_get_meta_data (Muster 14 der
                 // Nachlese): die magische Kopfzeilenvariable, die file_get_contents
                 // hinterlaesst, meldet PHP 8.5 schon beim Uebersetzen als
@@ -1636,6 +1692,7 @@ function bl_test_ausfuehren($was, $zusatz = '')
                 // (Pruefung-BLE-Scanner-1.3.19, messe_http.sh).
                 $antwort = false;
                 $kopfzeile = '';
+                $bl_ort = '';
                 $fh = @fopen($url, 'rb', false, $ctx);
                 if ($fh !== false) {
                     $antwort = stream_get_contents($fh);
@@ -1644,11 +1701,20 @@ function bl_test_ausfuehren($was, $zusatz = '')
                     if (isset($meta['wrapper_data'][0]) && is_string($meta['wrapper_data'][0])) {
                         $kopfzeile = $meta['wrapper_data'][0];
                     }
+                    // 1.3.41 (G4): die Location einer Umleitung (follow_location 0 - es ist die erste Antwort).
+                    foreach ((isset($meta['wrapper_data']) && is_array($meta['wrapper_data'])) ? $meta['wrapper_data'] : array() as $bl_z) {
+                        if (is_string($bl_z) && stripos($bl_z, 'Location:') === 0) {
+                            $bl_ort = trim(substr($bl_z, 9));
+                        }
+                    }
                 }
                 if ($antwort === false && $kopfzeile === '') {
                     $t .= '  ' . bl_t('TEST.PROBE_KEINE_ANTWORT') . "\n\n";
                 } else {
                     $t .= '  ' . $kopfzeile . "\n";
+                    if (preg_match('#^HTTP/\S+\s+(301|302|307|308)\b#', $kopfzeile) && stripos($bl_ort, 'https://') === 0) {
+                        $t .= '  ' . bl_t('TEST.PROBE_UMLEITUNG') . "\n";
+                    }
                     $t .= '  ' . bl_kuerzen(trim((string) $antwort), 200) . "\n\n";
                 }
             }

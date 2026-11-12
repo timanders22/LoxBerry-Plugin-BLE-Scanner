@@ -28,6 +28,7 @@ import json
 import os
 import re
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -769,9 +770,74 @@ class Mqtt:
 # ---------------------------------------------------------------------------
 # HTTP-Weg an den Miniserver
 # ---------------------------------------------------------------------------
+#
+# Seit 1.3.41 (Punkt G, Entscheidung des Hausherrn 11.11.2026, Bauart Dashboard
+# 0.9.44): die Verbindungsart kommt aus der Einstellung tls ("auto" = wie
+# LoxBerry, "0" = unverschluesselt, "1" = verschluesselt) und dem Eintrag des
+# Miniservers in general.json. Anlass, gemessen am 11.11.2026: die
+# Miniserver-Firmware 17.3 leitet http://<IP>:80 mit 308 auf eine https-Adresse
+# unter dyndns.loxonecloud.com um; der LoxBerry fuehrt den Miniserver dort mit
+# Transport "https", Preferhttps "1", Porthttps "443", Port "80". Bis 1.3.40
+# baute der Dienst immer http://<Ipaddress>:<Port> und las Porthttps und
+# Preferhttps nirgends. Dieselbe Regel steht in bl_ms_verbindung()
+# (webfrontend/htmlauth/bl_lib.php). Jeder Miniserver-Zugriff des Dienstes geht
+# ueber miniserver_liste() und ms_url(), der Oberflaeche ueber bl_miniserver()
+# und bl_ms_url().
 
-def miniserver_liste():
-    """Miniserver aus general.json."""
+TLS_ERLAUBT = ("auto", "0", "1")
+
+TLS_UNGUELTIG = ("Die Einstellung 'Verbindung zum Miniserver' (tls) hat den ungueltigen Wert %r; erlaubt sind "
+                 "auto, 0 und 1. An den Miniserver wird nichts gesendet.")
+
+UMLEITUNG_TEXT = ("Der Miniserver verlangt eine verschluesselte Verbindung (Umleitung auf https). Im Reiter "
+                  "Einstellungen 'Verbindung zum Miniserver' auf 'wie LoxBerry' oder 'verschluesselt (TLS)' "
+                  "stellen.")
+
+
+def lb_sagt_https(ms):
+    """Fuehrt der LoxBerry diesen Miniserver verschluesselt? Wahr bei Preferhttps 1
+    oder Transport https (gemessen am Geraet 11.11.2026: Transport "https",
+    Preferhttps "1"). Der Rumpf ist wortgleich mit lb_sagt_https() im Dashboard 0.9.44."""
+    pref = ms.get("Preferhttps")
+    if pref is True or (not isinstance(pref, bool) and str(pref).strip() == "1"):
+        return True
+    return str(ms.get("Transport") or "").strip().lower() == "https"
+
+
+def _port_aus(roh, ersatz):
+    """Ein Port aus general.json: 1 bis 65535 in Ziffern, sonst der Ersatz."""
+    t = str(roh if roh is not None else "").strip()
+    if re.match(r"^\d{1,5}$", t) and 1 <= int(t) <= 65535:
+        return int(t)
+    return ersatz
+
+
+def verbindungsart(wahl, ms):
+    """(TLS ja/nein, Port) aus der Einstellung tls und dem Miniserver-Eintrag.
+
+    "auto": TLS genau dann, wenn der LoxBerry https sagt (lb_sagt_https);
+    "1" immer, "0" nie. Jeder andere Wert wird nicht gedeutet: ValueError.
+    Port bei TLS Porthttps (fehlt oder ungueltig: 443), sonst Port (fehlt oder
+    ungueltig: 80). Ein bestehendes "0" bleibt unverschluesselt - den
+    Widerspruch melden widerspruch_tls(), der Reiter Test und das Protokoll.
+    """
+    # Nur genau "auto", "0" und "1" - die Konfiguration ist eine INI-Datei, ihre
+    # Werte sind Zeichenketten (dieselbe Regel wie bl_wert_tls() in bl_lib.php).
+    if not isinstance(wahl, str) or wahl not in TLS_ERLAUBT:
+        raise ValueError(TLS_UNGUELTIG % (wahl,))
+    tls = lb_sagt_https(ms) if wahl == "auto" else wahl == "1"
+    if tls:
+        return True, _port_aus(ms.get("Porthttps"), 443)
+    return False, _port_aus(ms.get("Port"), 80)
+
+
+def miniserver_liste(wahl):
+    """Miniserver aus general.json, je Eintrag mit der Verbindungsart.
+
+    wahl ist der Wert der Einstellung tls, wie er in der Konfiguration steht
+    (seit 1.3.41). Ist er ungueltig, steht "tls" auf None und "grund" traegt
+    den Satz; http_push() sendet dann nichts.
+    """
     # Ohne Wurzel keine general.json - bis 1.3.18 wurde der Pfad dann
     # relativ zum Arbeitsverzeichnis gebildet (Fall W7).
     if not gem.HOME_DIR:
@@ -790,14 +856,19 @@ def miniserver_liste():
         if not adresse:
             continue
         try:
-            port = int(ms.get("Port") or 80)
-        except (TypeError, ValueError):
-            port = 80
+            tls, port = verbindungsart(wahl, ms)
+            grund = ""
+        except ValueError as fehler:
+            tls, port, grund = None, _port_aus(ms.get("Port"), 80), str(fehler)
         out.append({
             "nr": str(nr),
             "name": ms.get("Name") or ("Miniserver " + str(nr)),
             "adresse": adresse,
             "port": port,
+            "tls": tls,
+            "lb_https": lb_sagt_https(ms),
+            "wahl": wahl,
+            "grund": grund,
             "user": ms_zugang(ms, "Admin_raw", "Admin", "Username"),
             "pass": ms_zugang(ms, "Pass_raw", "Pass", "Password"),
         })
@@ -823,6 +894,87 @@ def ms_zugang(ms, roh, kodiert, alt):
     return ""
 
 
+def ms_url(ms, pfad):
+    """Die Adresse eines Miniserver-Aufrufs - an EINER Stelle (seit 1.3.41).
+
+    Das Schema kommt aus "tls" des Eintrags von miniserver_liste(), nie aus
+    einer Annahme; der Port ist schon der zur Verbindungsart passende.
+    """
+    return "{0}://{1}:{2}/{3}".format("https" if ms.get("tls") is True else "http",
+                                      ms["adresse"], int(ms["port"]), str(pfad).lstrip("/"))
+
+
+def widerspruch_tls(wahl, liste):
+    """'' oder ein Satz, wenn tls "0" steht, der LoxBerry einen Miniserver aber
+    mit https fuehrt (seit 1.3.41, Punkt G3: nicht umgedeutet, nur gemeldet)."""
+    if wahl != "0":
+        return ""
+    namen = [str(m.get("name")) for m in liste if m.get("lb_https")]
+    if not namen:
+        return ""
+    return ("Verbindungsart: eingestellt ist 'unverschluesselt' (tls=0), der LoxBerry fuehrt den Miniserver "
+            "(%s) aber mit https. Ein Miniserver, der https verlangt, leitet http um, und dort kommt nichts an. "
+            "Rat: im Reiter Einstellungen 'Verbindung zum Miniserver' auf 'wie LoxBerry' stellen."
+            % ", ".join(namen))
+
+
+def umleitung_erkannt(f):
+    """Ist das die Umleitung von http:// auf https (seit 1.3.41, Punkt G4)?
+
+    Der Rumpf ist wortgleich mit umleitung_erkannt() im Dashboard 0.9.44. Gemessen am Geraet
+    11.11.2026: der Miniserver antwortet auf http://<IP>/... mit 308 und einer
+    Location auf https://... (vom PC wie vom LoxBerry); websockets wirft
+    danach "isn't a valid URI: scheme isn't ws or wss" (InvalidURI). Dieser
+    Dienst spricht nur HTTP: urllib.error.HTTPError mit 301/302/307/308 und
+    einer Location auf https.
+    """
+    text = str(f)
+    if type(f).__name__ == "InvalidURI" or ("isn't a valid URI" in text and "https://" in text):
+        return True
+    antwort = getattr(f, "response", None)
+    code = getattr(antwort, "status_code", None) or getattr(f, "status_code", None) or getattr(f, "code", None)
+    if code in (301, 302, 307, 308):
+        kopf = getattr(antwort, "headers", None) or getattr(f, "headers", None) or {}
+        try:
+            ort = str(kopf.get("Location") or kopf.get("location") or "")
+        except AttributeError:
+            ort = ""
+        return ort.lower().startswith("https://")
+    return False
+
+
+class KeineUmleitung(urllib.request.HTTPRedirectHandler):
+    """Einer Umleitung wird nicht gefolgt (seit 1.3.41).
+
+    Bis 1.3.40 folgte urlopen() jeder Umleitung - und trug dabei den
+    Authorization-Kopf mit Benutzer und Kennwort an die Adresse aus der
+    Location mit. Jetzt endet die Anfrage mit HTTPError (Code und Location
+    bleiben lesbar), umleitung_erkannt() sagt, was es war. Dieselbe Regel wie
+    follow_location 0 in bl_ms_kontext() (bl_lib.php) und in Raumklima.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ARG002
+        return None
+
+
+def ms_ssl_kontext():
+    """SSL-Kontext fuer https zum Miniserver: verschluesselt, nicht beglaubigt.
+
+    Das Zertifikat des Miniservers lautet auf einen Namen unter
+    dyndns.loxonecloud.com, angesprochen wird er ueber die IP aus general.json
+    - die Namenspruefung muss daran scheitern (gemessen am 10.11.2026,
+    Raumklima 0.11.33). LoxBerry selbst schaltet die Pruefung fuer den
+    Miniserver ab (loxberry_io.php); Bauart Dashboard 0.9.44 (_ssl_kontext in
+    lox_client.py). Wer sich zwischen LoxBerry und Miniserver haengen kann,
+    koennte sich als Miniserver ausgeben - im eigenen Netz die uebliche
+    Abwaegung, die Hilfe sagt es.
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def http_push(ms, name, wert, zeitgrenze=4):
     """Virtuellen Eingang am Miniserver setzen.
 
@@ -833,10 +985,16 @@ def http_push(ms, name, wert, zeitgrenze=4):
     Die Meldung sagt, WER geantwortet hat: eine abgewiesene Verbindung
     (Dienst laeuft nicht) bedeutet etwas anderes als eine Zeitgrenze
     (nichts antwortet) oder "kein Weg dorthin".
+
+    Seit 1.3.41: Schema und Port aus ms_url() (Einstellung tls), keiner
+    Umleitung wird gefolgt. Rueckgabe (ok, fehler, umleitung) - umleitung ist
+    wahr, wenn der Miniserver auf https umgeleitet hat (G4). Ein Eintrag ohne
+    gueltige Verbindungsart sendet nichts (G1: abgewiesen, nicht gedeutet).
     """
-    url = "http://{0}:{1}/dev/sps/io/{2}/{3}".format(
-        ms["adresse"], ms["port"], urllib.parse.quote(str(name)),
-        urllib.parse.quote(str(wert)))
+    if not isinstance(ms.get("tls"), bool):
+        return False, (ms.get("grund") or TLS_UNGUELTIG % (ms.get("wahl"),)), False
+    url = ms_url(ms, "dev/sps/io/{0}/{1}".format(urllib.parse.quote(str(name)),
+                                                 urllib.parse.quote(str(wert))))
     anfrage = urllib.request.Request(url)
     anfrage.add_header("User-Agent", "LoxBerry-BLE-Scanner-NG/" + gem.VERSION)
     anfrage.add_header("Accept", "*/*")
@@ -845,31 +1003,40 @@ def http_push(ms, name, wert, zeitgrenze=4):
         roh = "{0}:{1}".format(ms["user"], ms["pass"]).encode("utf-8")
         anfrage.add_header("Authorization",
                            "Basic " + base64.b64encode(roh).decode("ascii"))
+    # build_opener ersetzt nur die beiden genannten Handler; die Proxy-Regel aus
+    # der Umgebung bleibt wie bei urlopen() bis 1.3.40.
+    handler = [KeineUmleitung()]
+    if ms["tls"]:
+        handler.append(urllib.request.HTTPSHandler(context=ms_ssl_kontext()))
+    oeffner = urllib.request.build_opener(*handler)
     try:
-        with urllib.request.urlopen(anfrage, timeout=zeitgrenze):
-            return True, ""
+        with oeffner.open(anfrage, timeout=zeitgrenze):
+            return True, "", False
     except urllib.error.HTTPError as fehler:
+        if umleitung_erkannt(fehler):
+            return False, ("HTTP {0} - Weiterleitung auf eine https-Adresse; ihr wird nicht "
+                           "gefolgt.".format(fehler.code)), True
         if fehler.code in (401, 403):
             return False, ("HTTP {0} - der Miniserver hat geantwortet und die "
                            "Anmeldung abgelehnt. Benutzer und Kennwort stehen in "
-                           "den LoxBerry-Systemeinstellungen.".format(fehler.code))
+                           "den LoxBerry-Systemeinstellungen.".format(fehler.code)), False
         if fehler.code == 404:
             return False, ("HTTP 404 - der Miniserver kennt den virtuellen Eingang "
-                           "nicht. Ist die Vorlage eingelesen?")
-        return False, "HTTP {0}".format(fehler.code)
+                           "nicht. Ist die Vorlage eingelesen?"), False
+        return False, "HTTP {0}".format(fehler.code), False
     except urllib.error.URLError as fehler:
         grund = getattr(fehler, "reason", fehler)
         nr = getattr(grund, "errno", None)
         if nr == errno.ECONNREFUSED:
             return False, ("Verbindung abgewiesen - der Miniserver ist erreichbar, "
-                           "nimmt auf diesem Port aber nichts an.")
+                           "nimmt auf diesem Port aber nichts an."), False
         if nr == errno.EHOSTUNREACH or nr == errno.ENETUNREACH:
-            return False, "Kein Weg zum Miniserver (Netz oder Route fehlt)."
+            return False, "Kein Weg zum Miniserver (Netz oder Route fehlt).", False
         if isinstance(grund, OSError) and "timed out" in str(grund).lower():
-            return False, "Zeitgrenze - es hat niemand geantwortet."
-        return False, str(grund)
+            return False, "Zeitgrenze - es hat niemand geantwortet.", False
+        return False, str(grund), False
     except Exception as fehler:  # noqa: BLE001
-        return False, str(fehler)
+        return False, str(fehler), False
 
 
 # ---------------------------------------------------------------------------
@@ -919,7 +1086,7 @@ class Dienst:
         self.letzter_stand = {}           # Thema -> Wert
         self.veroeffentlicht = set()      # alle je gesendeten Themen (zum Loeschen)
         self.config_mtime = self._mtime()
-        self.ms = miniserver_liste()
+        self.ms = miniserver_liste(self.cfg.get("tls", "auto"))
 
         # HTTP: Sollwert je (Miniserver, Eingangsname). Es gibt keine
         # Warteschlange mehr - ein Auftrag kann deshalb nicht mehr verloren
@@ -930,6 +1097,13 @@ class Dienst:
         self.push_sperre = {}
         self.push_fehler = 0
         self.push_faden = None
+        # Seit 1.3.41 (Punkt G): je einmal je Lauf ins Protokoll - die Umleitung auf https (G4), der
+        # Widerspruch tls=0 gegen einen LoxBerry mit https (G3) und ein ungueltiger Wert von tls (G1).
+        # umleitung_zuletzt sagt dem Reiter Test, ob der letzte Versuch umgeleitet wurde.
+        self.umleitung_gemeldet = False
+        self.umleitung_zuletzt = False
+        self.widerspruch_gemeldet = False
+        self.tls_ungueltig_gemeldet = False
 
         self.letzte_sichtung_mono = None
         self.letzte_sichtung_zeit = 0
@@ -2424,6 +2598,11 @@ class Dienst:
             if self.cfg.get("http_push", "0") != "1" or not self.ms:
                 continue
             for ms in list(self.ms):
+                # Seit 1.3.41 (G1): ohne gueltige Verbindungsart wird nichts gesendet; die Werte bleiben
+                # im Soll (push_offen im Reiter Test), der Grund steht einmal je Lauf im Protokoll
+                # (verbindung_melden()).
+                if not isinstance(ms.get("tls"), bool):
+                    continue
                 if time.time() < self.push_sperre.get(ms["nr"], 0):
                     continue
                 offen = [(k, v) for k, v in list(self.push_soll.items())
@@ -2431,13 +2610,21 @@ class Dienst:
                 for schluessel, wert in offen[:20]:
                     if not self.laeuft:
                         return
-                    ok, fehler = http_push(ms, schluessel[1], wert)
+                    ok, fehler, umgeleitet = http_push(ms, schluessel[1], wert)
                     if ok:
                         self.push_ist[schluessel] = wert
                         self.push_sperre.pop(ms["nr"], None)
+                        self.umleitung_zuletzt = False
                         log.info("An %s gesendet: %s = %s",
                                  ms["name"], schluessel[1], wert)
                     else:
+                        if umgeleitet:
+                            # G4 (seit 1.3.41): die Umleitung auf https sagt, was zu tun ist - einmal je
+                            # Lauf als eigene Zeile; die Zeile je Versuch darunter nennt nur den Code.
+                            self.umleitung_zuletzt = True
+                            if not self.umleitung_gemeldet:
+                                log.error("%s", UMLEITUNG_TEXT)
+                                self.umleitung_gemeldet = True
                         self.push_fehler += 1
                         self.push_sperre[ms["nr"]] = time.time() + 60
                         log.warning("An %s fehlgeschlagen: %s = %s (%s). Der Wert "
@@ -2582,6 +2769,12 @@ class Dienst:
             "push_offen": sum(1 for k, v in self.push_soll.items()
                               if self.push_ist.get(k) != v),
             "push_fehler": self.push_fehler,
+            # Seit 1.3.41 (Punkt G): womit der HTTP-Weg wirklich sendet - der Reiter Test haelt das gegen die
+            # Einstellung (Wirkung, nicht Rueckgabewert); umleitung: der letzte Versuch wurde auf https
+            # umgeleitet. Keine Zugangsdaten.
+            "tls_wahl": self.cfg.get("tls", "auto"),
+            "ms_verbindung": [{"nr": m["nr"], "tls": m.get("tls"), "port": m["port"]} for m in self.ms],
+            "umleitung": 1 if self.umleitung_zuletzt else 0,
             "ereignisse": self.ereignisse_gesamt,
             "themen": sorted(self.veroeffentlicht),
             "tags": uebersicht,
@@ -3145,9 +3338,14 @@ class Dienst:
         alte_wlan = (self.cfg.get("wlan_kopplung", "0"), self.cfg.get("wlan_zuordnung", ""))
         alte_es = (self._zahl("raum", 0) == 1 and self.cfg.get("espresense", "0") == "1", self._es_praefix())
         alte_rp = self._zahl("raum", 0) == 1 and self.cfg.get("raum_personen", "0") == "1"
+        alte_tls = self.cfg.get("tls", "auto")
 
         self.cfg, self.tags, _ = gem.konfiguration_lesen()
-        self.ms = miniserver_liste()
+        self.ms = miniserver_liste(self.cfg.get("tls", "auto"))
+        # Seit 1.3.41 (G2): eine geaenderte Verbindungsart wirkt sofort und steht im Protokoll.
+        if self.cfg.get("tls", "auto") != alte_tls:
+            log.info("Verbindung zum Miniserver geaendert: tls %s -> %s", alte_tls, self.cfg.get("tls", "auto"))
+            self.verbindung_melden()
         self.letzter_stand.clear()
         self.push_ist.clear()
         self.intervall = max(2, self._zahl("intervall", 5))
@@ -3621,6 +3819,34 @@ class Dienst:
                     return
                 time.sleep(1)
 
+    def verbindung_melden(self):
+        """Seit 1.3.41 (Punkt G): wohin der HTTP-Weg sendet - beim Start und nach einer Aenderung der
+        Einstellung. Ein ungueltiger Wert von tls (G1) und der Widerspruch tls=0 gegen einen LoxBerry mit
+        https (G3) stehen je einmal je Lauf im Protokoll; umgedeutet wird nichts."""
+        wahl = self.cfg.get("tls", "auto")
+        for ms in self.ms:
+            if not isinstance(ms.get("tls"), bool):
+                if not self.tls_ungueltig_gemeldet:
+                    log.error("%s", ms.get("grund") or TLS_UNGUELTIG % (wahl,))
+                    self.tls_ungueltig_gemeldet = True
+                continue
+            log.info("Verbindung zum Miniserver %s: Einstellung tls=%s, der LoxBerry sagt %s; der HTTP-Weg "
+                     "(http_push=%s) sendet an %s", ms["name"], wahl, "https" if ms.get("lb_https") else "http",
+                     self.cfg.get("http_push", "0"), ms_url(ms, "dev/sps/io/"))
+        widerspruch = widerspruch_tls(wahl, self.ms)
+        if widerspruch and not self.widerspruch_gemeldet:
+            log.warning("%s", widerspruch)
+            self.widerspruch_gemeldet = True
+
+    def _tls_des_vorigen_laufs(self):
+        """Die Einstellung tls, mit der der vorige Lauf gesendet hat (Zustandsdatei), sonst None."""
+        try:
+            with open(gem.STATUS_FILE, "r", encoding="utf-8") as fh:
+                wert = json.load(fh).get("tls_wahl")
+        except (OSError, ValueError, AttributeError):
+            return None
+        return wert if isinstance(wert, str) else None
+
     def start(self):
         self.startzeit_mono = time.monotonic()
         self.hoeren_seit_mono = self.startzeit_mono
@@ -3628,6 +3854,12 @@ class Dienst:
         log.info("Konfiguration: %s", gem.CONFIG_FILE)
         log.info("%d Tag(s) konfiguriert, davon %d aktiv",
                  len(self.tags), sum(1 for t in self.tags if t.get("aktiv") == "1"))
+        # Seit 1.3.41 (G2): das Formular startet den Dienst nach dem Speichern neu - die Aenderung der
+        # Verbindungsart steht deshalb hier, gemessen am Stand des vorigen Laufs.
+        vorher = self._tls_des_vorigen_laufs()
+        if vorher is not None and vorher != self.cfg.get("tls", "auto"):
+            log.info("Verbindung zum Miniserver geaendert: tls %s -> %s", vorher, self.cfg.get("tls", "auto"))
+        self.verbindung_melden()
         gem.log_kappen(LOG_DATEI, self._zahl("log_kappung_kb", 500))
 
         self.intervall = max(2, self._zahl("intervall", 5))

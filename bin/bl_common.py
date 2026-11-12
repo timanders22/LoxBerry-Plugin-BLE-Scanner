@@ -319,6 +319,10 @@ VORGABEN = {
     "themenpraefix": "blescanner",
     "mqtt": "1",
     "http_push": "0",
+    # -- 1.3.41 (Punkt G1, Entscheidung des Hausherrn 11.11.2026): Verbindung zum Miniserver fuer den HTTP-Weg,
+    #    "auto" = wie LoxBerry (Preferhttps/Transport in general.json), "0" unverschluesselt, "1" verschluesselt.
+    #    Fehlt der Schluessel (Aktualisierungsfall), gilt "auto"; ein stehendes "0" bleibt (G3).
+    "tls": "auto",
     "loxberry_id": "",
     "intervall": "5",
     "abwesenheit_nach": "30",

@@ -871,6 +871,57 @@ def alles_pruefen():
             offen > 0, "%d offene Werte" % offen)
 
     # =====================================================================
+    # Seit 1.3.41 (Punkt G): Verbindungsart und Umleitung, ohne Miniserver und ohne Netz. Die Angaben des
+    # LoxBerry wie am Geraet gemessen (11.11.2026): Transport https, Preferhttps "1", Porthttps "443", Port "80".
+    G = "Verbindung zum Miniserver"
+    import urllib.error as _ue
+    import ble_scanner_ng as _bv
+    p.gleich(G, "Vorgabe tls für neue Installationen und den Aktualisierungsfall", gem.VORGABEN.get("tls"), "auto")
+    gemessen = {"Transport": "https", "Preferhttps": "1", "Porthttps": "443", "Port": "80"}
+    ohne_https = {"Transport": "http", "Preferhttps": "0", "Port": "80"}
+    for wahl, ms_v, soll, was in (
+            ("auto", gemessen, (True, 443), "LoxBerry https"),
+            ("auto", ohne_https, (False, 80), "LoxBerry http"),
+            ("auto", {"Port": "80"}, (False, 80), "LoxBerry ohne Angabe"),
+            ("0", gemessen, (False, 80), "LoxBerry https"),
+            ("1", ohne_https, (True, 443), "LoxBerry http, ohne Porthttps"),
+            ("1", dict(gemessen, Porthttps="8443"), (True, 8443), "Porthttps 8443"),
+            ("1", dict(gemessen, Porthttps="x"), (True, 443), "Porthttps ungültig"),
+            ("1", dict(gemessen, Porthttps="70000"), (True, 443), "Porthttps zu groß"),
+            ("0", dict(gemessen, Port=""), (False, 80), "Port leer")):
+        p.gleich(G, "verbindungsart(tls=%s, %s)" % (wahl, was), _bv.verbindungsart(wahl, ms_v), soll)
+    for falsch in ("ja", "", " 1", "AUTO", "true", 1, None):
+        try:
+            _bv.verbindungsart(falsch, gemessen)
+            abgewiesen = False
+        except ValueError:
+            abgewiesen = True
+        p.merke(G, "tls=%r wird abgewiesen, nicht gedeutet" % (falsch,), abgewiesen)
+    p.gleich(G, "Adresse mit TLS", _bv.ms_url({"tls": True, "adresse": "192.0.2.10", "port": 443}, "/dev/sps/io/a/1"),
+             "https://192.0.2.10:443/dev/sps/io/a/1")
+    p.gleich(G, "Adresse ohne TLS", _bv.ms_url({"tls": False, "adresse": "192.0.2.10", "port": 80}, "dev/sps/io/a/1"),
+             "http://192.0.2.10:80/dev/sps/io/a/1")
+    p.gleich(G, "ungültige Wahl: http_push sendet nichts",
+             _bv.http_push({"tls": None, "grund": "ungueltig", "adresse": "192.0.2.10", "port": 80,
+                            "user": "", "pass": ""}, "x", 1), (False, "ungueltig", False))
+    mit = [{"name": "MS", "lb_https": True}]
+    p.gleich(G, "Widerspruch nur bei tls=0 und LoxBerry https",
+             (bool(_bv.widerspruch_tls("0", mit)), bool(_bv.widerspruch_tls("auto", mit)),
+              bool(_bv.widerspruch_tls("1", mit)), bool(_bv.widerspruch_tls("0", [{"name": "MS", "lb_https": False}]))),
+             (True, False, False, False))
+    ziel = "https://192-0-2-10.0000000000AA.dyndns.loxonecloud.com/dev/sps/io/a/1"
+    p.gleich(G, "Umleitung erkannt: 308 und 302 auf https; 301 auf http, 404, abgewiesene Verbindung nicht",
+             (_bv.umleitung_erkannt(_ue.HTTPError("http://192.0.2.10/", 308, "Permanent Redirect", {"Location": ziel}, None)),
+              _bv.umleitung_erkannt(_ue.HTTPError("http://192.0.2.10/", 302, "Found", {"location": ziel}, None)),
+              _bv.umleitung_erkannt(_ue.HTTPError("http://192.0.2.10/", 301, "Moved",
+                                                  {"Location": "http://192.0.2.11/"}, None)),
+              _bv.umleitung_erkannt(_ue.HTTPError("http://192.0.2.10/", 404, "Not Found", {}, None)),
+              _bv.umleitung_erkannt(OSError("Connection refused"))),
+             (True, True, False, False, False))
+    p.merke(G, "Einer Umleitung wird nicht gefolgt (eigener Handler, redirect_request liefert nichts)",
+            _bv.KeineUmleitung().redirect_request(None, None, 308, "", {}, ziel) is None)
+
+    # =====================================================================
     G = "Protokoll"
     ordner8 = _arbeitsordner("ble_log_")
     logdatei = os.path.join(ordner8, "gross.log")
