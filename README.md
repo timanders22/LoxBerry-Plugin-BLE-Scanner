@@ -1,11 +1,17 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.42
+Version 1.3.43
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.43
+
+- **Geändert – gemeinsame Abfrage der Upgrade-Marke:** Beide Takte (Minutentakt, Takt alle fünf Minuten) ruhen während einer Aktualisierung jetzt mit dem gemeinsamen Block statt mit der eigenen Abfrage. Für den Wächter (Takt alle fünf Minuten): eine Marke bis 300 s in der Zukunft galt bisher; jetzt gilt sie nicht. Ist die Marke eine Stunde oder älter, liegt sie in der Zukunft oder enthält sie keine Unixzeit, gilt sie nicht, damit eine abgebrochene Aktualisierung den Takt nicht dauerhaft stilllegt. Alle Plugins dieser Reihe fragen die Marke mit demselben Block ab. Es wirkt schon beim Update auf diese Fassung, denn der Installer legt die Takte der neuen Fassung vor der Lücke an, und das `preupgrade.sh` der neuen Fassung legt die Marke an. Gemessen in einer Nachstellung des Update-Ablaufs auf dem Arbeitsrechner (WSL); am Gerät nicht gemessen.
+- **Geändert – Befehlsbrücke 1.0.3:** Während einer Aktualisierung legen Wächter und Start der Befehlsbrücke nichts mehr an. Bis 1.0.2 entstanden in der Lücke `befehle/`, die Optionsdateien und die Sperrdatei, bevor die Marke den Start abwies. Gemessen in einer Nachstellung auf dem Arbeitsrechner (WSL); am Gerät nicht gemessen.
+- **Gemeinsames Sprachmodul 1.4.4:** Das Modul bringt einen gemeinsamen Weg mit, die Einstellungen der Sprachausgabe in der Konfiguration zu prüfen: unbekannte Einträge verwerfen, jeden ungültigen Eintrag einzeln nennen und alles mit denselben Sätzen melden. Dieses Plugin ruft diesen Weg nicht auf; an seinem Verhalten ändert sich dadurch nichts. Gemessen auf dem Arbeitsrechner: Abschrift byte-gleich mit der Stammfassung 1.4.4, Abschnitt [ANSAGE] der Sprachdateien um die drei Sätze dieses Wegs ergänzt und gleich der Textdatei 1.4.4 (317 Schlüssel), Syntax unter PHP 7.4 und 8.4; am Gerät nicht gemessen.
 
 ## Neu in 1.3.42
 

@@ -28,6 +28,20 @@
 # in den Zuweisungen und nicht im Kommentar. NICHT vom eigenen Ablageort eine
 # feste Zahl Ebenen aufwaerts rechnen: LoxBerry legt diese Datei unter
 # <Wurzel>/system/cron/cron.05min/<plugin> ab.
+# Upgrade-Marke (Regeln/06, Entscheidung des Hausherrn 18.11.2026, Frage 60; Bauart Renault-NG 2.1.37):
+# waehrend einer Aktualisierung ruht dieser Takt. preupgrade.sh legt die Marke neben dem Datenordner
+# mit der Unixzeit an, postinstall.sh oder postupgrade.sh entfernt sie. Ist sie juenger als 3600 s,
+# endet der Takt hier still, vor jedem Schreiben. Eine Marke, die 3600 s oder aelter ist, in der Zukunft
+# liegt oder keine Unixzeit enthaelt, gilt nicht - eine abgebrochene Aktualisierung legt den Takt nicht
+# fuer immer still. Liefert die Uhr keine Zahl, gilt die Marke (geschlossen ausfallen).
+UPGM_MARKE="REPLACELBPDATADIR.upgrade_laeuft"
+if [ -f "$UPGM_MARKE" ]; then
+    upgm_jetzt=$(date +%s 2>/dev/null); upgm_seit=$(cat "$UPGM_MARKE" 2>/dev/null)
+    case "$upgm_seit" in ''|*[!0-9]*) upgm_seit=0 ;; esac
+    case "$upgm_jetzt" in ''|*[!0-9]*|0) exit 0 ;; esac
+    if [ "$upgm_seit" -le "$upgm_jetzt" ] && [ $((upgm_jetzt - upgm_seit)) -lt 3600 ]; then exit 0; fi
+fi
+
 DIENST="REPLACELBPBINDIR/ble_scanner_ng.py"
 CFG="REPLACELBPCONFIGDIR/ble_scanner_ng.cfg"
 LOGDIR="REPLACELBPLOGDIR"
@@ -38,7 +52,6 @@ PIDDATEI="REPLACELBPDATADIR/dienst.pid"
 ORDNER="REPLACELBPPLUGINDIR"
 # Marke, Sollmerker und Waechterzustand liegen NEBEN dem Datenordner: darin
 # raeumte sie der Installer bei jedem Upgrade mit ab (preupgrade.sh).
-MARKE="$DATADIR.upgrade_laeuft"
 SOLL="$DATADIR.soll_laufen"
 ZUSTAND="$DATADIR.waechter"
 
@@ -90,23 +103,6 @@ if [ "$(cat "$SOLL" 2>/dev/null)" = "0" ]; then
     exit 0
 fi
 
-# 2. Aktualisierung? Dieselbe Rechnung wie in daemon/daemon (Startsperre):
-#    hoechstens eine Stunde alt, bis fuenf Minuten aus der Zukunft; ohne
-#    lesbare Uhr gilt die Marke (ein Schutz faellt geschlossen aus).
-if [ -f "$MARKE" ]; then
-    SEIT=$(cat "$MARKE" 2>/dev/null)
-    JETZT=$(date +%s 2>/dev/null)
-    case "$JETZT" in ''|*[!0-9]*) exit 0 ;; esac
-    case "$SEIT" in
-        ''|*[!0-9]*) ;;
-        *)
-            ALTER=$((JETZT - SEIT))
-            if [ "$ALTER" -ge -300 ] && [ "$ALTER" -lt 3600 ]; then
-                exit 0
-            fi
-            ;;
-    esac
-fi
 
 # --- Gemeinsame Hilfen (Gruppe 13, V9): bin/bl_haken.sh ---------------------------------------
 # Fehlt die Datei oder ist sie defekt: Warnung und eine Minimalform (nur nach der PID-Datei) - keine stille
