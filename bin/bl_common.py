@@ -754,7 +754,7 @@ def anwesenheit_gesamt(ble, wlan, ble_name="ble"):
 # Byte-Reihenfolge klein zuerst: IRK ec0234a357c8ad05341010a60a397d9b,
 # prand 708194 -> hash 0dfbaa (bl_selbsttest.py, Gruppe "IRK").
 #
-# Der Schluessel liegt NICHT in ble_scanner_ng.cfg (0640), sondern in
+# Der Schluessel liegt NICHT in ble_scanner_ng.cfg (seit 1.3.42 0600), sondern in
 # irk.json (0600) daneben: {"<name>": "<32 Hex>"}. Nie im Protokoll, nie in
 # der Oberflaeche - dort nur "hinterlegt" und die letzten vier Hex.
 # BlueZ-Kopplung (Bond) wird NICHT angefasst: sie veraenderte fremde Geraete.
@@ -887,7 +887,7 @@ def irk_lesen(pfad=None):
 # ---------------------------------------------------------------------------
 #
 # bindkey.json (0600, neben der Konfiguration, wie irk.json): {MAC: 32 oder 24 Hex}. Der Dienst braucht den
-# Schluessel, also eine eigene 0600-Datei (Regeln/05) statt der 0640-Konfiguration, die die Oberflaeche anzeigt.
+# Schluessel, also eine eigene 0600-Datei (Regeln/05) statt der Konfiguration, die die Oberflaeche anzeigt.
 # Der Schluessel steht nie im Protokoll, nie im Abbild, nie auf einer Kommandozeile.
 # AES-CCM nach NIST SP 800-38C (RFC 3610) auf EINEM AES-Block: aes128() oben - python3-cryptography, wenn es da
 # ist, sonst _aes128_rein(). Derselbe Weg wie bei den IRK; kein neues Paket (Entscheidung E-E2).

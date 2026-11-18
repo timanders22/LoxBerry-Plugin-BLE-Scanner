@@ -1,11 +1,26 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.41
+Version 1.3.42
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.42
+
+- **Verhalten geändert – Einstellungen sichern und zurückspielen mit dem gemeinsamen Sicherungsmodul 1.2.11:** Die beiden Knöpfe im Reiter *Einstellungen* verhalten sich jetzt wie in den übrigen Plugins dieser Reihe.
+  - Zwischen dem Feld für die Sicherungsdatei und dem Knopf *Zurückspielen* steht ein Haken „Ja, die geltenden Einstellungen durch die Sicherung ersetzen“, ab Werk aus. Ohne ihn wird die Datei nicht gelesen und nichts geändert, und die Meldung sagt es.
+  - Eine Einstellung in der Datei, die diese Fassung nicht kennt, weist die Datei nicht mehr als Ganzes ab. Sie wird verworfen und in der Meldung mit ihrem Namen genannt, nie mit ihrem Wert; die übrigen Einstellungen werden zurückgespielt. Das gilt auch für einen Bind-Key oder IRK-Schlüssel zu einem Tag, den die Datei nicht enthält. Bis 1.3.41 wies ein solcher Eintrag die ganze Datei ab.
+  - Ein leerer Wert in der Datei überschreibt keinen gesetzten mehr; der bisherige bleibt und wird genannt.
+  - Eine Datei mit einem unzulässigen Wert ändert weiter gar nichts; die Meldung nennt jetzt die Einstellung und den Grund, nicht mehr den Wert.
+  - Einträge der geltenden Konfigurationsdatei, die diese Fassung nicht kennt, fallen beim Zurückspielen weg und werden mit Namen genannt. Bis 1.3.41 fielen sie schon beim Lesen still weg.
+  - Die neue Sicherungsdatei trägt einen Kopf mit Kennzeichen und Fassung (`_plugin`, `_fassung`). Das Kennzeichen bleibt das bisherige `ble_scanner_ng`; neu ist nur, dass es oben als `_plugin` steht und nicht mehr im Feld `_`. Sicherungen der Fassungen 1.3.20 bis 1.3.41 werden weiter angenommen; die Meldung sagt „ältere Sicherung erkannt“. Die Fassungen bis 1.3.19 lieferten keine Sicherungsdatei.
+- **Zweitschrift bei jedem Speichern:** Die Zweitschriften von Konfiguration, `bindkey.json` und `irk.json` neben dem Konfigurationsordner werden jetzt bei jedem Speichern erneuert, nicht nur beim Update. Bisher stellte die Heilung nach einem Verlust den Stand des letzten Updates wieder her.
+- **Rechte:** Die Konfigurationsdatei `ble_scanner_ng.cfg` wird mit 0600 statt 0640 geschrieben, wie ihre Zweitschrift. Alle Leser laufen als Benutzer `loxberry`. Eine bestehende Datei bekommt die neuen Rechte bei der Installation.
+- **Knopf „Dokumentation“:** `plugin.cfg` nennt jetzt `WEBSITE=` mit diesem Repository.
+- Gemessen mit dem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4, der über einen Webserver die echten Knöpfe drückt; Sicherungen aller 22 Fassungen 1.3.20 bis 1.3.41 werden angenommen. Am Gerät nicht gemessen.
+- **Sicherungsmodul 1.2.11:** Wandelt ein Plugin beim Zurückspielen eine Sicherung aus einer Textdatei um, sagt die Meldung das jetzt mit einem gemeinsamen Satz, und Mängel darin werden in allen Plugins mit denselben Bezeichnungen genannt. Dieses Plugin wandelt keine Textdateien um; an seinem Verhalten ändert sich dadurch nichts. Gemessen mit dem Prüfstand auf dem Arbeitsrechner unter PHP 7.4 und 8.4. Am Gerät nicht gemessen.
 
 ## Neu in 1.3.41
 

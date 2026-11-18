@@ -183,6 +183,8 @@ if [ -d "$SICHER" ]; then
         [ -f "$PCONFIG/irk.json" ] && chmod 0600 "$PCONFIG/irk.json" 2>/dev/null
         # Gruppe 33 (1.3.29): bindkey.json (Bind-Keys der Xiaomi-Thermometer) ebenso.
         [ -f "$PCONFIG/bindkey.json" ] && chmod 0600 "$PCONFIG/bindkey.json" 2>/dev/null
+        # 1.3.42: die Konfiguration ebenso 0600 (bis 1.3.41 0640; cp -a trug den alten Modus herueber).
+        [ -f "$PCONFIG/ble_scanner_ng.cfg" ] && chmod 0600 "$PCONFIG/ble_scanner_ng.cfg" 2>/dev/null
     else
         ALLES_ZURUECK=0
         echo "<WARNING> Die Konfiguration liess sich nicht vollstaendig zurueckspielen"

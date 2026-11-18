@@ -276,9 +276,10 @@ netz_zurueck() {
         if cp -p "$zweit" "$ziel.neu" 2>/dev/null \
            && cmp -s "$zweit" "$ziel.neu" \
            && mv "$ziel.neu" "$ziel" 2>/dev/null; then
-            # B8 (Gruppe 13): 0640 wie die Oberflaeche (bl_config_write) - cp -p uebernahm den Modus der
-            # Zweitschrift, und eine aus der Zeit vor 1.3.18 trug 0644.
-            chmod 0640 "$ziel" 2>/dev/null
+            # B8 (Gruppe 13): dieselben Rechte wie die Oberflaeche (bl_config_write) - cp -p uebernahm den Modus
+            # der Zweitschrift, und eine aus der Zeit vor 1.3.18 trug 0644. Seit 1.3.42 0600 (bis 1.3.41 0640):
+            # jeder Leser laeuft als loxberry, die Gruppe braucht kein Leserecht.
+            chmod 0600 "$ziel" 2>/dev/null
             echo "<OK> $datei aus der Zweitschrift wiederhergestellt."
         else
             rm -f "$ziel.neu" 2>/dev/null
@@ -341,6 +342,9 @@ else
 fi
 [ -f "$NETZ_IRK" ] && chmod 0600 "$NETZ_IRK" 2>/dev/null
 [ -f "$NETZ_BK" ] && chmod 0600 "$NETZ_BK" 2>/dev/null
+# 1.3.42: die Konfiguration ebenfalls 0600, wie bl_config_write() sie seitdem schreibt (eine Anlage bis 1.3.41 hat
+# 0640; die Zweitschrift traegt 0600, preupgrade.sh und bl_zweitschrift_ziehen()).
+[ -f "$NETZ_CFG/ble_scanner_ng.cfg" ] && chmod 0600 "$NETZ_CFG/ble_scanner_ng.cfg" 2>/dev/null
 
 # --- Den Dienst starten, wenn dies eine NEUINSTALLATION ist -----------------
 #

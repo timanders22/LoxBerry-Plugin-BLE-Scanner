@@ -1,5 +1,10 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+/* 1.3.42: die Abschrift des gemeinsamen Sicherungsmoduls (Stammfassung Werkzeuge/gemeinsam/sicherung.php, byte-gleich,
+ * Werkzeuge/sicherung_einbauen.py) liegt neben dieser Datei. "Einstellungen sichern" und "Einstellungen zurueckspielen"
+ * laufen darueber, in allen Linien gleich (Auftrag des Hausherrn 12.11.2026); diese Linie uebergibt nur ihre
+ * Beschreibung (bl_sicherung_beschreibung()). Antwortet als Einstieg mit 403. */
+require_once __DIR__ . '/sicherung.php';
 /**
  * BLE-Scanner NG - gemeinsame Hilfsfunktionen
  *
@@ -967,7 +972,11 @@ function bl_config_read($datei = null)
         }
 
         $schluessel = strtolower(preg_replace('/^default\./i', '', $schluessel));
-        if (array_key_exists($schluessel, $werte)) {
+        /* 1.3.42 (Bauform vom 15.11.2026, Regeln/05): die Lesefunktion sortiert nichts aus. Bis 1.3.41 fiel ein
+         * Schluessel, den bl_defaults() nicht kennt, hier still weg; jetzt steht er im Feld, und das Zurueckspielen
+         * einer Sicherung nennt ihn mit Namen, wenn er dabei wegfaellt (sicherung_jetzt_entfernt()).
+         * bl_config_write() schreibt wie bisher nur die Schluessel der Vorgaben. */
+        if ($schluessel !== '') {
             $werte[$schluessel] = $wert;
         }
     }
@@ -1019,10 +1028,16 @@ function bl_datei_schreiben($ziel, $inhalt, $rechte = 0640)
 /**
  * Konfiguration schreiben - Format wie bl_common.py es erwartet.
  *
- * Rechte 0640: in der Datei stehen MAC-Adressen und die Namen der
- * ueberwachten Personen, also eine Anwesenheitsliste des Haushalts.
- * preupgrade.sh sichert dieselben Daten mit 0600 und begruendet das
- * ausfuehrlich; bis 1.2.10 lag das Original mit 0644 daneben.
+ * Rechte 0600 seit 1.3.42 (bis 1.3.41 0640): in der Datei stehen MAC-Adressen
+ * und die Namen der ueberwachten Personen, also eine Anwesenheitsliste des
+ * Haushalts. Gemessen 18.11.2026 am Quelltext und an der Geraetekopie: jeder
+ * Leser laeuft als loxberry - der Dienst (daemon/daemon: su loxberry), die
+ * Waechter (cron.01min/05min laufen laut /etc/cron.d/lbdefaults als loxberry,
+ * Geraet/2026-09-28/11_cron.txt), die Hakenskripte und die Oberflaeche; die
+ * Gruppe braucht kein Leserecht. preupgrade.sh legt die Zweitschrift seit
+ * jeher mit 0600 an; bis 1.2.10 lag das Original mit 0644 daneben.
+ * Seit 1.3.42 zieht jedes Schreiben die Zweitschrift nach (Entscheidung des
+ * Hausherrn 18.11.2026; bl_zweitschrift_ziehen()).
  */
 function bl_config_write($werte, $tags)
 {
@@ -1062,7 +1077,11 @@ function bl_config_write($werte, $tags)
         }
         $txt .= 'tag' . $nr . '=' . $zeile . "\n";
     }
-    return bl_datei_schreiben($file, $txt, 0640);
+    if (!bl_datei_schreiben($file, $txt, 0600)) {
+        return false;
+    }
+    bl_zweitschrift_ziehen('ble_scanner_ng.cfg', $txt);
+    return true;
 }
 
 /**
@@ -1147,9 +1166,12 @@ function bl_config_vervollstaendigen($datei = null)
         $zeilen[] = $neu;
     }
     $rechte = @fileperms($file);
-    $rechte = ($rechte === false) ? 0640 : ($rechte & 0777);
+    $rechte = ($rechte === false) ? 0600 : ($rechte & 0777);     // 1.3.42: 0600 wie bl_config_write()
     if (!bl_datei_schreiben($file, implode('', $zeilen), $rechte)) {
         return array('stand' => 'fehler', 'schluessel' => array_keys($fehlend));
+    }
+    if ($datei === null) {
+        bl_zweitschrift_ziehen('ble_scanner_ng.cfg', implode('', $zeilen));     // 1.3.42: jedes Schreiben zieht sie nach
     }
     return array('stand' => 'ergaenzt', 'schluessel' => array_keys($fehlend));
 }
@@ -2876,33 +2898,6 @@ function bl_abo_text()
 }
 
 
-/**
- * Eine Sicherungsdatei einlesen - und dabei NICHTS durchgehen lassen.
- *
- * Die sieben Punkte aus REGELN_2, und der wichtigste ist der dritte: eine
- * halb gueltige Datei ueberschreibt GAR NICHTS. Wer eine Sicherung
- * zurueckspielt, will entweder den ganzen Stand oder gar keinen - eine zur
- * Haelfte uebernommene Konfiguration ist schlimmer als die alte, und man
- * sieht es ihr nicht an.
- *
- * Unbekannte Schluessel sind eine Beanstandung, kein stiller Verlust: sie
- * stammen aus einer anderen Fassung oder einem anderen Plugin.
- *
- * Rueckgabe: array(Konfiguration|null, Beanstandungen[], uebernommene Werte).
- */
-/**
- * Die Sicherungsdatei bauen (seit 1.3.20, Pruefung 29.09.2026, C1/O1/O3).
- *
- * Bis 1.3.19 rief der Handler bl_cfg() ohne Argumente - "Too few arguments",
- * HTTP 500, seit 1.3.6 kam nie eine Datei heraus. Und selbst die gedachte
- * Datei trug nur die 32 Einstellungen, keinen einzigen Tag: ein Umzug brachte
- * keine MAC, keine Bezeichnung, keine Person mit.
- *
- * Jetzt: ein lesbarer Kopf unter "_" (Plugin, Fassung, Zeitpunkt, Hinweis),
- * alle Schluessel aus den Vorgaben mit ihrem gespeicherten Wert, und die Tags
- * unter "tags" (Kennung, aktiv, Bezeichnung, Zusatzangaben). Zugangsdaten
- * fuehrt diese Linie nicht; das Formularmerkwort gehoert nicht hinein.
- */
 /** Die Sprachansagen aus dem Feld der Hauptkonfiguration: was fehlt, kommt aus den Vorgaben (ab Werk EIN). */
 function bl_ansage_block_lesen()
 {
@@ -2954,48 +2949,6 @@ function bl_ansage_wert($k, $w)
             return in_array($w, array(0, 1, '0', '1'), true);
     }
     return false;
-}
-
-/** Fuer die Sicherung: nie ein Sprechtoken, nie der Herkunftsvermerk. Ausgabeart, Ziele, Regeln und Haken reisen mit. */
-function bl_ansage_fuer_sicherung(array $c)
-{
-    unset($c['ansage_token_herkunft'], $c['ansage_aus_datei']);
-    if (isset($c['tts']) && is_array($c['tts'])) { $c['tts'] = ansage_sicherung_bereinigen($c['tts']); }
-    return $c;
-}
-
-/**
- * Vor dem Zurueckspielen. Eine Datei mit Sprechtoken wird abgewiesen (der Block wird unbrauchbar gemacht, die Wertpruefung nennt ihn). Die geltenden Token und der Vermerk bleiben.
- * Fehlt ein Schluessel (Sicherung einer aelteren Fassung), gilt der geltende Wert: Ein bewusstes AUS geht beim Zurueckspielen nicht verloren.
- */
-function bl_ansage_sicherung_vor($roh)
-{
-    $d = json_decode((string) $roh, true);
-    if (!is_array($d)) { return $roh; }
-    $inhalt = false;
-    foreach (array_keys($d) as $k) { if ((string) $k !== '' && ((string) $k)[0] !== '_') { $inhalt = true; } }
-    if (!$inhalt) { return $roh; }
-    $j = bl_ansage_cfg();
-    unset($d['ansage_token_herkunft'], $d['ansage_aus_datei']);
-    $jt = isset($j['tts']) && is_array($j['tts']) ? $j['tts'] : array();
-    if (array_key_exists('tts', $d)) {
-        $g = '';
-        $p = is_array($d['tts']) ? ansage_wert_pruefen($d['tts'], $g, bl_ansage_modi()) : null;
-        if (ansage_sicherung_mangel($d['tts']) || $p === null) {
-            $d['tts'] = 'ABGEWIESEN';
-        } else {
-            list($tv) = ansage_vervollstaendigen($p, 'aus');
-            $d['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
-        }
-    } else {
-        $d['tts'] = bl_tts($j);
-    }
-    foreach (array_diff(bl_ansage_schluessel(), array('tts', 'ansage_token_herkunft', 'ansage_aus_datei')) as $k) {
-        if (!array_key_exists($k, $d) && array_key_exists($k, $j)) { $d[$k] = $j[$k]; }
-    }
-    $d['ansage_token_herkunft'] = isset($j['ansage_token_herkunft']) && is_array($j['ansage_token_herkunft']) ? $j['ansage_token_herkunft'] : array();
-    $d['ansage_aus_datei'] = 1;
-    return (string) json_encode($d);
 }
 
 /**
@@ -3392,13 +3345,6 @@ function bl_ansage_flanke($anlass, $gestoert, $name = '', $frist = 0, $jetzt = n
     return bl_ansage_legen(array($ein));
 }
 
-/** Fuer die Sicherung: die Hauptkonfiguration ohne das Feld, dazu die Felder der Sprachansagen ohne Sprechtoken und Vermerk. */
-function bl_ansage_sicherung_felder(array $c)
-{
-    unset($c['ansage_block']);
-    return bl_ansage_fuer_sicherung(bl_ansage_cfg()) + $c;
-}
-
 /** Eine Protokollzeile der Sprachansagen. */
 function bl_ansage_zeile($t)
 {
@@ -3406,229 +3352,452 @@ function bl_ansage_zeile($t)
     if ($f !== '' && is_dir(dirname($f))) { @file_put_contents($f, date('Y-m-d H:i:s') . ' Oberflaeche: ' . $t . "\n", FILE_APPEND | LOCK_EX); }
 }
 
-function bl_sicherung_bauen($cfg, $tags)
+/* ==================================================================
+ * Einstellungen sichern und zurueckspielen - seit 1.3.42 ueber das gemeinsame Sicherungsmodul
+ * (sicherung.php, Stammfassung Werkzeuge/gemeinsam/sicherung.php 1.2.9; Auftrag des Hausherrn 18.11.2026,
+ * "Ja, umbauen"). Bis 1.3.41 standen hier eine eigene Bau- und eine eigene Lesefunktion (bl_sicherung_bauen(),
+ * bl_sicherung_lesen(), bl_sicherung_schluessel()): Kopf unter "_" mit plugin = ble_scanner_ng, ein unbekannter
+ * Schluessel wies die ganze Datei ab, ein Haken fehlte. Diese Linie uebergibt jetzt nur ihre Beschreibung.
+ * ================================================================== */
+
+/**
+ * 1.3.42: die Konfiguration als EIN Feld, wie das Sicherungsmodul sie sieht ('jetzt' und Grundlage beim Sichern):
+ * jeder Schluessel der Datei (bl_config_read() sortiert seit 1.3.42 nichts mehr aus - ein Schluessel, den diese
+ * Fassung nicht kennt, steht darin und wird beim Zurueckspielen mit Namen genannt), ohne das Feld ansage_block,
+ * dafuer die Sprachansagen daraus als eigene Schluessel (tts, ansage_regeln, ansage_haken und die Vermerke
+ * ansage_token_herkunft, ansage_aus_datei; was im Feld fehlt, aus den Vorgaben wie bl_ansage_block_lesen()) und
+ * die Tags unter "tags" (Kennung, aktiv, Bezeichnung, Zusatzangaben - dieselbe Form wie in den Sicherungen seit
+ * 1.3.20). Liest nur, schreibt nichts (auch nicht die einmalige Uebernahme einer ansage.json, bl_ansage_cfg()).
+ */
+function bl_sicherung_stand($werte = null, $tags = null)
 {
-    $aus = array(
-        '_' => array(
-            'plugin'   => 'ble_scanner_ng',
-            'fassung'  => bl_fassung(),
-            'erstellt' => date('Y-m-d H:i:s'),
-            'hinweis'  => bl_t('TEXT.SICH_KOPF'),
-        ),
-    );
-    foreach (bl_defaults() as $k => $vorgabe) {
-        $aus[$k] = isset($cfg[$k]) ? (string) $cfg[$k] : (string) $vorgabe;
+    if (!is_array($werte) || !is_array($tags)) {
+        list($werte, $tags) = bl_config_read();
     }
-    $aus = bl_ansage_sicherung_felder($aus);     // nie ein Sprechtoken
-    $aus['tags'] = array();
+    $c = $werte;
+    unset($c['ansage_block']);
+    $roh = isset($werte['ansage_block']) ? (string) $werte['ansage_block'] : '';
+    $a = $roh !== '' ? json_decode((string) base64_decode($roh), true) : null;
+    $a = (is_array($a) ? $a : array()) + bl_ansage_vorgaben();
+    foreach (bl_ansage_schluessel() as $k) {
+        $c[$k] = $a[$k];
+    }
+    $c['tags'] = array();
     foreach ($tags as $t) {
-        $aus['tags'][] = array(
+        $c['tags'][] = array(
             'kennung' => (string) $t['kennung'],
             'aktiv'   => $t['aktiv'] === '1' ? '1' : '0',
             'name'    => (string) $t['name'],
-            'opt'     => (object) (isset($t['opt']) && is_array($t['opt']) ? $t['opt'] : array()),
+            'opt'     => (isset($t['opt']) && is_array($t['opt'])) ? $t['opt'] : array(),
         );
     }
-    // Gruppe 33 (E-E6, N5): die Schluessel gehoeren in die Sicherung (Regeln/05) - sonst ist der Umzug auf einen
-    // zweiten LoxBerry fuer verschluesselte Fuehler und IRK-Tags wertlos. Der Kopf sagt es (TEXT.SICH_KOPF).
-    $aus['bindkeys'] = (object) bl_bindkey_lesen();
-    $aus['irk'] = (object) bl_irk_lesen();
-    return $aus;
+    return $c;
 }
 
-function bl_sicherung_lesen($roh, &$namen = null)
+/** 1.3.42: die Vorgaben, wie das Modul sie sieht - bl_defaults() ohne ansage_block, die Sprachansagen, die Tags. */
+function bl_sicherung_vorgaben()
 {
-    $roh = bl_ansage_sicherung_vor($roh);     // Token und Vermerk bleiben die geltenden
-    $bl_d = json_decode((string) $roh, true);
-    if (is_array($bl_d)) { $bl_d['ansage_block'] = ''; $roh = (string) json_encode($bl_d); }
-    $bl_ab = array();
-    // X-3 (Verbesserungsbau 30.09.2026): zu jeder Beanstandung ein NAME, nie
-    // ein Wert - fuer die Warnung beim Sichern (bl_rueckspiel_altwerte()).
-    $namen = array();
-    $mangel = array();
-    $daten = json_decode((string) $roh, true);
-    if (!is_array($daten)) {
-        $namen[] = '_';
-        return array(null, array(bl_t('TEXT.SICH_KEIN_JSON')), 0, array());
-    }
-    /* Fremdes wird VOR dem Zusammenfuehren abgelehnt: der Kopf muss dieses
-     * Plugin nennen (seit 1.3.20). */
-    if (!isset($daten['_']) || !is_array($daten['_']) || !isset($daten['_']['plugin'])
-        || $daten['_']['plugin'] !== 'ble_scanner_ng') {
-        $namen[] = '_';
-        return array(null, array(bl_t('TEXT.SICH_KEIN_KOPF')), 0, array());
-    }
-    $neu = bl_defaults();
-    $bekannt = array_keys($neu);
-    $anzahl = 0;
-    foreach ($daten as $k => $w) {
-        // Gruppe 33: die Schluessel-Abschnitte liest bl_sicherung_schluessel().
-        if ($k === '_' || $k === 'tags' || $k === 'bindkeys' || $k === 'irk') {
-            continue;
-        }
-        if ((string) $k === 'ansage_block') { continue; }     // das Feld mit den Sprechtoken kommt nie aus einer Datei
-        $bl_aw = bl_ansage_wert($k, $w);
-        if ($bl_aw !== null) {
-            if ($bl_aw) { $bl_ab[$k] = $w; } else { $mangel[] = bl_t('ANSAGEPLUGIN.M_FEHL'); $namen[] = (string) $k; }
-            continue;
-        }
-        if (!in_array($k, $bekannt, true)) {
-            $mangel[] = sprintf(bl_t('TEXT.SICH_FREMD'),
-                                 htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'));
-            $namen[] = (string) $k;
-            continue;
-        }
-        /* Jeder Wert mit denselben Regeln wie das Formular, zuerst is_string
-         * (seit 1.3.20, C3). Bis 1.3.19 hiess es hier nur $neu[$k] = $w. */
-        list($gut, $wert, $grund) = bl_wert_pruefen($k, $w);
-        if (!$gut) {
-            $mangel[] = sprintf(bl_t('TEXT.SICH_WERT'),
-                                htmlspecialchars((string) $k, ENT_QUOTES, 'UTF-8'),
-                                is_string($w) || is_int($w)
-                                    ? htmlspecialchars(bl_kuerzen((string) $w, 40), ENT_QUOTES, 'UTF-8')
-                                    : gettype($w));
-            $namen[] = (string) $k;
-            continue;
-        }
-        $neu[$k] = $wert;
-        $anzahl++;
-    }
-    if ((int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
-        $mangel[] = bl_t('TEXT.SICH_SCHWELLEN');
-        $namen[] = 'rssi_nah/rssi_mittel';
-    }
-    /* Die Tags (seit 1.3.20, O3): jeder einzeln geprueft, doppelte Kennungen
-     * abgewiesen. Eine Datei OHNE den Schluessel "tags" ist unvollstaendig -
-     * sonst loeschte das Zurueckspielen alle eingetragenen Tags. */
-    $tags = array();
-    if (!array_key_exists('tags', $daten)) {
-        $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
-        $namen[] = 'tags';
-    } elseif (!is_array($daten['tags'])) {
-        $mangel[] = bl_t('TEXT.SICH_OHNE_TAGS');
-        $namen[] = 'tags';
-    } else {
-        $gesehen = array();
-        foreach (array_values($daten['tags']) as $nr => $t) {
-            list($tag, $grund) = bl_tag_pruefen($t);
-            if ($tag === null) {
-                $mangel[] = sprintf(bl_t('TEXT.SICH_TAG'), $nr + 1,
-                                    htmlspecialchars($grund, ENT_QUOTES, 'UTF-8'));
-                $namen[] = 'tags[' . ($nr + 1) . '].' . $grund;
-                continue;
-            }
-            if (isset($gesehen[$tag['kennung']])) {
-                $mangel[] = sprintf(bl_t('MANGEL.DOPPELT'), $tag['kennung']);
-                $namen[] = 'tags[' . ($nr + 1) . '].kennung';
-                continue;
-            }
-            $gesehen[$tag['kennung']] = true;
-            $tags[] = $tag;
-        }
-    }
-    /* 1.3.38 (K7a): Bind-Keys und IRK gehoeren zur Datei wie die Tags. Ein Eintrag, der nicht passt, ist eine
-     * Beanstandung - geprueft HIER, also vor bl_config_write(); eine halb gueltige Datei aendert nichts. */
-    list(, , $bl_sch_mangel, $bl_sch_namen) = bl_sicherung_schluessel($roh, $tags);
-    foreach ($bl_sch_mangel as $bl_x) { $mangel[] = $bl_x; }
-    foreach ($bl_sch_namen as $bl_x) { $namen[] = $bl_x; }
-    if ($anzahl === 0) {
-        $mangel[] = bl_t('TEXT.SICH_LEER');
-        $namen[] = '_';
-    }
-    /* FEHLENDE Schluessel sind eine Beanstandung, kein stiller Rueckfall.
-     *
-     * Bis hierher war die Vorgabenliste der Ausgangspunkt, und nur was in
-     * der Datei stand wurde darueber geschrieben. Eine Datei mit einem
-     * einzigen Schluessel lief damit ohne Beanstandung durch, wurde
-     * gespeichert, und alle uebrigen Einstellungen fielen auf Werk
-     * zurueck - quittiert mit "1 Wert uebernommen".
-     *
-     * Gemessen an VolkswagenID 0.9.11 am 03.09.2026 unter PHP 7.4 und 8.4:
-     * dort fiel dabei auch das Aktionstoken auf '', und jede im Miniserver
-     * eingetragene Adresse war stumm ungueltig. Am 07.09.2026 ueber den
-     * Bestand ausgerollt (30 Linien).
-     *
-     * Der Hausstandard sagt: eine halb gueltige Datei aendert gar nichts.
-     * Verglichen wird gegen die VORGABEN, nicht gegen $bekannt: was
-     * ausserhalb der Konfigurationsdatei liegt - Zugangsdaten in einer
-     * eigenen Datei - faellt nicht auf Werk zurueck und darf hier fehlen. */
-    $fehlend = array();
-    foreach (array_keys(bl_defaults()) as $fk) {
-        if (!array_key_exists($fk, $daten) && !in_array($fk, bl_schluessel_spaeter(), true)) {
-            $fehlend[] = $fk;
-        }
-    }
-    if ($fehlend) {
-        $mangel[] = sprintf(bl_t('TEXT.SICH_FEHLEND'), count($fehlend),
-            htmlspecialchars(implode(', ', $fehlend), ENT_QUOTES, 'UTF-8'));
-        foreach ($fehlend as $fk) {
-            $namen[] = $fk;
-        }
-    }
-    $namen = array_values(array_unique($namen));
-    if ($bl_ab) { $neu['ansage_block'] = base64_encode((string) json_encode($bl_ab)); }     // die Felder der Sprachansagen zurueck in das eine Feld
-    return array($mangel ? null : $neu, $mangel, $anzahl, $tags);
+    $v = bl_defaults();
+    unset($v['ansage_block']);
+    return $v + bl_ansage_vorgaben() + array('tags' => array());
 }
 
 /**
- * Gruppe 33 (E-E6): die Abschnitte "bindkeys" (MAC -> 24/32 Hex) und "irk" (Name -> 32 Hex) einer Sicherung lesen.
- * Rueckgabe array(bindkeys|null, irk|null, beanstandungen, namen): null = Abschnitt fehlt (Sicherung aus 1.3.28) - dann
- * bleiben die hinterlegten Schluessel unveraendert. Nur Schluessel zu Tags der Sicherung gelten (keine Waisen).
- * 1.3.38 (K7a): ein Eintrag mit falscher Form, ohne Tag in der Datei oder ein Abschnitt, der kein Objekt ist, wird
- * nicht mehr uebergangen, sondern beanstandet (maskiert, nur Name/MAC, nie ein Schluessel); bl_sicherung_lesen() lehnt
- * die Datei dann ganz ab. Bis 1.3.37 wurde der Eintrag NACH bl_config_write() mit Hinweis weggelassen - die Datei war
- * halb uebernommen, und ein Abschnitt "bindkeys": "x" loeschte alle hinterlegten Bind-Keys.
+ * 1.3.42: was jede Sicherung tragen muss - die 32 Einstellungen, die schon 1.3.20 schrieb (die erste Fassung mit
+ * Sicherung; gemessen 18.11.2026 an den Archiven 1.3.20 bis 1.3.42), und die Tags (bis 1.3.41 wies
+ * TEXT.SICH_OHNE_TAGS eine Datei ohne "tags" ab, sonst loeschte das Zurueckspielen alle Tags). Jeder spaeter
+ * dazugekommene Schluessel (bl_schluessel_spaeter()) und die Sprachansagen (seit 1.3.31) behalten den geltenden Wert
+ * und werden genannt - wie bis 1.3.41, wo eine aeltere Sicherung den geltenden Stand dieser Schluessel behielt.
  */
-function bl_sicherung_schluessel($roh, $tags)
+function bl_sicherung_pflicht()
 {
-    $d = json_decode((string) $roh, true);
-    $mangel = array();
-    $bean = array();
-    $bk = null;
-    $irk = null;
+    $aus = array();
+    foreach (array_keys(bl_defaults()) as $k) {
+        if ($k !== 'ansage_block' && !in_array($k, bl_schluessel_spaeter(), true)) {
+            $aus[] = $k;
+        }
+    }
+    $aus[] = 'tags';
+    return $aus;
+}
+
+/**
+ * 1.3.42: Die Beschreibung dieser Linie fuer das gemeinsame Sicherungsmodul.
+ *
+ * Kennzeichen: das bisherige ble_scanner_ng. Ein bestehendes gueltiges Kennzeichen bleibt (Entscheidung des
+ * Hausherrn 18.11.2026, Frage 33 der Nacht: "Ich folge deinen Empfehlungen"; CLAUDE.md 4, bestehende Namen behalten
+ * ihre Bedeutung). Die Sicherungen 1.3.20 bis 1.3.41 trugen es als plugin = ble_scanner_ng in einem Kopf als Feld
+ * unter "_", nicht als _plugin (gemessen 18.11.2026 an den Archiven 1.3.6 bis 1.3.41; 1.3.6 bis 1.3.19 lieferten
+ * keine Datei, der Knopf endete mit "Too few arguments"). Der Uebersetzer (bl_sicherung_uebersetzer()) erkennt sie
+ * an genau diesem Kopf; die Meldung sagt "aeltere Sicherung erkannt". Das Kennzeichen LoxBerry-Plugin-BLE-Scanner
+ * stand nur in dieser Fassung vor ihrer Veroeffentlichung und wird nicht angenommen.
+ *
+ * Inhalt: alle Einstellungen, die Tags, die Sprachansagen ohne Sprechtoken ('sichern' => ansage_sicherung_bereinigen)
+ * und die Schluessel aus bindkey.json und irk.json als Teile "bindkeys" und "irk" (Gruppe 33, seit 1.3.29). Nie
+ * darin: die Vermerke ansage_token_herkunft und ansage_aus_datei ('nie_aus_datei') und das Formularmerkwort (liegt
+ * im Datenordner, nicht in der Konfiguration). Diese Linie fuehrt kein Aktionstoken und keine Zugangsdaten in der
+ * Konfiguration.
+ *
+ * Geprueft wird jeder Wert wie im Formular (bl_wert_pruefen(), bl_tag_pruefen(), bl_ansage_wert()) und in dessen
+ * Normalform gespeichert. Wie bis 1.3.41: eine Datei mit Sprechtoken im Block tts stammt nicht aus "Einstellungen
+ * sichern" und wird abgewiesen (bl_sicherung_vorbehandeln()); die Schwelle mittel darf nicht ueber nah liegen
+ * (bl_sicherung_quer()). Fehlt ein Teil (Sicherung bis 1.3.28), bleiben die hinterlegten Schluessel stehen.
+ *
+ * Die Teile tragen dynamische Namen (MAC bzw. IRK-Name). Bekannt ist ein Name, zu dem die Datei selbst einen Tag
+ * fuehrt ($tags_datei: die Liste "tags" der Datei, bl_sicherung_dateitags(); ohne Angabe die Tags der geltenden
+ * Konfiguration). Jeder andere Eintrag ist unbekannt und wird nach Regel 2 des Moduls verworfen und mit Namen
+ * genannt (bindkeys.<MAC>, irk.<Name>), nie mit Wert; die Datei wird trotzdem zurueckgespielt. Bis 1.3.41 wies ein
+ * solcher Eintrag ohne Tag die ganze Datei ab (K7a); ein Eintrag mit bekanntem Namen und falscher Form tut das
+ * weiter (Regel 4). Ein leerer Wert laesst den hinterlegten Schluessel stehen (Regel 3, 'teile_jetzt').
+ */
+function bl_sicherung_beschreibung($tags_datei = null)
+{
+    $p = bl_paths();
+    if (!is_array($tags_datei)) {
+        $st = bl_sicherung_stand();
+        $tags_datei = $st['tags'];
+    }
     $macs = array();
-    $namen = array();
-    foreach ((array) $tags as $t) {
-        if ($t['art'] === 'mac') { $macs[] = $t['mac']; }
-        if ($t['art'] === 'irk') { $namen[] = substr($t['kennung'], 4); }
+    $irk_namen = array();
+    foreach (array_values($tags_datei) as $t) {
+        list($tag) = bl_tag_pruefen($t);
+        if ($tag !== null && $tag['art'] === 'mac') { $macs[] = $tag['mac']; }
+        if ($tag !== null && $tag['art'] === 'irk') { $irk_namen[] = substr($tag['kennung'], 4); }
     }
-    $falsch = function ($abschnitt, $eintrag, $laenge) use (&$mangel, &$bean) {
-        $mangel[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), $abschnitt,
-                            htmlspecialchars(bl_kuerzen((string) $eintrag, $laenge), ENT_QUOTES, 'UTF-8'));
-        $bean[] = $abschnitt;
-    };
-    if (is_array($d) && array_key_exists('bindkeys', $d)) {
-        $bk = array();
-        if (!is_array($d['bindkeys'])) {
-            $falsch('bindkeys', '-', 20);
+    $vorgaben = bl_sicherung_vorgaben();
+    $pflicht = bl_sicherung_pflicht();
+    $nie = array('ansage_token_herkunft', 'ansage_aus_datei');
+    $tts = array_merge(array_keys(ansage_werk_block()), ansage_geheim());
+    $knoten = array(
+        'tts' => sicherung_block($tts, array('ziele' => sicherung_liste(array('art', 'wo', 'laut', 'sprache', 'ein'))))
+                 + array('sichern' => 'ansage_sicherung_bereinigen'),
+        'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())),
+        'ansage_haken' => sicherung_block(array('ausfall')),
+        /* Ohne Zuordnungsschluessel wie bis 1.3.41: ein leerer Wert in einem Tag der Datei gilt (Regel 3 greift in
+         * Listen nur mit Zuordnungsschluessel, Regeln/05). */
+        'tags' => sicherung_liste(array('kennung', 'aktiv', 'name'), '',
+                                  array('opt' => sicherung_block(bl_tag_optionen()))),
+    );
+    $schluessel = array();
+    foreach (array_keys($vorgaben) as $k) {
+        if (in_array($k, $nie, true)) {
+            continue;
+        }
+        $n = isset($knoten[$k]) ? $knoten[$k] : array();
+        if (!in_array($k, $pflicht, true)) {
+            $n['fehlt'] = 'behalten';
+        }
+        if ($k === 'tags') {
+            $n['wandeln'] = 'bl_sicherung_tags_wandeln';
+        } elseif (!in_array($k, bl_ansage_schluessel(), true)) {
+            $n['wandeln'] = function ($w) use ($k) {
+                $e = bl_wert_pruefen((string) $k, $w);
+                return $e[0] ? $e[1] : $w;
+            };
+        }
+        $schluessel[$k] = $n;
+    }
+    /* Die Teile als Bloecke mit den bekannten Namen: Regel 2 und 3 des Moduls gelten auch dort. */
+    $schluessel['bindkeys'] = sicherung_block(array_values(array_unique($macs)));
+    $schluessel['irk'] = sicherung_block(array_values(array_unique($irk_namen)));
+    return array(
+        'kennzeichen' => 'ble_scanner_ng',
+        'hinweis' => bl_t('TEXT.SICH_KOPF'),
+        /* Die Fassung im Kopf kommt aus der Plugin-Datenbank bzw. plugin.cfg (sicherung_fassung_lesen()). */
+        'home' => (string) $p['home'],
+        'ordner' => (string) $p['plugin'],
+        'plugin_cfg' => dirname(dirname(__DIR__)) . '/plugin.cfg',
+        'vorgaben' => $vorgaben,
+        'schluessel' => $schluessel,
+        'nie_aus_datei' => $nie,
+        'teile' => array('bindkeys' => 'bl_sicherung_teil_bindkeys', 'irk' => 'bl_sicherung_teil_irk'),
+        'teile_jetzt' => array('bindkeys' => 'bl_bindkey_lesen', 'irk' => 'bl_irk_lesen'),
+        'uebersetzer' => 'bl_sicherung_uebersetzer',
+        'vorbehandeln' => 'bl_sicherung_vorbehandeln',
+        'pruefen' => 'bl_sicherung_pruefen',
+        'quer' => 'bl_sicherung_quer',
+        'jetzt' => 'bl_sicherung_stand',
+        't' => 'bl_t',
+    );
+}
+
+/**
+ * 1.3.42: eine Sicherung 1.3.20 bis 1.3.41 - Kopf als Feld unter "_" mit plugin = ble_scanner_ng, kein _plugin.
+ * Nur genau diese Form wird angenommen (das Merkmal schreibt nur der Sichern-Knopf dieser Linie); die Fassung aus
+ * dem alten Kopf geht nach _fassung. Alles andere ohne _plugin: null, das Modul weist die Datei ab.
+ */
+function bl_sicherung_uebersetzer($daten)
+{
+    if (!is_array($daten) || !isset($daten['_']) || !is_array($daten['_']) || !isset($daten['_']['plugin'])
+        || $daten['_']['plugin'] !== 'ble_scanner_ng') {
+        return null;
+    }
+    $kopf = $daten['_'];
+    unset($daten['_']);
+    if (isset($kopf['fassung']) && is_string($kopf['fassung'])) {
+        $daten['_fassung'] = $kopf['fassung'];
+    }
+    return $daten;
+}
+
+/**
+ * Vor der Pruefung (nach dem Verwerfen unbekannter Unterschluessel), wie bis 1.3.41 bl_ansage_sicherung_vor(): ein
+ * Block tts mit Sprechtoken oder mit unzulaessigem Wert wird unbrauchbar gemacht (die Wertpruefung nennt ihn), sonst
+ * vervollstaendigt, und die geltenden Sprechtoken der Ziele bleiben.
+ */
+function bl_sicherung_vorbehandeln($bereit, $jetzt, $daten = null)
+{
+    if (array_key_exists('tts', $bereit)) {
+        $jt = (is_array($jetzt) && isset($jetzt['tts']) && is_array($jetzt['tts'])) ? $jetzt['tts'] : array();
+        $g = '';
+        $pr = is_array($bereit['tts']) ? ansage_wert_pruefen($bereit['tts'], $g, bl_ansage_modi()) : null;
+        if (!is_array($bereit['tts']) || ansage_sicherung_mangel($bereit['tts']) || $pr === null) {
+            $bereit['tts'] = 'ABGEWIESEN';
         } else {
-            foreach ($d['bindkeys'] as $mac => $v) {
-                $m = bl_mac((string) $mac);
-                $k = is_string($v) ? bl_bindkey_form($v) : '';
-                if ($m === '' || $k === '' || !in_array($m, $macs, true)) {
-                    $falsch('bindkeys', $mac, 20);
-                    continue;
-                }
-                $bk[$m] = $k;
-            }
+            list($tv) = ansage_vervollstaendigen($pr, 'aus');
+            $bereit['tts'] = ansage_sicherung_tokens_behalten($tv, $jt);
         }
     }
-    if (is_array($d) && array_key_exists('irk', $d)) {
-        $irk = array();
-        if (!is_array($d['irk'])) {
-            $falsch('irk', '-', 40);
-        } else {
-            foreach ($d['irk'] as $n => $v) {
-                if (!preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) || !is_string($v) || !preg_match('/^[0-9A-Fa-f]{32}$/', $v)
-                    || !in_array((string) $n, $namen, true)) {
-                    $falsch('irk', $n, 40);
-                    continue;
-                }
-                $irk[(string) $n] = strtolower($v);
-            }
+    return $bereit;
+}
+
+/**
+ * Die Wertpruefung je Schluessel - dieselben Regeln wie das Formular. Die Beanstandung nennt den Schluessel und den
+ * Grund, nie den Wert (bis 1.3.41 stand der Wert gekuerzt im Satz).
+ */
+function bl_sicherung_pruefen($k, $w, $neu = null, $roh = null)
+{
+    if ($k === 'tags') {
+        return bl_sicherung_tags_pruefen($w);
+    }
+    $aw = bl_ansage_wert($k, $w);
+    if ($aw !== null) {
+        return $aw ? '' : bl_t('ANSAGEPLUGIN.M_FEHL');
+    }
+    $e = bl_wert_pruefen((string) $k, $w);
+    return $e[0] ? '' : sprintf(bl_t('TEXT.SICH_WERT'), (string) $k, $e[2]);
+}
+
+/** Die Tags der Datei: jeder einzeln mit bl_tag_pruefen() (wie das Formular), doppelte Kennungen abgewiesen. */
+function bl_sicherung_tags_pruefen($w)
+{
+    if (!is_array($w)) {
+        return bl_t('TEXT.SICH_OHNE_TAGS');
+    }
+    $m = array();
+    $gesehen = array();
+    foreach (array_values($w) as $nr => $t) {
+        list($tag, $grund) = bl_tag_pruefen($t);
+        if ($tag === null) {
+            $m[] = sprintf(bl_t('TEXT.SICH_TAG'), $nr + 1, $grund);
+            continue;
+        }
+        if (isset($gesehen[$tag['kennung']])) {
+            $m[] = sprintf(bl_t('MANGEL.DOPPELT'), $tag['kennung']);
+            continue;
+        }
+        $gesehen[$tag['kennung']] = true;
+    }
+    return $m;
+}
+
+/** Nach bestandener Pruefung: die Tags in der Form, die bl_config_write() schreibt. */
+function bl_sicherung_tags_wandeln($w)
+{
+    $aus = array();
+    foreach (is_array($w) ? array_values($w) : array() as $t) {
+        list($tag) = bl_tag_pruefen($t);
+        if ($tag !== null) {
+            $aus[] = $tag;
         }
     }
-    return array($bk, $irk, $mangel, array_values(array_unique($bean)));
+    return $aus;
+}
+
+/** Teil "bindkeys" (MAC -> 24/32 Hex): jeder Eintrag in der Form von bl_bindkey_form(); die Meldung nennt die MAC, nie den Schluessel. */
+function bl_sicherung_teil_bindkeys($w, $jetzt = null)
+{
+    if (!is_array($w)) {
+        return array(null, array(sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), 'bindkeys', '-')));
+    }
+    $aus = array();
+    $m = array();
+    foreach ($w as $mac => $v) {
+        $mm = bl_mac((string) $mac);
+        $k = is_string($v) ? bl_bindkey_form($v) : '';
+        if ($mm === '' || $k === '') {
+            $m[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), 'bindkeys', bl_kuerzen((string) $mac, 20));
+            continue;
+        }
+        $aus[$mm] = $k;
+    }
+    return array($m ? null : $aus, $m);
+}
+
+/** Teil "irk" (Name -> 32 Hex): Name und Schluessel in der Form von bl_irk_lesen(); die Meldung nennt den Namen, nie den Schluessel. */
+function bl_sicherung_teil_irk($w, $jetzt = null)
+{
+    if (!is_array($w)) {
+        return array(null, array(sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), 'irk', '-')));
+    }
+    $aus = array();
+    $m = array();
+    foreach ($w as $n => $v) {
+        if (!preg_match('/^[A-Za-z0-9_-]{1,40}$/', (string) $n) || !is_string($v) || !preg_match('/^[0-9A-Fa-f]{32}$/', $v)) {
+            $m[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL_FALSCH'), 'irk', bl_kuerzen((string) $n, 40));
+            continue;
+        }
+        $aus[(string) $n] = strtolower($v);
+    }
+    return array($m ? null : $aus, $m);
+}
+
+/**
+ * Die Querpruefung wie bis 1.3.41: die Schwelle mittel nicht ueber nah. Rueckgabe fuer das Modul: Liste von
+ * array(Name, Text). Bind-Keys und IRK ohne Tag in der Datei verwirft seit 1.3.42 das Modul selbst (Regel 2, die
+ * Bloecke 'bindkeys' und 'irk' der Beschreibung nennen nur die Namen der Tags der Datei).
+ */
+function bl_sicherung_quer($neu, $r = null, $daten = null)
+{
+    $aus = array();
+    if (isset($neu['rssi_mittel'], $neu['rssi_nah']) && (int) $neu['rssi_mittel'] > (int) $neu['rssi_nah']) {
+        $aus[] = array('rssi_mittel', bl_t('TEXT.SICH_SCHWELLEN'));
+    }
+    return $aus;
+}
+
+/**
+ * Die Liste "tags" einer Sicherungsdatei (Rohtext, wie ihn das Modul liest; eine UTF-8-BOM wird wie dort entfernt) -
+ * fuer die bekannten Namen der Teile (bl_sicherung_beschreibung()). Keine Liste: leer, dann ist jeder Eintrag der
+ * Teile unbekannt (und die Datei wird ohnehin abgewiesen, "tags" ist Pflicht).
+ */
+function bl_sicherung_dateitags($roh)
+{
+    $roh = (string) $roh;
+    if (substr($roh, 0, 3) === "\xEF\xBB\xBF") {
+        $roh = substr($roh, 3);
+    }
+    $d = json_decode($roh, true);
+    return (is_array($d) && isset($d['tags']) && is_array($d['tags'])) ? $d['tags'] : array();
+}
+
+/** Die Teile beim Sichern: die hinterlegten Schluessel, als Objekt (eine leere Tabelle steht als {} in der Datei). */
+function bl_sicherung_teile_jetzt()
+{
+    return array('bindkeys' => (object) bl_bindkey_lesen(), 'irk' => (object) bl_irk_lesen());
+}
+
+/**
+ * Die Sicherungsdatei als JSON-Text: Kopf (_hinweis, _plugin, _fassung, _stand) und Inhalt baut das Modul. Wuerde
+ * das Zurueckspielen genau diese Datei abweisen, sagt es der Kopf _warnung - nur mit Namen, nie mit Werten;
+ * geliefert wird trotzdem (X-3 wie bisher). '' wenn sich der Text nicht bilden laesst.
+ */
+function bl_sicherung_json()
+{
+    $stand = bl_sicherung_stand();
+    return sicherung_json(sicherung_bauen(bl_sicherung_beschreibung($stand['tags']), $stand, bl_sicherung_teile_jetzt()));
+}
+
+/**
+ * X-3 (Verbesserungsbau 30.09.2026): Bestuende die eigene Sicherung das eigene Zurueckspielen? Geprueft mit dem
+ * Modul (sicherung_selbstpruefung()) - DERSELBEN Pruefung wie beim Zurueckspielen. Rueckgabe: die Namen der
+ * beanstandeten Einstellungen, leer = besteht; nie Werte.
+ */
+function bl_sicherung_eigene_maengel()
+{
+    $stand = bl_sicherung_stand();
+    $b = bl_sicherung_beschreibung($stand['tags']);
+    return sicherung_selbstpruefung($b, sicherung_bauen($b, $stand, bl_sicherung_teile_jetzt()), $stand);
+}
+
+/** Vor dem Speichern, wie bis 1.3.41: der Vermerk ansage_aus_datei steht nach einem Zurueckspielen auf 1. */
+function bl_sicherung_vorbereiten($neu, $jetzt = null, $r = null)
+{
+    $neu['ansage_aus_datei'] = 1;
+    return $neu;
+}
+
+/**
+ * Speichern genau des Stands, den das Modul liefert: die Einstellungen und die Sprachansagen (zurueck in das eine Feld
+ * ansage_block) und die Tags ueber bl_config_write() - samt Zweitschrift -, danach die Teile, die die Datei traegt,
+ * ueber bl_bindkey_schreiben()/bl_irk_schreiben() (ebenfalls samt Zweitschrift). Ein Teil, der sich nicht schreiben
+ * laesst, steht danach in $GLOBALS['bl_sicherung_teilfehler'] (die Meldung nennt ihn, wie bis 1.3.41).
+ */
+function bl_sicherung_speichern($neu, $jetzt = null, $r = null)
+{
+    $GLOBALS['bl_sicherung_teilfehler'] = array();
+    $werte = array();
+    foreach (array_keys(bl_defaults()) as $k) {
+        if ($k !== 'ansage_block' && array_key_exists($k, $neu)) {
+            $werte[$k] = (string) $neu[$k];
+        }
+    }
+    $a = array();
+    foreach (bl_ansage_schluessel() as $k) {
+        if (array_key_exists($k, $neu)) {
+            $a[$k] = $neu[$k];
+        }
+    }
+    $werte['ansage_block'] = base64_encode((string) json_encode($a));
+    $tags = (isset($neu['tags']) && is_array($neu['tags'])) ? $neu['tags'] : array();
+    if (!bl_config_write($werte, $tags)) {
+        return false;
+    }
+    $teile = (is_array($r) && isset($r['teile']) && is_array($r['teile'])) ? $r['teile'] : array();
+    if (isset($teile['bindkeys']) && is_array($teile['bindkeys']) && !bl_bindkey_schreiben($teile['bindkeys'])) {
+        $GLOBALS['bl_sicherung_teilfehler'][] = bl_bindkey_datei();
+    }
+    if (isset($teile['irk']) && is_array($teile['irk']) && !bl_irk_schreiben($teile['irk'])) {
+        $GLOBALS['bl_sicherung_teilfehler'][] = bl_irk_datei();
+    }
+    return true;
+}
+
+/**
+ * Die Paare (Datei, Zweitschrift), die das Modul nach dem Speichern misst: die Konfiguration immer, bindkey.json und
+ * irk.json, wo sie liegen. Nur mit Wurzel (installiert); sonst gibt es keine Zweitschrift.
+ */
+function bl_sicherung_zweitschriften()
+{
+    $p = bl_paths();
+    $aus = array(array($p['config'], bl_zweitschrift_pfad('ble_scanner_ng.cfg')));
+    foreach (array(bl_bindkey_datei() => 'bindkey.json', bl_irk_datei() => 'irk.json') as $f => $n) {
+        if (is_file($f)) {
+            $aus[] = array($f, bl_zweitschrift_pfad($n));
+        }
+    }
+    return $aus;
+}
+
+/**
+ * Wo die Zweitschrift einer Datei des Konfigordners liegt: neben dem Konfigordner,
+ * <home>/config/plugins/<ordner>.backup.<name> - dieselben Namen, die preupgrade.sh anlegt und postinstall.sh
+ * zurueckspielt. '' ohne Wurzel (Archivlage, Pruefung ohne LoxBerry).
+ */
+function bl_zweitschrift_pfad($name)
+{
+    $p = bl_paths();
+    return $p['home'] === '' ? '' : $p['home'] . '/config/plugins/' . $p['plugin'] . '.backup.' . $name;
+}
+
+/**
+ * 1.3.42 (Entscheidung des Hausherrn 18.11.2026: "Jedes Speichern zieht die Zweitschrift nach"): die Zweitschrift
+ * bei JEDEM Schreiben der Datei mitziehen - bis 1.3.41 entstand sie nur in preupgrade.sh, und postinstall.sh spielte
+ * nach einem Verlust den Stand des letzten Updates ein. Geschrieben wird der Inhalt, der eben in die Datei ging
+ * (der Aufrufer hat ihn vollstaendig gebaut), unteilbar und mit 0600 wie das Original (bl_datei_schreiben()). Ohne
+ * Wurzel: null (nicht anwendbar). Scheitert es, steht eine Zeile im Protokoll; die Datei selbst ist geschrieben.
+ */
+function bl_zweitschrift_ziehen($name, $inhalt)
+{
+    $z = bl_zweitschrift_pfad($name);
+    if ($z === '') {
+        return null;
+    }
+    if (bl_datei_schreiben($z, $inhalt, 0600)) {
+        return true;
+    }
+    bl_ansage_zeile('Zweitschrift ' . $name . ' liess sich nicht schreiben.');
+    return false;
 }
 
 /**
@@ -3648,28 +3817,6 @@ function bl_schluesseldateien_kaputt()
     }
     return $aus;
 }
-
-/**
- * Wuerde die eigene Sicherung das eigene Zurueckspielen bestehen? (X-3,
- * Verbesserungsbau 30.09.2026). Gebaut wie beim Sichern, geprueft mit
- * DERSELBEN Funktion wie beim Zurueckspielen. Rueckgabe: die Namen der
- * beanstandeten Einstellungen bzw. Tags (leer = alles in Ordnung), nie Werte.
- * Anlass: ein Wert, der von Hand oder aus einer Vorfassung in der Datei
- * steht, liess sich sichern, aber nicht zurueckspielen - das merkte man erst
- * beim Umzug.
- */
-function bl_rueckspiel_altwerte($cfg, $tags)
-{
-    $js = json_encode(bl_sicherung_bauen($cfg, $tags),
-                      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
-    if ($js === false) {
-        return array('_');
-    }
-    $namen = array();
-    bl_sicherung_lesen($js, $namen);
-    return $namen;
-}
-
 
 /**
  * Die Abo-Datei des MQTT-Gateways (seit 1.3.20, Pruefung 29.09.2026, MQTT 6;
@@ -4210,7 +4357,8 @@ function bl_irk_lesen()
     return $aus;
 }
 
-/** Schreiben mit 0600 (Rechte vor Inhalt, atomar). Leere Tabelle: Datei bleibt mit {} stehen. */
+/** Schreiben mit 0600 (Rechte vor Inhalt, atomar). Leere Tabelle: Datei bleibt mit {} stehen. Seit 1.3.42 samt
+ *  Zweitschrift <ordner>.backup.irk.json (bis 1.3.41 nur in preupgrade.sh). */
 function bl_irk_schreiben($tab)
 {
     $f = bl_irk_datei();
@@ -4218,7 +4366,12 @@ function bl_irk_schreiben($tab)
         return false;
     }
     ksort($tab);
-    return bl_datei_schreiben($f, json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n", 0600);
+    $inhalt = json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n";
+    if (!bl_datei_schreiben($f, $inhalt, 0600)) {
+        return false;
+    }
+    bl_zweitschrift_ziehen('irk.json', $inhalt);
+    return true;
 }
 
 /** Anzeige im Formular: nie der Schluessel und seit 1.3.29 auch keine Ziffern daraus (Gruppe 33, E-E5/N6) -
@@ -5143,7 +5296,8 @@ function bl_bindkey_lesen()
     return $aus;
 }
 
-/** Schreiben mit 0600 (Rechte vor Inhalt, atomar), Zweitschrift macht preupgrade.sh. Leere Tabelle: {}. */
+/** Schreiben mit 0600 (Rechte vor Inhalt, atomar). Leere Tabelle: {}. Seit 1.3.42 samt Zweitschrift
+ *  <ordner>.backup.bindkey.json bei jedem Speichern (bis 1.3.41 machte sie nur preupgrade.sh). */
 function bl_bindkey_schreiben($tab)
 {
     $f = bl_bindkey_datei();
@@ -5151,7 +5305,12 @@ function bl_bindkey_schreiben($tab)
         return false;
     }
     ksort($tab);
-    return bl_datei_schreiben($f, json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n", 0600);
+    $inhalt = json_encode((object) $tab, JSON_PRETTY_PRINT) . "\n";
+    if (!bl_datei_schreiben($f, $inhalt, 0600)) {
+        return false;
+    }
+    bl_zweitschrift_ziehen('bindkey.json', $inhalt);
+    return true;
 }
 
 /** Anzeige an der Tag-Zeile: nie Ziffern (Entscheidung "nie in Ausgabe"). */

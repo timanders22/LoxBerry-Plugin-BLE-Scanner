@@ -803,15 +803,13 @@ if ($bl_ist_post && isset($_POST['save_mqtt'])) {
 
 /* ---------------- Einstellungen sichern ----------------
  *
- * BERICHTIGT IN 1.3.20 (Pruefung 29.09.2026, C1/O1). Bis 1.3.19 stand hier
- * json_encode(bl_cfg()) - bl_cfg() verlangt zwei Argumente, jeder Druck endete
- * mit "Too few arguments" und HTTP 500, seit 1.3.6 kam nie eine Datei heraus.
- * Der Kommentar darueber versprach ausserdem ein Aktionstoken, das diese Linie
- * gar nicht fuehrt. Jetzt: die ganze Konfiguration, Werte UND Tags, mit einem
- * lesbaren Kopf unter "_" (bl_sicherung_bauen()). Zugangsdaten gibt es in
- * dieser Linie nicht; die Datei traegt aber MAC-Adressen und die Namen der
- * ueberwachten Personen - eine Anwesenheitsliste, und der Hinweis am Knopf
- * sagt das. Ein Download endet ohne Umleitung. */
+ * Seit 1.3.42 ueber das gemeinsame Sicherungsmodul (bl_sicherung_json(), Kennzeichen ble_scanner_ng wie bisher):
+ * lesbarer Kopf _hinweis/_plugin/_fassung/_stand, alle Einstellungen, die Tags, die Sprachansagen ohne Sprechtoken
+ * und die Schluessel aus bindkey.json und irk.json. Bis 1.3.41 baute bl_sicherung_bauen() die Datei mit einem Kopf
+ * als Feld unter "_"; solche Dateien nimmt das Zurueckspielen weiter an (bl_sicherung_uebersetzer()). Die Datei traegt
+ * MAC-Adressen und die Namen der ueberwachten Personen - eine Anwesenheitsliste -, und der Hinweis am Knopf sagt das.
+ * X-3 wie bisher: wuerde das eigene Zurueckspielen die Datei abweisen, steht es im Kopf _warnung (nur Namen). Ein
+ * Download endet ohne Umleitung. */
 // 1.3.38 (K7b): ist bindkey.json oder irk.json vorhanden, aber kein lesbares JSON, wird das Sichern abgewiesen. Bis
 // 1.3.37 stand dafuer still {} in der Sicherung - sie sah vollstaendig aus und haette beim Zurueckspielen die Schluessel
 // geloescht. Eine wirklich leere Tabelle bleibt {} (vollstaendiger Stand).
@@ -820,17 +818,8 @@ if ($bl_sk_kaputt) {
     $bl_error = sprintf(bl_t('TEXT.SICH_SCHLUESSELDATEI'), bl_e(implode(', ', $bl_sk_kaputt)));
     $bl_tab = 'tab-settings';
 } elseif ($bl_ist_post && isset($_POST['bl_sichern'])) {
-    // X-3 (Verbesserungsbau 30.09.2026): besteht ein gespeicherter Wert das
-    // eigene Zurueckspielen nicht, steht die Warnung im Kopf der Datei (nur
-    // Namen). Geliefert wird die Sicherung trotzdem vollstaendig.
-    $bl_sich = bl_sicherung_bauen($bl_cfg, $bl_tags);
-    $bl_sich_warn = bl_rueckspiel_altwerte($bl_cfg, $bl_tags);
-    if ($bl_sich_warn) {
-        $bl_sich['_']['warnung'] = sprintf(bl_t('TEXT.SICH_ALTWERTE_KOPF'), implode(', ', $bl_sich_warn));
-    }
-    $bl_js = json_encode($bl_sich,
-        JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($bl_js !== false) {
+    $bl_js = bl_sicherung_json();
+    if ($bl_js !== '') {
         while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/json; charset=utf-8');
         header('Content-Disposition: attachment; filename="ble_einstellungen_'
@@ -839,85 +828,74 @@ if ($bl_sk_kaputt) {
         echo $bl_js;
         exit;
     }
-    $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
+    $bl_error = bl_e(bl_t('TEXT.SICH_SCHREIBFEHLER'));
     $bl_tab = 'tab-settings';
 }
 
 /* ---------------- Einstellungen zurueckspielen ----------------
  *
- * is_uploaded_file() ZUERST: ohne diese Pruefung liesse sich jede Datei des
- * Servers unterschieben. Dann die Groessengrenze - eine Sicherung dieses
- * Plugins ist wenige Kilobyte gross; alles darueber wird gar nicht gelesen.
- *
- * BERICHTIGT IN 1.3.20 (C2/C3/O2/O13): bis 1.3.19 rief der Zweig
- * bl_config_write() mit EINEM Argument - "Too few arguments", das
- * Zurueckspielen wirkte nie. Und haette es gewirkt, haette es jeden Wert
- * ungeprueft uebernommen und alle Tags geloescht. Jetzt: jeder Wert mit den
- * Regeln des Formulars, die Tags mit, eine halb gueltige Datei aendert
- * nichts, danach wird der Dienst nachgezogen und gesagt, was mit ihm geschah.
- * Die Ablehnungsgruende stehen EINMAL da (bis 1.3.19 zweimal: roh im
- * Fehlerkasten und maskiert in der Beanstandungsliste). */
+ * Seit 1.3.42 prueft den Eingang das gemeinsame Sicherungsmodul (sicherung_eingang()) - in jeder Linie gleich: zuerst
+ * der Haken zurueck_ok (ohne ihn wird nichts gelesen und nichts geaendert), dann is_uploaded_file() und die
+ * Groessengrenze des Moduls; erst danach wird die Datei gelesen. Lesen, Pruefen, Speichern, Zweitschrift messen und
+ * Protokollzeile macht sicherung_zurueckspielen(): Unbekanntes wird verworfen und mit Namen genannt, ein leerer Wert
+ * laesst den bisherigen stehen, eine halb gueltige Datei aendert GAR NICHTS (alle Beanstandungen gesammelt).
+ * Gespeichert wird genau der Stand, den das Modul liefert (bl_sicherung_speichern(): Konfiguration, Bind-Keys und
+ * IRK, jede Datei samt Zweitschrift). Danach wie bis 1.3.41: das MQTT-Abo nachziehen, den Dienst neu starten, wenn er
+ * lief, und sagen, was mit ihm geschah (Regeln/05). Bis 1.3.41 stand hier eine eigene Lesefunktion ohne Haken, und ein
+ * unbekannter Schluessel wies die ganze Datei ab. */
 if ($bl_ist_post && isset($_POST['bl_zurueck'])) {
     $bl_tab = 'tab-settings';
-    if (!isset($_FILES['bl_sicherung']) || !is_array($_FILES['bl_sicherung'])
-        || !isset($_FILES['bl_sicherung']['tmp_name'])
-        || !is_string($_FILES['bl_sicherung']['tmp_name'])
-        || !@is_uploaded_file($_FILES['bl_sicherung']['tmp_name'])) {
-        $bl_error = bl_t('TEXT.SICH_KEINE_DATEI');
-    } elseif ((int) $_FILES['bl_sicherung']['size'] > 262144) {
-        $bl_error = bl_t('TEXT.SICH_ZU_GROSS');
+    $bl_sb = bl_sicherung_beschreibung();
+    list($bl_sroh, $bl_sab) = sicherung_eingang($bl_sb, $_POST, $_FILES, 'bl_sicherung');
+    /* Die Meldungen als Klartext: diese Seite maskiert jede Meldung bei der Ausgabe (bl_e()). */
+    $bl_klar = array('e' => function ($s) { return $s; });
+    if ($bl_sab !== null) {
+        $bl_sm = sicherung_meldungen($bl_klar + $bl_sb, $bl_sab);
     } else {
-        $bl_roh_sich = (string) @file_get_contents($_FILES['bl_sicherung']['tmp_name']);
-        list($bl_neu, $bl_gruende, $bl_n, $bl_neu_tags) = bl_sicherung_lesen($bl_roh_sich);
-        // 1.3.38 (K7a): Bind-Keys und IRK werden VOR bl_config_write() gelesen; jeden unpassenden Eintrag beanstandet
-        // schon bl_sicherung_lesen(). Bis 1.3.37 kamen sie erst nach dem Schreiben, und ein unpassender Eintrag wurde
-        // mit Hinweis uebergangen - die Datei war dann halb uebernommen. Die zweite Abfrage hier faellt geschlossen aus.
-        $bl_sbk = null;
-        $bl_sirk = null;
-        if ($bl_neu !== null) {
-            list($bl_sbk, $bl_sirk, $bl_shin) = bl_sicherung_schluessel($bl_roh_sich, $bl_neu_tags);
-            if ($bl_shin) {
-                $bl_neu = null;
-                $bl_gruende = $bl_shin;
-            }
+        // Die bekannten Namen der Teile bindkeys/irk sind die Tags DIESER Datei (bl_sicherung_beschreibung()).
+        $bl_sb = bl_sicherung_beschreibung(bl_sicherung_dateitags($bl_sroh));
+        $bl_sb['vorbereiten'] = 'bl_sicherung_vorbereiten';
+        $bl_sb['speichern'] = 'bl_sicherung_speichern';
+        if ($bl_p['home'] !== '') {
+            // 1.3.42: die Zweitschriften neben dem Konfigordner (bl_sicherung_zweitschriften())
+            $bl_sb['zweitschrift'] = 'bl_sicherung_zweitschriften';
         }
-        if ($bl_neu === null) {
-            /* ALLE Beanstandungen, nicht nur die erste - und geaendert wird
-             * nichts. Die Gruende sind in bl_sicherung_lesen() maskiert. */
-            $bl_error = bl_t('TEXT.SICH_ABGELEHNT') . '<ul style="margin:6px 0 0 18px;"><li>'
-                      . implode('</li><li>', $bl_gruende) . '</li></ul>';
-        } elseif (bl_config_write($bl_neu, $bl_neu_tags)) {
-            $bl_saved = true;
-            require_once __DIR__ . '/bl_test.php';
-            $bl_hinweis = sprintf(bl_t('TEXT.SICH_UEBERNOMMEN'), $bl_n, count($bl_neu_tags));
-            // Gruppe 33 (E-E6): Bind-Keys und IRK aus der Sicherung (oben gelesen); fehlt ein Abschnitt (1.3.28), bleibt
-            // der Bestand.
-            if ($bl_sbk !== null && !bl_bindkey_schreiben($bl_sbk)) {
-                $bl_gescheitert[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_bindkey_datei());
+        $bl_sb['nachziehen'] = function ($neu, $vorher, $r) {
+            $h = array();
+            foreach (isset($GLOBALS['bl_sicherung_teilfehler']) && is_array($GLOBALS['bl_sicherung_teilfehler'])
+                     ? $GLOBALS['bl_sicherung_teilfehler'] : array() as $f) {
+                $h[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), $f);
             }
-            if ($bl_sirk !== null && !bl_irk_schreiben($bl_sirk)) {
-                $bl_gescheitert[] = sprintf(bl_t('TEXT.SCHREIBFEHLER'), bl_irk_datei());
-            }
-            $bl_hinweis .= ' ' . sprintf(bl_t('TEXT.SICH_SCHLUESSEL'), $bl_sbk === null ? '-' : count($bl_sbk),
-                                         $bl_sirk === null ? '-' : count($bl_sirk));
-            if ($bl_neu['mqtt'] === '1') {
-                list($bl_abo_pfad, $bl_abo_da) = bl_abo_datei($bl_neu['themenpraefix'], true);
-                if (!$bl_abo_da) {
-                    $bl_gescheitert[] = sprintf(bl_t('TEXT.ABO_DATEI_FEHLER'), $bl_abo_pfad);
+            $h[] = sprintf(bl_t('TEXT.SICH_SCHLUESSEL'),
+                           isset($r['teile']['bindkeys']) && is_array($r['teile']['bindkeys']) ? count($r['teile']['bindkeys']) : '-',
+                           isset($r['teile']['irk']) && is_array($r['teile']['irk']) ? count($r['teile']['irk']) : '-');
+            if (isset($neu['mqtt']) && $neu['mqtt'] === '1') {
+                list($pfad, $da) = bl_abo_datei($neu['themenpraefix'], true);
+                if (!$da) {
+                    $h[] = sprintf(bl_t('TEXT.ABO_DATEI_FEHLER'), $pfad);
                 }
             }
             // Den Dienst nachziehen und sagen, was mit ihm geschah (Regeln/05).
             if (bl_dienst_pid() > 0) {
                 bl_dienst('restart');
-                $bl_hinweis .= ' ' . (bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET')
-                                                      : bl_t('TEXT.DIENST_LAEUFT_NICHT'));
+                $h[] = bl_dienst_pid() ? bl_t('TEXT.DIENST_NEU_GESTARTET') : bl_t('TEXT.DIENST_LAEUFT_NICHT');
             } else {
-                $bl_hinweis .= ' ' . bl_t('TEXT.DIENST_WAR_AUS');
+                $h[] = bl_t('TEXT.DIENST_WAR_AUS');
             }
+            return $h;
+        };
+        $bl_sb['log'] = 'bl_ansage_zeile';
+        $bl_sr = sicherung_zurueckspielen($bl_sb, $bl_sroh);
+        $bl_sm = sicherung_meldungen($bl_klar + $bl_sb, $bl_sr);
+        if ($bl_sr['gespeichert']) {
+            $bl_saved = true;
+            require_once __DIR__ . '/bl_test.php';
             list($bl_cfg, $bl_tags, $bl_altformat) = bl_config_read();
-        } else {
-            $bl_error = bl_t('TEXT.SICH_SCHREIBFEHLER');
         }
+    }
+    foreach ($bl_sm['fehler'] as $bl_x) { $bl_gescheitert[] = $bl_x; }
+    if ($bl_sm['hinweise']) {
+        $bl_hinweis = implode(' ', $bl_sm['hinweise']);
     }
 }
 
@@ -1806,9 +1784,9 @@ foreach (array_merge(xc_regionen(), array('alle')) as $bl_cr) { ?>
 <div class="sm-hinweis"><?= bl_t('TEXT.SICH_ERKLAERUNG') ?></div>
 <div class="sm-warnung"><?= bl_t('TEXT.SICH_WARNUNG') ?></div>
 <?php /* X-3 (Verbesserungsbau 30.09.2026): der GESPEICHERTE Stand, geprueft
-         wie beim Zurueckspielen. Gelb - die Sicherung wird trotzdem geliefert. */
-list($bl_sc, $bl_st, ) = bl_config_read();
-$bl_sich_warn = bl_rueckspiel_altwerte($bl_sc, $bl_st);
+         wie beim Zurueckspielen - seit 1.3.42 mit dem Sicherungsmodul
+         (bl_sicherung_eigene_maengel()). Gelb - die Sicherung wird trotzdem geliefert. */
+$bl_sich_warn = bl_sicherung_eigene_maengel();
 if ($bl_sich_warn) { ?>
 <div class="sm-warnung" id="bl-sich-altwerte"><?= bl_e(sprintf(bl_t('TEXT.SICH_ALTWERTE'), implode(', ', $bl_sich_warn))) ?></div>
 <?php } ?>
@@ -1826,6 +1804,7 @@ if ($bl_sich_warn) { ?>
     <?php echo bl_fmt(); ?>
     <input data-role="none" type="hidden" name="activetab" value="tab-settings">
     <input data-role="none" type="file" name="bl_sicherung" accept=".json">
+    <?= sicherung_haken_zeile(bl_sicherung_beschreibung()) ?>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="bl_zurueck" value="1"><?= bl_t('TEXT.K_ZURUECK') ?></button>
   </form>
 </div>
