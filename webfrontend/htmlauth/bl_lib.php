@@ -5,6 +5,7 @@ require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der
  * laufen darueber, in allen Linien gleich (Auftrag des Hausherrn 12.11.2026); diese Linie uebergibt nur ihre
  * Beschreibung (bl_sicherung_beschreibung()). Antwortet als Einstieg mit 403. */
 require_once __DIR__ . '/sicherung.php';
+require_once __DIR__ . '/uhrabgleich.php';   // gemeinsames Uhrmodul (Frage 95), Abschrift von Werkzeuge/gemeinsam/uhrabgleich.php
 /**
  * BLE-Scanner NG - gemeinsame Hilfsfunktionen
  *

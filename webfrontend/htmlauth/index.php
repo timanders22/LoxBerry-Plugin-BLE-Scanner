@@ -2141,7 +2141,8 @@ if (is_array($bl_zeilen)) {
 <table class="sm-tbl">
 <tr><th style="width:44px;"></th><th style="width:44%;"><?= bl_e(bl_t('TEXT.SP_PRUEFUNG')) ?></th><th><?= bl_e(bl_t('TEXT.SP_ANMERKUNG')) ?></th></tr>
 <?php foreach ($bl_zeilen as $z) {
-    if ($z['zustand'] === true) { $kl = 'sm-zeile-ok'; $zeichen = '&#10003;'; }
+    if (isset($z['uhr'])) { $kl = ''; $zeichen = uhr_zeichen($z['uhr']); }   // Uhrmodul (Frage 95)
+    elseif ($z['zustand'] === true) { $kl = 'sm-zeile-ok'; $zeichen = '&#10003;'; }
     elseif ($z['zustand'] === false) { $kl = 'sm-zeile-rot'; $zeichen = '&#10007;'; }
     else { $kl = 'sm-zeile-off'; $zeichen = '&ndash;'; } ?>
 <tr><td class="<?= $kl ?>" style="text-align:center;font-size:1.2em;"><?= $zeichen ?></td>

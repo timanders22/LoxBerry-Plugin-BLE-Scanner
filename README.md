@@ -1,11 +1,15 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.43
+Version 1.3.44
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.44
+
+- **Neu – Prüfzeile „Ist die Systemuhr synchron?“ (gemeinsames Uhrmodul):** Der Reiter „Test“ vergleicht die Systemuhr des LoxBerry mit der Kopfzeile Date der Antworten von der Xiaomi-Cloud und meldet nur: Haken bis 30 s Abweichung, gelber Punkt darüber, ohne Messung „nicht feststellbar“. `timedatectl` steht nur als Hinweis dabei. Die letzte Abweichung liegt in `data/plugins/ble_scanner_ng/uhr.json`; dafür liest das Plugin bei den Anfragen beim Holen der Schlüssel (gemeinsames Modul xiaomi_cloud.php 1.0.2) die Kopfzeile Date mit, am Abruf selbst ändert sich nichts. Die Cloud wird nur beim Holen der Schlüssel gefragt; eine Messung älter als 30 Tage gilt deshalb als „nicht feststellbar“. Ob eine falsche Uhr die Anmeldung bricht, ist nicht gemessen. Gemessen auf dem Arbeitsrechner: Selbsttest des Moduls unter PHP 7.4, 8.4 und 8.5 und mit Python, Kreuzprobe PHP/Python, Syntax aller geänderten Dateien; die Messung gegen die echte Cloud und am Gerät ist nicht gemessen.
 
 ## Neu in 1.3.43
 

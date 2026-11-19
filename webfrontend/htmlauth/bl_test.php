@@ -1371,6 +1371,14 @@ function bl_pruefzeilen($cfg, $tags)
                                      round($gr / 1024), round($kappung / 1024)));
     }
 
+    /* Gemeinsames Uhrmodul (Frage 95): Systemuhr gegen die Xiaomi-Cloud (nur beim Holen der Schluessel gefragt,
+     * deshalb Hoechstalter 30 Tage, Entscheidung 106) - nur melden (null = offen). */
+    list($uhr_s, $uhr_t) = uhr_pruefzeile(array('ordner' => $p['datadir'], 'dienst' => 'Xiaomi', 't' => 'bl_t',
+        'hoechstalter_s' => 2592000));
+    $uhr_z = bl_zeile(uhr_frage(array('t' => 'bl_t')), $uhr_s === 1 ? true : null, $uhr_t);
+    $uhr_z['uhr'] = $uhr_s;
+    $zeilen[] = $uhr_z;
+
     return $zeilen;
 }
 
