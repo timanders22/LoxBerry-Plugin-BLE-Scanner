@@ -566,6 +566,16 @@ def haus_leeren():
     return 0
 
 
+def klima_lesen_cli():
+    """Fuer den Reiter Test (1.3.45, --klima-lesen): die zurueckbehaltenen haus/klima/... am Broker lesen, nichts
+    loeschen. Eine Zeile JSON {rc, grund, werte}; rc 0 gelesen, 2 nicht zu fragen. Rueckgabe 0 - die Aussage steht
+    im JSON."""
+    erg = broker_leeren(gem.KLIMA_STAMM, lambda _rest: True, warten=1.0, nur_lesen=True)
+    print(json.dumps({"rc": erg["rc"], "grund": erg["grund"], "werte": erg["werte"]}, ensure_ascii=False,
+                     sort_keys=True))
+    return 0
+
+
 class Mqtt:
     """Duenne Huelle um paho-mqtt. Faellt still aus, wenn Bibliothek oder
     Gateway fehlen - der HTTP-Weg funktioniert dann weiter.
@@ -1180,6 +1190,17 @@ class Dienst:
         self.haus_eigen = self._haus_merker_lesen()
         self.haus_zaehler = 0
         self.haus_anstoss = 0.0
+        # 1.3.45: haus/klima - Ruecklesen am Broker (Konfliktpruefung), Faden, voller Satz, Lebenszeichen, Lage
+        self.klima_lesen = {"um": None, "versuch": None, "rc": None, "grund": "", "werte": {}, "basen": set()}
+        self.klima_faden = None
+        self.klima_voll_um = None
+        self.klima_zaehler = 0
+        self.klima_zaehler_um = None
+        self.klima_raeumen_um = None
+        self.klima_halten = set()
+        self.klima_pruefe = []
+        self.klima_konflikte = []
+        self.klima_lage_zuordnung = ([], [], [])
         # V11: Kalibrierungsergebnis einmal senden (E5)
         self.kalibrierung_gesendet = None
 
@@ -1432,10 +1453,16 @@ class Dienst:
     def haus_senden(self, personen, erzwingen=False):
         """Am Ende von auswerten(): retained Haus-Themen bei Aenderung, Lebenszeichen alle 30 s."""
         soll = self.haus_sollstand(personen)
-        self.haus_soll = soll
+        # 1.3.45: die Klima-Themen gehoeren zum Sollstand (sonst raeumte _haus_abraeumen() sie gleich wieder ab),
+        # gehen aber nach eigener Regel hinaus (klima_senden).
+        klima = self.klima_sollstand()
+        self.haus_soll = dict(soll)
+        self.haus_soll.update(klima)
         # Erst nach dem ersten Sollstand darf mqtt_aufraeumen() abraeumen - sonst loeschte der
         # Aufraeumfaden nach der Anmeldung alle eigenen Themen, bevor auswerten() lief.
         self.haus_bereit = True
+        if self.cfg.get("mqtt", "1") != "1":
+            self.klima_nachraeumen()
         if self.cfg.get("mqtt", "1") != "1" or not self.mqtt.client:
             return
         neu_eigen = False
@@ -1460,12 +1487,243 @@ class Dienst:
                                          (self.haus_zaehler + 1) % 1000, retain=False):
                     self.haus_zaehler = (self.haus_zaehler + 1) % 1000
                     self.gesendet_um["\0haus/zaehler"] = time.monotonic()
+        self.klima_senden(klima)
         # Eigene Themen, die nicht mehr gelten: mit Nachlesen abraeumen (mqtt_aufraeumen, Schritt 4),
         # hoechstens einmal je Minute anstossen.
         if self.haus_eigen - set(soll) and self.mqtt.verbunden \
                 and time.time() - self.haus_anstoss >= 60:
             self.haus_anstoss = time.time()
             self.mqtt_aufraeumen_anstossen()
+
+    # -- 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15) --------------------------
+    #
+    # Ab Werk aus (haus_klima=0). Je Tag waehlt der Anwender mit der Zusatzangabe klima=<name>; gemeldet wird nur ein
+    # aktiver Tag, dessen erkanntes Format Temperatur oder Feuchte kennt (dieselbe Regel wie _messwerte()). Die Werte
+    # kommen aus den gueltigen Messungen (zustand["mess"]), nicht aus dem letzten Paket. Bauart der Ecowitt-Weiche
+    # 0.9.38 (ew_haus_werte/_auswahl/_fremd): Felder bei Aenderung und alle 30 min voll, zeit nur zusammen mit einem
+    # Feld desselben Namens, anbieter bei Aenderung und mit dem vollen Satz. Einen Namen, den diese Installation noch
+    # nie gesendet hat, sendet sie erst, wenn ein Ruecklesen am Broker (broker_leeren(..., nur_lesen=True), eigener
+    # Faden) zeigt, dass kein anderer Anbieter ihn haelt. Abgeraeumt wird ueber die Merkliste wie haus/anwesenheit
+    # (_haus_abraeumen, mit Nachlesen); bei MQTT aus in klima_nachraeumen().
+
+    def klima_zuordnung(self):
+        """Rueckgabe (liste, beanstandet, wartend): liste = [(tag, name, groessen)] in der Reihenfolge der
+        Konfiguration; beanstandet = [{tag, name, grund}] mit grund name (taugt nicht), doppelt (schon vergeben),
+        format (kein Thermometer) - geschlossen: dieser Tag sendet nicht; wartend = [{tag, name}] ohne erkanntes
+        Format (noch kein Paket seit dem Einrichten)."""
+        liste, schlecht, wartend, belegt = [], [], [], set()
+        if self.cfg.get("haus_klima", "0") != "1":
+            return liste, schlecht, wartend
+        for tag in self.tags:
+            name = str((tag.get("opt") or {}).get("klima", "") or "")
+            if tag.get("aktiv") != "1" or name == "":
+                continue
+            wer = tag.get("name") or tag.get("kennung", "")
+            if not gem.klima_name_taugt(name):
+                schlecht.append({"tag": wer, "name": name, "grund": "name"})
+                continue
+            if name in belegt:
+                schlecht.append({"tag": wer, "name": name, "grund": "doppelt"})
+                continue
+            art = self.formate.get(tag["kennung"], "")
+            groessen = bl_beacon.FORMAT_GROESSEN.get(art, ())
+            if art == "":
+                wartend.append({"tag": wer, "name": name})
+                continue
+            if "temperatur" not in groessen and "feuchte" not in groessen:
+                schlecht.append({"tag": wer, "name": name, "grund": "format"})
+                continue
+            belegt.add(name)
+            liste.append((tag, name, groessen))
+        return liste, schlecht, wartend
+
+    def klima_sollstand(self):
+        """{thema: wert} der Klima-Themen, die JETZT gelten (Text, gerundet). Ein Feld, dessen letzte brauchbare
+        Messung aelter als eine Stunde ist, geht ohne Aussage hinaus (-999 bzw. -1); zeit bleibt der echte Zeitpunkt.
+        self.klima_halten: Namen ohne jede Messung seit dem Dienststart, solange die Stunde danach laeuft - sie gehen
+        noch nicht hinaus (ein zurueckbehaltener Wert traegt seine eigene zeit, ein Abnehmer verwirft ihn nach einer
+        Stunde selbst), bleiben aber im Sollstand, damit _haus_abraeumen() sie nicht loescht."""
+        liste, schlecht, wartend = self.klima_zuordnung()
+        jetzt_m, jetzt_w = time.monotonic(), time.time()
+        soll, halten, namen = {}, set(), []
+        for tag, name, groessen in liste:
+            basis = gem.KLIMA_STAMM + "/" + name + "/"
+            mess = (self.tagzustand.get(tag["kennung"]) or {}).get("mess") or {}
+            letzte, felder = None, []
+            for feld, stellen, ohne, unten, oben in gem.KLIMA_FELDER:
+                if feld not in groessen:
+                    continue
+                wert = ohne
+                w = mess.get(feld)
+                x = gem.klima_plausibel(w[0] if w else None, unten, oben)
+                if x is not None:
+                    letzte = w[1] if letzte is None else max(letzte, w[1])
+                    if jetzt_m - w[1] <= gem.KLIMA_STUMM:
+                        wert = gem.klima_zahl(x, stellen)
+                        felder.append(feld)
+                soll[basis + feld] = wert
+            if letzte is None and jetzt_m - self.messwert_start < gem.KLIMA_STUMM:
+                halten.add(basis)
+            zeit = int(round(jetzt_w - (jetzt_m - letzte))) if letzte is not None else -1
+            soll[basis + "zeit"] = str(zeit)
+            soll[basis + "anbieter"] = gem.KLIMA_ANBIETER
+            namen.append({"name": name, "tag": tag.get("name") or tag.get("kennung", ""), "felder": felder,
+                          "zeit": zeit})
+        self.klima_halten = halten
+        self.klima_lage_zuordnung = (schlecht, wartend, namen)
+        return soll
+
+    def klima_senden(self, soll):
+        """Aus haus_senden(): Klima-Themen bei Aenderung und alle 30 min voll, das Lebenszeichen je Minute."""
+        jetzt = time.monotonic()
+        if not soll or not self.mqtt.verbunden:
+            self.klima_pruefe = []
+            return
+        basen = sorted({t[:t.rindex("/") + 1] for t in soll})
+        with self.sperre:
+            les = dict(self.klima_lesen)
+        gueltig = les["rc"] == 0 and les["um"] is not None and jetzt - les["um"] <= gem.KLIMA_LESEN_GILT
+        neu = {b for b in basen if b not in self.klima_halten
+               and not any(t.startswith(b) for t in self.haus_eigen)}
+        fehlt = {b for b in neu if not (gueltig and b in les["basen"])}
+        if (fehlt or not gueltig) and (les["versuch"] is None or jetzt - les["versuch"] >= gem.KLIMA_LESEN_ABSTAND
+                                       or (fehlt and les["rc"] == 0)):
+            self._klima_lesen_anstossen(basen)
+        voll = self.neumeldung_laeuft or self.klima_voll_um is None or jetzt - self.klima_voll_um >= gem.KLIMA_VOLL
+        sel, mit = {}, set()
+        for t, w in soll.items():
+            b, feld = t[:t.rindex("/") + 1], t[t.rindex("/") + 1:]
+            if b in self.klima_halten or feld in ("zeit", "anbieter"):
+                continue
+            if voll or self.haus_stand.get(t) != w:
+                sel[t] = w
+                mit.add(b)
+        for t, w in soll.items():
+            b, feld = t[:t.rindex("/") + 1], t[t.rindex("/") + 1:]
+            if b in self.klima_halten:
+                continue
+            if feld == "zeit" and b in mit:
+                sel[t] = w
+            elif feld == "anbieter" and (voll or self.haus_stand.get(t) != w):
+                sel[t] = w
+        if fehlt:
+            sel = {t: w for t, w in sel.items() if t[:t.rindex("/") + 1] not in fehlt}
+        sel, konflikte = self._klima_fremd(sel, les["werte"] if gueltig else {})
+        felder_da = {t[:t.rindex("/") + 1] for t in sel if t[t.rindex("/") + 1:] not in ("zeit", "anbieter")}
+        sel = {t: w for t, w in sel.items() if not (t.endswith("/zeit") and t[:t.rindex("/") + 1] not in felder_da)}
+        if gueltig:
+            # Zur Anzeige: ein fremder Name unter einem eigenen Thema (ein anderes Plugin schreibt dazwischen).
+            for b in basen:
+                anb = les["werte"].get(b + "anbieter", "")
+                if anb not in ("", gem.KLIMA_ANBIETER) and (b + "anbieter") in self.haus_eigen:
+                    konflikte.append({"thema": b + "anbieter", "wert": anb[:40]})
+        neu_eigen, alle = False, True
+        for t, w in sorted(sel.items()):
+            if self.mqtt.senden_haus(t, w, retain=True):
+                self.haus_stand[t] = w
+                if t not in self.haus_eigen:
+                    self.haus_eigen.add(t)
+                    neu_eigen = True
+            else:
+                alle = False
+        if neu_eigen:
+            self._haus_merker_schreiben()
+        if voll and alle:
+            self.klima_voll_um = jetzt
+        if self.klima_zaehler_um is None or jetzt - self.klima_zaehler_um >= gem.KLIMA_ZAEHLER_ABSTAND \
+                or self.neumeldung_laeuft:
+            n = (self.klima_zaehler + 1) % 1000
+            if self.mqtt.senden_haus(gem.KLIMA_STAMM + "/zaehler/" + gem.KLIMA_ANBIETER, n, retain=False):
+                self.klima_zaehler = n
+                self.klima_zaehler_um = jetzt
+        if konflikte != self.klima_konflikte and konflikte:
+            log.warning("haus/klima: nicht gesendet, ein anderer Anbieter haelt den Wert: %s",
+                        ", ".join("%s = %s" % (z["thema"], z["wert"] or "-") for z in konflikte))
+        self.klima_konflikte = konflikte
+        self.klima_pruefe = sorted(fehlt)
+
+    def _klima_fremd(self, sel, gelesen):
+        """Wie ew_haus_fremd() der Ecowitt-Weiche: traegt <name>/anbieter einen fremden Namen und ist das Thema nicht
+        gemerkt, geht von diesem Namen nichts hinaus; traegt es den eigenen, gelten seine Themen als eigene; sonst
+        bleibt jedes nicht gemerkte Thema mit einem zurueckbehaltenen Wert stehen. Rueckgabe (sel, konflikte)."""
+        konflikte = []
+        basen = sorted({t[:t.rindex("/") + 1] for t in sel if t not in self.haus_eigen})
+        for b in basen:
+            anb = b + "anbieter"
+            fremd = gelesen.get(anb, "") if anb not in self.haus_eigen else ""
+            if fremd and fremd != gem.KLIMA_ANBIETER:
+                sel = {t: w for t, w in sel.items() if not t.startswith(b)}
+                konflikte.append({"thema": anb, "wert": fremd[:40]})
+                continue
+            if fremd == gem.KLIMA_ANBIETER:
+                continue
+            for t in sorted(t for t in sel if t.startswith(b) and t not in self.haus_eigen and gelesen.get(t, "")):
+                del sel[t]
+                konflikte.append({"thema": t, "wert": ""})
+        return sel, konflikte
+
+    def _klima_lesen_anstossen(self, basen):
+        with self.sperre:
+            if self.klima_faden is not None and self.klima_faden.is_alive():
+                return
+            self.klima_lesen["versuch"] = time.monotonic()
+            self.klima_faden = threading.Thread(target=self._klima_lesen_lauf, args=(list(basen),),
+                                                name="haus-klima-lesen", daemon=True)
+            self.klima_faden.start()
+
+    def _klima_lesen_lauf(self, basen):
+        erg = broker_leeren(gem.KLIMA_STAMM, lambda _rest: True, warten=1.0, nur_lesen=True)
+        with self.sperre:
+            self.klima_lesen.update({"um": time.monotonic(), "rc": erg["rc"], "grund": erg["grund"],
+                                     "werte": dict(erg["werte"]) if erg["rc"] == 0 else {},
+                                     "basen": set(basen) if erg["rc"] == 0 else set()})
+        if erg["rc"] != 0:
+            log.warning("haus/klima: Ruecklesen am Broker nicht moeglich (%s) - neue Namen warten, neuer Versuch "
+                        "in einer Minute.", erg["grund"])
+
+    def klima_nachraeumen(self):
+        """MQTT aus (haus_senden endet frueh): die eigenen haus/klima/... trotzdem abraeumen, mit Nachlesen, in einem
+        eigenen Faden, hoechstens alle 10 Minuten (Bauart ew_haus_nachraeumen() der Ecowitt-Weiche)."""
+        eigen = {t for t in self.haus_eigen if t.startswith(gem.KLIMA_STAMM + "/")}
+        jetzt = time.monotonic()
+        if not eigen or (self.klima_raeumen_um is not None and jetzt - self.klima_raeumen_um < 600):
+            return
+        with self.sperre:
+            if self.klima_faden is not None and self.klima_faden.is_alive():
+                return
+            self.klima_raeumen_um = jetzt
+            self.klima_faden = threading.Thread(target=self._klima_raeumen_lauf, args=(eigen,),
+                                                name="haus-klima-raeumen", daemon=True)
+            self.klima_faden.start()
+
+    def _klima_raeumen_lauf(self, eigen):
+        erg = broker_leeren("haus", lambda rest: ("haus/" + rest) in eigen)
+        if erg["rc"] == 2 or erg["rest"]:
+            log.warning("haus/klima: MQTT ist aus, eigene Themen nicht abgeraeumt (%s) - neuer Versuch in "
+                        "10 Minuten.", erg["grund"] or ", ".join(erg["rest"]))
+            return
+        with self.sperre:
+            self.haus_eigen -= eigen
+            for thema in eigen:
+                self.haus_stand.pop(thema, None)
+        self._haus_merker_schreiben()
+        log.info("haus/klima: MQTT ist aus - %d eigene Thema/Themen abgeraeumt und nachgelesen.", len(eigen))
+
+    def klima_abbild(self):
+        """Lage fuer den Reiter Test (Statusdatei): keine MAC, keine Zugangsdaten."""
+        schlecht, wartend, namen = self.klima_lage_zuordnung
+        with self.sperre:
+            les = dict(self.klima_lesen)
+        return {"an": 1 if self.cfg.get("haus_klima", "0") == "1" else 0,
+                "mqtt": 1 if self.cfg.get("mqtt", "1") == "1" else 0,
+                "anbieter": gem.KLIMA_ANBIETER, "namen": namen, "beanstandet": schlecht, "wartend": wartend,
+                "halten": sorted(self.klima_halten), "pruefe": list(self.klima_pruefe),
+                "konflikte": list(self.klima_konflikte),
+                "lesen": {"alter": int(time.monotonic() - les["um"]) if les["um"] is not None else -1,
+                          "rc": les["rc"], "grund": les["grund"]},
+                "gesendet": {t: w for t, w in sorted(self.haus_stand.items())
+                             if t.startswith(gem.KLIMA_STAMM + "/")},
+                "zaehler": self.klima_zaehler}
 
     def _haus_abraeumen(self):
         """Eigene, nicht mehr gesollte Haus-Themen am Broker loeschen und nachlesen.
@@ -2792,6 +3050,8 @@ class Dienst:
                          "frist": min(21600, max(300, self._zahl("messwert_frist", 1800)))},
             "haus": {"themen": sorted(self.haus_soll), "eigen": sorted(self.haus_eigen),
                      "zaehler": self.haus_zaehler},
+            # 1.3.45: haus/klima je Thermometer - Lage fuer die Pruefzeile im Reiter Test
+            "klima": self.klima_abbild(),
             "zaehler": self.zaehler,
             "kalibrierung": kal,
             # Anwesenheit mit dem WLAN-Scanner (Verbesserungsbau 30.09.2026):
@@ -3919,11 +4179,14 @@ def main():
     # uebergangen, und ein Aufruf mit Tippfehler startete einen zweiten Dienst.
     if sys.argv[1:] == ["--mqtt-leeren"]:
         sys.exit(mqtt_leeren())
+    # 1.3.45: --klima-lesen fuer die Pruefzeile haus/klima im Reiter Test (liest nur).
+    if sys.argv[1:] == ["--klima-lesen"]:
+        sys.exit(klima_lesen_cli())
     if sys.argv[1:]:
         for a in sys.argv[1:]:
             sys.stderr.write("Unbekannter Schalter: {0}\n".format(a))
         sys.stderr.write("Dieses Skript ist der Dauerdienst; es kennt nur --mqtt-leeren "
-                         "(fuer die Deinstallation).\n")
+                         "(fuer die Deinstallation) und --klima-lesen (Reiter Test).\n")
         sys.exit(2)
     # Aus einem ausgepackten Archiv startet kein Dienst (Muster 3, Fall W4):
     # er nahm bis 1.3.18 Konfiguration, Daten und Broker der Anlage.

@@ -333,6 +333,20 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
             $opt['haus'] = ($opt['haus'] === '1') ? '1' : '';
             if ($opt['haus'] === '') { unset($opt['haus']); }
         }
+        // 1.3.45: haus/klima je Thermometer - Haken und Name. Ohne Haken entfaellt der Name; ein ungueltiger Name wird
+        // beanstandet (es bleibt der bisherige, gespeichert wird nichts - Entscheidung 16), nie umgeschrieben.
+        $bl_kl_an = isset($_POST['tag_klima_an'][$i]) && $_POST['tag_klima_an'][$i] === '1';
+        if (!$bl_kl_an) {
+            unset($opt['klima']);
+        } elseif (!in_array('klima', isset($bean[$i]) ? $bean[$i] : array(), true)
+                  && (!isset($opt['klima']) || !bl_klima_name_taugt($opt['klima']))) {
+            $mangel[] = sprintf(bl_t('MANGEL.KLIMA_NAME'), $kennung, isset($opt['klima']) ? $opt['klima'] : '',
+                                isset($vopt['klima']) ? $vopt['klima'] : '-');
+            $bean[$i][] = 'klima';
+            unset($opt['klima']);
+            if (isset($vopt['klima'])) { $opt['klima'] = $vopt['klima']; }
+            if ($vorher === null) { $zeile_ok = false; }
+        }
         // B24 (Gruppe 13): EINE Pruefung - am Ende dieselbe Regel wie bl_tag_pruefen() (Sicherung, Rueckweg nach
         // dem Suchlauf). Was dort verworfen wuerde, wird hier beanstandet: eine bestehende Zeile behaelt ihre
         // Werte und traegt die Beanstandung (Speichern unterbleibt, Entscheidung 16), eine neue entfaellt.
@@ -384,6 +398,18 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
             'name' => trim($name_roh),
             'opt' => array(),
         );
+    }
+    // 1.3.45: je Name fuer haus/klima genau ein Thermometer (Regeln/07 Nr. 15: je Name ein Anbieter).
+    $bl_kl = array();
+    foreach ($tags as $bl_kt) {
+        if (isset($bl_kt['opt']['klima']) && $bl_kt['opt']['klima'] !== '') {
+            $bl_kl[$bl_kt['opt']['klima']][] = $bl_kt['name'] !== '' ? $bl_kt['name'] : $bl_kt['kennung'];
+        }
+    }
+    foreach ($bl_kl as $bl_kn => $bl_kw) {
+        if (count($bl_kw) > 1) {
+            $mangel[] = sprintf(bl_t('MANGEL.KLIMA_DOPPELT'), $bl_kn, implode(', ', $bl_kw));
+        }
     }
     return $tags;
 }
@@ -602,6 +628,7 @@ if ($bl_ist_post && isset($_POST['save'])) {
     $neu['wlan_kopplung'] = isset($_POST['wlan_kopplung']) ? '1' : '0';
     // Gruppe 13: Haus-Themen (V6-V8), BTHome (V2), IRK (V1) - alle Schalter, ab Werk 0
     $neu['haus_anwesenheit'] = isset($_POST['haus_anwesenheit']) ? '1' : '0';
+    $neu['haus_klima']       = isset($_POST['haus_klima']) ? '1' : '0';      // 1.3.45, ab Werk aus
     $neu['bthome']           = isset($_POST['bthome']) ? '1' : '0';
     $neu['irk_aufloesen']    = isset($_POST['irk_aufloesen']) ? '1' : '0';
     // Gruppe 33: Vorwahl der Region im Bind-Key-Abruf (kein Geheimnis)
@@ -1125,7 +1152,8 @@ $bl_bt_hilfe = $bl_p['home'] !== '' ? bl_bt_abhilfe(bl_bt_fakten($bl_cfg)) : arr
 
 
 if (class_exists('LBWeb', false)) {
-    LBWeb::lbheader('BLE-Scanner NG',
+    require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+    LBWeb::lbheader(plugin_kopftitel('BLE-Scanner NG', __DIR__),
         'https://github.com/timanders22/LoxBerry-Plugin-BLE-Scanner', 'help.html');
 }
 
@@ -1355,6 +1383,11 @@ foreach ($bl_zeilen_tab as $i => $tag) {
 &nbsp; <?= bl_e(bl_t('FELD.REF_JE_TAG')) ?>: <input data-role="none" type="text" name="tag_ref[<?= (int) $i ?>]" value="<?= bl_e(isset($o['ref']) ? $o['ref'] : '') ?>"<?= bl_tag_markierung($tag, 'ref') ?> size="5">
 &nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_batt[<?= (int) $i ?>]" value="1"<?= (isset($o['batt']) && $o['batt'] === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.BATT_JE_TAG')) ?></label>
 &nbsp; <label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_haus[<?= (int) $i ?>]" value="1"<?= (isset($o['haus']) && $o['haus'] === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HAUS_JE_TAG')) ?></label>
+<?php if (isset($o['klima']) || ($z !== null && isset($z['sensor_lage']) && $z['sensor_lage'] !== null)) { /* 1.3.45: haus/klima nur fuer erkannte Thermometer; Vorbelegung aus der Bezeichnung */ ?>
+<br><label style="display:inline;font-weight:400;"><input data-role="none" type="checkbox" name="tag_klima_an[<?= (int) $i ?>]" value="1"<?= (isset($o['klima']) && $o['klima'] !== '') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.KLIMA_JE_TAG')) ?></label>
+&nbsp; <?= bl_e(bl_t('FELD.KLIMA_NAME')) ?>: <input data-role="none" type="text" name="tag_klima[<?= (int) $i ?>]" value="<?= bl_e((isset($o['klima']) && $o['klima'] !== '') ? $o['klima'] : bl_klima_name($tag['name'] !== '' ? $tag['name'] : (isset($o['alias']) ? $o['alias'] : ''))) ?>"<?= bl_tag_markierung($tag, 'klima') ?> size="18" maxlength="40">
+<div class="sm-hilfe"><?= bl_e(bl_t('TEXT.KLIMA_JE_TAG_HILFE')) ?></div>
+<?php } ?>
 <?php if ($tag['art'] === 'irk') { ?>
 <br><?= bl_e(bl_t('FELD.IRK')) ?>: <input data-role="none" type="password" autocomplete="off" name="tag_irk[<?= (int) $i ?>]" value="" size="34" placeholder="<?= bl_e(bl_irk_anzeige(substr($tag['kennung'], 4))) ?>"<?= bl_tag_markierung($tag, 'irk') ?>>
 <div class="sm-hilfe"><?= bl_e(bl_t('TEXT.IRK_HILFE')) ?></div>
@@ -1640,6 +1673,10 @@ foreach (array('de', 'cn', 'i2', 'ru', 'sg', 'us', 'alle') as $bl_rr) { ?>
 <h2><?= bl_e(bl_t('TEXT.HAUS_UEBERSCHRIFT')) ?></h2>
 <div class="sm-feld"><label style="font-weight:400;"><input data-role="none" type="checkbox" name="haus_anwesenheit" value="1"<?= bl_eingabe_an('settings', 'haus_anwesenheit', bl_cfg($bl_cfg, 'haus_anwesenheit', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HAUS_ANWESENHEIT')) ?></label>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HAUS_HILFE')) ?></p></div>
+<?php /* 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15), ab Werk aus. */ ?>
+<h2><?= bl_e(bl_t('TEXT.KLIMA_UEBERSCHRIFT')) ?></h2>
+<div class="sm-feld"><label style="font-weight:400;"><input data-role="none" type="checkbox" name="haus_klima" value="1"<?= bl_eingabe_an('settings', 'haus_klima', bl_cfg($bl_cfg, 'haus_klima', '0') === '1') ? ' checked' : '' ?>> <?= bl_e(bl_t('FELD.HAUS_KLIMA')) ?></label>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.HAUS_KLIMA_HILFE')) ?></p></div>
 
 <div class="sm-knopfreihe">
 <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="save" value="1"><?= bl_e(bl_t('KNOPF.SPEICHERN')) ?></button>
@@ -1895,6 +1932,21 @@ if ($bl_sich_warn) { ?>
 </table>
 </div>
 <?php } ?>
+<?php /* 1.3.45: haus/klima/<name>/... fuer andere Plugins - ohne Praefix, nicht fuer Loxone */ ?>
+<h2><?= bl_e(bl_t('TEXT.KLIMA_THEMEN')) ?></h2>
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.KLIMA_THEMEN_HILFE')) ?></p>
+<?php $bl_kl_zeilen = bl_klima_themen($bl_cfg, $bl_tags); if ($bl_kl_zeilen) { ?>
+<div class="sm-breit">
+<table class="sm-tbl">
+<tr><th style="width:200px;"><?= bl_e(bl_t('TEXT.SP_BEZEICHNUNG')) ?></th><th><?= bl_e(bl_t('TEXT.SP_THEMA')) ?></th><th style="width:90px;"><?= bl_e(bl_t('TEXT.SP_RETAIN')) ?></th></tr>
+<?php foreach ($bl_kl_zeilen as $bl_kz) { ?>
+<tr><td><?= bl_e($bl_kz[0]) ?></td><td><span class="sm-mono"><?= bl_e($bl_kz[1]) ?></span></td><td><?= bl_e(bl_t($bl_kz[2] ? 'TEXT.RETAIN_JA' : 'TEXT.RETAIN_NEIN')) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<?php } else { ?>
+<p class="sm-klein"><?= bl_e(bl_t(bl_cfg($bl_cfg, 'haus_klima', '0') === '1' ? 'TEXT.KLIMA_KEIN_TAG' : 'TEXT.KLIMA_AUS')) ?></p>
+<?php } ?>
 </div>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
@@ -2037,6 +2089,7 @@ foreach (bl_bausteinliste($bl_cfg, $bl_tags) as $bl_bs) { ?>
 <h2><?= bl_e(bl_t('TEXT.GEGENPROBE')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.GEGENPROBE_TEXT')) ?></p>
 
+<p class="sm-hilfe"><?= bl_e(bl_t('TEXT.KLIMA_LOXONE')) ?></p>
 <h2><?= bl_e(bl_t('TEXT.NICHT_VERLASSEN')) ?></h2>
 <p class="sm-hilfe"><?= bl_e(bl_t('TEXT.NICHT_VERLASSEN_TEXT')) ?></p>
 </div>

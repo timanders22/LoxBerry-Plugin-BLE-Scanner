@@ -381,6 +381,8 @@ VORGABEN = {
     "befehle_mqtt_ein": "0",
     "befehle_eingreifend_ein": "0",
     "haus_anwesenheit": "0",
+    # -- 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15), ab Werk aus
+    "haus_klima": "0",
     "bthome": "0",
     "irk_aufloesen": "0",
     # -- Gruppe 33 (1.3.29): Frist der Messwerte (s, 300-21600; danach Temperatur -999, Feuchte -1, Lage 4)
@@ -394,7 +396,8 @@ VORGABEN = {
 # globale Schalter). Sie sind ALTOPTIONEN: beim Lesen als Zusatzangabe erkannt (damit die Zeile nicht als
 # Kommentar missdeutet wird), sonst uebergangen; die Oberflaeche verwirft sie beim Speichern mit Hinweis.
 # V12: "haus" (=1) gibt den Tag fuer haus/tag/<name>/da frei.
-TAG_OPTIONEN = ("abw", "ref", "alias", "person", "batt", "haus")
+# 1.3.45: "klima" (=<name>) meldet ein Thermometer unter haus/klima/<name>/... (nur mit haus_klima=1).
+TAG_OPTIONEN = ("abw", "ref", "alias", "person", "batt", "haus", "klima")
 ALTOPTIONEN = ("min", "raum")
 
 # Zweignamen, die der Themenbaum selbst belegt. Ein Tag-Alias darf NICHT so
@@ -1009,6 +1012,74 @@ def haus_jemand(werte):
     if w and all(x == 0 for x in w):
         return 0
     return "-"
+
+
+# ---------------------------------------------------------------------------
+# 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15)
+# ---------------------------------------------------------------------------
+#
+# Anbieter von haus/klima/<name>/temperatur (GradC, eine Nachkommastelle, ohne Aussage -999), .../feuchte (% ganz,
+# -1), .../druck (hPa, eine Nachkommastelle, -1; nur Formate mit Luftdruck, RuuviTag), .../zeit (Unix-Zeit der
+# letzten brauchbaren Messung, -1) und .../anbieter (= KLIMA_ANBIETER) - alles retained; das Lebenszeichen
+# haus/klima/zaehler/<anbieter> 0-999 je Minute, nie retained. Ab Werk aus (haus_klima=0); je Tag die Zusatzangabe
+# klima=<name>. Felder, Grenzen, Rundung und Namensregel wie die Ecowitt-Weiche 0.9.38 (ew_haus_fuehler(),
+# ew_haus_zahl(), ew_haus_name()); gesendet wird ueber die Dauerverbindung des Dienstes wie haus/anwesenheit.
+# batterie (%) ist in Regeln/07 kein Feld von haus/klima und geht deshalb nicht hinaus.
+
+KLIMA_STAMM = "haus/klima"
+KLIMA_ANBIETER = "ble_scanner_ng"       # Ordnername der Linie (plugin.cfg FOLDER), wie ecowittweiche
+KLIMA_STUMM = 3600                       # letzte brauchbare Messung aelter: ohne Aussage (Regeln/07 Nr. 15)
+KLIMA_VOLL = 1800                        # der volle Satz alle 30 min (zeit hoechstens so alt)
+KLIMA_ZAEHLER_ABSTAND = 60               # Lebenszeichen je Minute
+KLIMA_LESEN_GILT = 3600                  # so lange gilt ein Ruecklesen am Broker (Konfliktpruefung)
+KLIMA_LESEN_ABSTAND = 60                 # ein Ruecklesen hoechstens so oft (ausser fuer einen neuen Namen)
+# Nie ein <name> (Regeln/07 Nr. 15, die Vereinigung wie ew_haus_reserviert()).
+KLIMA_RESERVIERT = ("zaehler", "anbieter", "jetzt", "heute", "morgen", "warnung", "pollen", "ok", "datum",
+                    "zeit", "sprache")
+# (Feld, Nachkommastellen, ohne Aussage, kleinster, groesster plausibler Wert) - wie ew_haus_fuehler()
+KLIMA_FELDER = (("temperatur", 1, "-999", -60.0, 100.0),
+                ("feuchte", 0, "-1", 0.0, 100.0),
+                ("druck", 1, "-1", 300.0, 1200.0))
+
+
+def klima_name(text):
+    """Namensregel Nr. 15 wie ew_haus_name() (Ecowitt-Weiche) und hausName() (Zigbee2MqttNG): klein, ae/oe/ue/ss,
+    jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird ein _, _ am Rand faellt weg, hoechstens 40 Zeichen.
+    Nur fuer die Vorbelegung im Formular und die Pruefung; haus_name() oben (haus/anwesenheit, haus/tag) bleibt,
+    wie sie ist - an deren Namen haengen schon Abnehmer."""
+    t = str(text or "")
+    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("Ä", "ae"), ("Ö", "oe"), ("Ü", "ue")):
+        t = t.replace(alt, neu)
+    t = re.sub(r"[^a-z0-9_-]+", "_", t.lower()).strip("_")
+    return t[:40].rstrip("_")
+
+
+def klima_name_taugt(n):
+    """Taugt eine Eingabe als <name>? Nur, wenn die Namensregel sie unveraendert laesst und sie nicht reserviert ist -
+    abgewiesen wird, nicht zurechtgebogen (Regeln/05)."""
+    return isinstance(n, str) and n != "" and klima_name(n) == n and n not in KLIMA_RESERVIERT
+
+
+def klima_plausibel(wert, unten, oben):
+    """Ein Messwert als Zahl innerhalb der Grenzen, sonst None (dann gilt "ohne Aussage")."""
+    try:
+        x = float(wert)
+    except (TypeError, ValueError):
+        return None
+    if x != x or not unten <= x <= oben:
+        return None
+    return x
+
+
+def klima_zahl(x, stellen):
+    """Wie ew_haus_zahl() der Ecowitt-Weiche: halbe Stelle vom Nullpunkt weg (PHP round()), ".0" faellt weg, "-0" wird
+    "0". Python round() rundet zur geraden Ziffer (-3.25 -> -3.2, 54.5 -> 54) und wiche ab."""
+    from decimal import Decimal, ROUND_HALF_UP
+    d = Decimal(repr(float(x))).quantize(Decimal(1).scaleb(-stellen), rounding=ROUND_HALF_UP)
+    s = "{0:f}".format(d)
+    if s.endswith(".0"):
+        s = s[:-2]
+    return "0" if s in ("-0", "-0.0") else s
 
 
 def mac_normieren(wert):

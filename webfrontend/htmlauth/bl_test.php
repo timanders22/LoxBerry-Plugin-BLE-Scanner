@@ -1325,6 +1325,9 @@ function bl_pruefzeilen($cfg, $tags)
     }
     list($ok, $meldung) = bl_pruef_haus($cfg, $tags, $status, $gilt);
     $zeilen[] = bl_zeile(bl_t('PRUEF.HAUS'), $ok, $meldung);
+    // 1.3.45: haus/klima je Thermometer - Wirkung am Broker zurueckgelesen
+    list($ok, $meldung) = bl_pruef_haus_klima($cfg, $tags, $status, $gilt);
+    $zeilen[] = bl_zeile(bl_t('PRUEF.HAUS_KLIMA'), $ok, $meldung);
 
     list($ok, $meldung) = bl_sprachen_vergleich();
     $zeilen[] = bl_zeile(bl_t('PRUEF.SPRACHEN'), $ok, $meldung);

@@ -1,11 +1,16 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.44
+Version 1.3.45
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.45
+
+- Die Kopfzeile zeigt jetzt die installierte Fassung, einheitlich in allen Plugins.
+- **Neu, ab Werk aus – Werte der Thermometer für andere Plugins (`haus/klima/<name>/…`, Hausregel für Haus-Themen):** Mit dem Haken „Werte der Thermometer für andere Plugins bereitstellen“ (Reiter Einstellungen) und je Thermometer dem Haken „für andere Plugins (haus/klima)“ samt Name (vorbelegt aus der Bezeichnung; erlaubt sind a–z, 0–9, `_` und `-`, höchstens 40 Zeichen, ein ungültiger oder doppelter Name wird beanstandet, nicht umgeschrieben) sendet der Dienst `temperatur` (°C, eine Nachkommastelle, ohne Aussage −999), `feuchte` (%, ganzzahlig, −1), bei RuuviTag `druck` (hPa, −1), `zeit` (Unix-Zeit der letzten brauchbaren Messung, −1) und `anbieter` = `ble_scanner_ng`, alle retained, bei Änderung und alle 30 Minuten voll; liegt die letzte Messung über eine Stunde zurück, gehen die Werte ohne Aussage hinaus. Lebenszeichen `haus/klima/zaehler/ble_scanner_ng` je Minute, nie retained. So kommen die Werte der Xiaomi-Thermometer (LYWSDCGQ/01ZM, LYWSD03MMC mit ATC/pvvx und weitere erkannte Formate) im Plugin Raumklima an. Einen Namen, den ein anderes Plugin hält, überschreibt der Scanner nicht; der Reiter Test nennt ihn. Ausgeschaltet, bei geändertem Namen, bei MQTT aus, nach dem Zurückspielen und bei der Deinstallation räumt das Plugin seine eigenen `haus/klima`-Themen ab, mit Nachlesen am Broker. Neue Prüfzeile „Thermometer für andere Plugins (haus/klima/…)“ im Reiter Test (liest am Broker zurück), Themenliste im Reiter MQTT. Gemessen auf dem Arbeitsrechner an nachgebildeten Werbedaten und einer Broker-Attrappe; am Gerät nicht gemessen.
 
 ## Neu in 1.3.44
 

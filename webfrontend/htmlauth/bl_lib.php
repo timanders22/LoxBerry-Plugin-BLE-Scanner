@@ -296,6 +296,8 @@ function bl_defaults()
         'befehle_mqtt_ein'        => '0',
         'befehle_eingreifend_ein' => '0',
         'haus_anwesenheit'        => '0',
+        // 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15), ab Werk aus
+        'haus_klima'              => '0',
         'bthome'                  => '0',
         'irk_aufloesen'           => '0',
         // Gruppe 33 (1.3.29): Frist der Messwerte (s) und Vorwahl der Region im Bind-Key-Abruf
@@ -316,7 +318,9 @@ function bl_schluessel_spaeter()
                  'haus_anwesenheit', 'bthome', 'irk_aufloesen', 'messwert_frist', 'xiaomi_region',
                  'espresense', 'espresense_praefix', 'espresense_zuordnung', 'raum_personen', 'raum_anwesenheit',
                  // 1.3.41: eine Sicherung bis 1.3.40 kennt tls nicht - beim Zurueckspielen gilt dann 'auto'.
-                 'tls');
+                 'tls',
+                 // 1.3.45: eine Sicherung bis 1.3.44 kennt haus_klima nicht - es gilt die Werkseinstellung (aus).
+                 'haus_klima');
 }
 
 /**
@@ -381,6 +385,7 @@ function bl_regeln()
         'befehle_mqtt_ein'        => array('schalter'),
         'befehle_eingreifend_ein' => array('schalter'),
         'haus_anwesenheit'        => array('schalter'),
+        'haus_klima'              => array('schalter'),
         'bthome'                  => array('schalter'),
         'irk_aufloesen'           => array('schalter'),
         'messwert_frist'          => array('zahl', 300, 21600),
@@ -565,6 +570,9 @@ function bl_tag_pruefen($t)
         if ($k === 'haus' && $v !== '1') {
             return array(null, 'opt.haus');
         }
+        if ($k === 'klima' && !bl_klima_name_taugt($v)) {     // 1.3.45: Namensregel Nr. 15, abgewiesen, nie umgeschrieben
+            return array(null, 'opt.klima');
+        }
         $opt[$k] = $v;
     }
     // V1 (Gruppe 13): ein IRK-Tag braucht einen Alias - sonst hiesse sein Themenzweig nach dem Schluesselnamen.
@@ -713,8 +721,8 @@ function bl_retain_text($thema)
 /** Erlaubte Zusatzangaben je Tag - dieselbe Liste wie TAG_OPTIONEN in Python. */
 function bl_tag_optionen()
 {
-    // B19 (Gruppe 13): min und raum sind Altoptionen (bl_altoptionen()); V12: haus.
-    return array('abw', 'ref', 'alias', 'person', 'batt', 'haus');
+    // B19 (Gruppe 13): min und raum sind Altoptionen (bl_altoptionen()); V12: haus; 1.3.45: klima (haus/klima/<name>).
+    return array('abw', 'ref', 'alias', 'person', 'batt', 'haus', 'klima');
 }
 
 /**
@@ -3916,7 +3924,7 @@ function bl_eingabe_felder($form)
             'haken' => array('http_push', 'wachhund', 'glaettung', 'beacon', 'entfernung',
                              'batterie', 'ereignisse', 'scanner_themen', 'raum', 'wlan_kopplung',
                              'espresense', 'bthome', 'irk_aufloesen', 'haus_anwesenheit', 'raum_personen',
-                             'raum_anwesenheit'),
+                             'raum_anwesenheit', 'haus_klima'),
         ),
         'mqtt' => array(
             'text'  => array('themenpraefix'),
@@ -5203,6 +5211,159 @@ function bl_pruef_haus($cfg, $tags, $status, $gilt)
     }
     return array(true, sprintf(bl_t('TEST.HAUS_OK'), count($th), implode(', ', array_slice($th, 0, 6)),
                                (int) $status['haus']['zaehler']));
+}
+
+/* ==================================================================
+ * 1.3.45: haus/klima/<name>/... fuer erkannte Thermometer (Regeln/07 Nr. 15), ab Werk aus
+ *
+ * Namensregel wortgleich mit ew_haus_name()/ew_haus_name_taugt() der Ecowitt-Weiche 0.9.38 und mit klima_name()/
+ * klima_name_taugt() in bin/bl_common.py. Der Dienst sendet (klima_senden), die Oberflaeche prueft die Eingabe und
+ * liest fuer den Reiter Test am Broker zurueck (ble_scanner_ng.py --klima-lesen).
+ * ================================================================== */
+
+/** Der Name, unter dem dieses Plugin in haus/klima/<name>/anbieter steht (Ordnername, wie KLIMA_ANBIETER). */
+function bl_klima_anbieter()
+{
+    return 'ble_scanner_ng';
+}
+
+/** Namen, die nie ein <name> sind (Regeln/07 Nr. 15; dieselbe Vereinigung wie die Ecowitt-Weiche). */
+function bl_klima_reserviert()
+{
+    return array('zaehler', 'anbieter', 'jetzt', 'heute', 'morgen', 'warnung', 'pollen', 'ok', 'datum', 'zeit', 'sprache');
+}
+
+/** Namensregel: klein, Umlaute ausgeschrieben, jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird _, _ am Rand
+ *  faellt weg, hoechstens 40 Zeichen. Nur fuer die Vorbelegung im Formular. */
+function bl_klima_name($t)
+{
+    $t = str_replace(array("\u{00E4}", "\u{00F6}", "\u{00FC}", "\u{00DF}", "\u{00C4}", "\u{00D6}", "\u{00DC}"),
+                     array('ae', 'oe', 'ue', 'ss', 'ae', 'oe', 'ue'), (string) $t);
+    $t = preg_replace('/[^a-z0-9_-]+/', '_', strtolower($t));
+    $t = trim((string) $t, '_');
+    return rtrim(substr($t, 0, 40), '_');
+}
+
+/** Taugt eine Eingabe als <name>? Nur, wenn die Namensregel sie unveraendert laesst und sie nicht reserviert ist -
+ *  abgewiesen wird, nicht zurechtgebogen (Regeln/05). */
+function bl_klima_name_taugt($n)
+{
+    return is_string($n) && $n !== '' && bl_klima_name($n) === $n && !in_array($n, bl_klima_reserviert(), true);
+}
+
+/** Die Themen fuer den Reiter MQTT: array(Bezeichnung, Thema, retained) je aktivem Tag mit gueltigem Namen. */
+function bl_klima_themen($cfg, $tags)
+{
+    $aus = array();
+    if (bl_cfg($cfg, 'haus_klima', '0') !== '1') {
+        return $aus;
+    }
+    foreach ($tags as $t) {
+        if ($t['aktiv'] !== '1' || !isset($t['opt']['klima']) || !bl_klima_name_taugt($t['opt']['klima'])) {
+            continue;
+        }
+        $wer = $t['name'] !== '' ? $t['name'] : $t['kennung'];
+        foreach (array('temperatur', 'feuchte', 'zeit', 'anbieter') as $f) {
+            $aus[] = array($wer, 'haus/klima/' . $t['opt']['klima'] . '/' . $f, true);
+        }
+    }
+    if ($aus) {
+        $aus[] = array('-', 'haus/klima/zaehler/' . bl_klima_anbieter(), false);
+    }
+    return $aus;
+}
+
+/**
+ * Pruefzeile "Thermometer fuer andere Plugins (haus/klima/...)": Haken, Beanstandungen und Konflikte aus dem Abbild,
+ * dann die WIRKUNG - am Broker zurueckgelesen (ble_scanner_ng.py --klima-lesen): je gemeldetem Namen steht
+ * <name>/anbieter mit dem eigenen Namen und jedes zuletzt gesendete Feld zurueckbehalten da. $gelesen nur fuer die
+ * Eichung (das JSON von --klima-lesen); sonst null.
+ */
+function bl_pruef_haus_klima($cfg, $tags, $status, $gilt, $gelesen = null)
+{
+    $gewaehlt = 0;
+    foreach ($tags as $t) {
+        if ($t['aktiv'] === '1' && isset($t['opt']['klima']) && $t['opt']['klima'] !== '') { $gewaehlt++; }
+    }
+    if (bl_cfg($cfg, 'haus_klima', '0') !== '1') {
+        return $gewaehlt ? array(null, sprintf(bl_t('TEST.KLIMA_AUS_MIT_TAGS'), $gewaehlt)) : array(null, bl_t('TEST.KLIMA_AUS'));
+    }
+    if (bl_cfg($cfg, 'mqtt', '1') !== '1') {
+        return array(false, bl_t('TEST.KLIMA_MQTT_AUS'));
+    }
+    if (!$gilt || !is_array($status) || !isset($status['klima']) || !is_array($status['klima'])) {
+        return array(null, bl_t('TEST.KLIMA_UNKLAR'));
+    }
+    $k = $status['klima'] + array('namen' => array(), 'beanstandet' => array(), 'wartend' => array(),
+                                  'halten' => array(), 'pruefe' => array(), 'konflikte' => array(),
+                                  'gesendet' => array(), 'zaehler' => 0);
+    $fehl = array();
+    foreach ((array) $k['beanstandet'] as $b) {
+        $g = isset($b['grund']) && in_array($b['grund'], array('name', 'doppelt', 'format'), true) ? $b['grund'] : 'name';
+        $fehl[] = sprintf(bl_t('TEST.KLIMA_B_' . strtoupper($g)), (string) $b['tag'], (string) $b['name']);
+    }
+    foreach ((array) $k['konflikte'] as $b) {
+        $fehl[] = sprintf(bl_t('TEST.KLIMA_KONFLIKT'), (string) $b['thema'], (string) $b['wert'] !== '' ? (string) $b['wert'] : '-');
+    }
+    if ($fehl) {
+        return array(false, implode('; ', $fehl));
+    }
+    $warten = array();
+    foreach ((array) $k['wartend'] as $b) { $warten[] = (string) $b['name']; }
+    if (!$k['namen']) {
+        return $warten ? array(null, sprintf(bl_t('TEST.KLIMA_WARTET'), implode(', ', $warten)))
+                       : array(null, bl_t('TEST.KLIMA_KEINE'));
+    }
+    if ($gelesen === null) {
+        if (!function_exists('bl_python')) {
+            return array(null, sprintf(bl_t('TEST.KLIMA_NICHT_LESBAR'), 'bl_python'));
+        }
+        list($bl_ok, $bl_aus) = bl_python('ble_scanner_ng.py', '--klima-lesen', 20);
+        $gelesen = bl_json_aus($bl_aus);
+    }
+    if (!is_array($gelesen) || !isset($gelesen['rc'])) {
+        return array(null, sprintf(bl_t('TEST.KLIMA_NICHT_LESBAR'), '?'));
+    }
+    if ((int) $gelesen['rc'] !== 0) {
+        return array(null, sprintf(bl_t('TEST.KLIMA_NICHT_LESBAR'),
+                                   isset($gelesen['grund']) ? (string) $gelesen['grund'] : '?'));
+    }
+    $w = isset($gelesen['werte']) && is_array($gelesen['werte']) ? $gelesen['werte'] : array();
+    $fehlt = array();
+    $gut = array();
+    foreach ((array) $k['namen'] as $n) {
+        $b = 'haus/klima/' . (string) $n['name'] . '/';
+        if (in_array($b, (array) $k['halten'], true) || in_array($b, (array) $k['pruefe'], true)) {
+            $warten[] = (string) $n['name'];
+            continue;
+        }
+        if (!isset($w[$b . 'anbieter']) || (string) $w[$b . 'anbieter'] !== bl_klima_anbieter()) {
+            $fehlt[] = $b . 'anbieter';
+            continue;
+        }
+        $da = true;
+        foreach ((array) $k['gesendet'] as $thema => $_wert) {
+            if (strpos((string) $thema, $b) === 0 && !isset($w[$thema])) {
+                $fehlt[] = (string) $thema;
+                $da = false;
+            }
+        }
+        if ($da) {
+            $gut[] = sprintf(bl_t('TEST.KLIMA_ALTER'), (string) $n['name'],
+                             (int) $n['zeit'] > 0 ? max(0, time() - (int) $n['zeit']) : -1);
+        }
+    }
+    if ($fehlt) {
+        return array(false, sprintf(bl_t('TEST.KLIMA_FEHLT'), implode(', ', $fehlt)));
+    }
+    if (!$gut) {
+        return array(null, sprintf(bl_t('TEST.KLIMA_WARTET'), implode(', ', $warten)));
+    }
+    $text = sprintf(bl_t('TEST.KLIMA_OK'), implode(', ', $gut), (int) $k['zaehler']);
+    if ($warten) {
+        $text .= ' ' . sprintf(bl_t('TEST.KLIMA_WARTET'), implode(', ', $warten));
+    }
+    return array(true, $text);
 }
 
 /** Jeder Name der Namenstabelle entsteht aus seinem Thema nach der Gateway-Regel, und jeder Stamm steht im Sendecode. */
