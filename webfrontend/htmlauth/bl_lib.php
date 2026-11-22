@@ -4426,13 +4426,15 @@ function bl_irk_aus_post(&$mangel, $tags, &$bean = null)
     return array($tab, $geaendert);
 }
 
-/** V6-V8/V12: <name> nach Regeln/07 Nr. 15 - dieselbe Regel wie haus_name() in bl_common.py. */
+/** V6-V8/V12: <name> fuer haus/anwesenheit und haus/tag nach der gemeinsamen Namensregel (Regeln/07 Nr. 15, Entscheidung des Hausherrn 22.11.2026), wie
+ * ew_haus_name() (Ecowitt-Weiche), hausName() (Zigbee2MqttNG) und klima_name() (BLE-Scanner NG): klein, ae/oe/ue/ss,
+ * jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird ein _, _ am Rand faellt weg, hoechstens 40 Zeichen
+ * (danach rechts kein _).
+ *  Dieselbe Funktion wie bl_klima_name() und haus_name() in bl_common.py; bis 1.3.45 eigene Regel ohne - und ohne
+ *  Zusammenfassen. */
 function bl_haus_name($text)
 {
-    $t = strtolower((string) $text);
-    $t = strtr($t, array('ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss', 'Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue'));
-    $t = preg_replace('/[^a-z0-9]/', '_', $t);
-    return substr($t, 0, 40);
+    return bl_klima_name($text);
 }
 
 /** 1.3.38 (K6): je Eintrag der Haus-Name, gleiche Namen bekommen _2, _3 ... in der Reihenfolge der Liste - dieselbe
@@ -4450,7 +4452,7 @@ function bl_haus_namen(array $liste)
         if (isset($gesehen[$n])) {
             $gesehen[$n]++;
             $k = (string) $gesehen[$n];
-            $aus[] = substr($n, 0, 40 - strlen($k) - 1) . '_' . $k;
+            $aus[] = rtrim(substr($n, 0, 40 - strlen($k) - 1), '_') . '_' . $k;
         } else {
             $gesehen[$n] = 1;
             $aus[] = $n;

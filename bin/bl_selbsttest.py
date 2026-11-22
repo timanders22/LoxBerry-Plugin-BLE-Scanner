@@ -1345,8 +1345,13 @@ def alles_pruefen():
 
     # =====================================================================
     G = "Gruppe 13: Haus-Themen (V6-V8/V12)"
-    p.gleich(G, "Name nach Nr. 15", gem.haus_name("Gäste-Zimmer Süd"), "gaeste_zimmer_sued")
+    p.gleich(G, "Name nach Nr. 15", gem.haus_name("Gäste-Zimmer Süd"), "gaeste-zimmer_sued")
+    p.gleich(G, "Name: Folgen zu einem _, Rand faellt weg", gem.haus_name("__Küche  2__"), "kueche_2")
+    p.gleich(G, "Name: - bleibt stehen", gem.haus_name("x--y"), "x--y")
+    p.gleich(G, "Name: hoechstens 40, rechts kein _", gem.haus_name("x" * 39 + " yyyyy"), "x" * 39)
     p.gleich(G, "gleiche Namen _2", gem.haus_namen(["Anna", "anna"]), ["anna", "anna_2"])
+    p.gleich(G, "gleiche Namen _2 ohne __ am Schnitt", gem.haus_namen(["x" * 37 + " yy", "x" * 37 + "  yy"]),
+             ["x" * 37 + "_yy", "x" * 37 + "_2"])
     p.gleich(G, "jemand: 1 / 0 / -", (gem.haus_jemand([0, 1]), gem.haus_jemand([0, 0]), gem.haus_jemand([0, -1])),
              (1, 0, "-"))
     cfg_h = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nhaus_anwesenheit=1\n"

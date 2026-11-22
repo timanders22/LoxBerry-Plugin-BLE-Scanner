@@ -975,13 +975,14 @@ HAUS_MERKER = DATA_DIR.rstrip("/\\") + ".haus_themen"
 
 
 def haus_name(text):
-    """<name> nach Nr. 15: klein, ae/oe/ue/ss, jedes andere Zeichen ausser a-z
-    und 0-9 wird "_", hoechstens 40 Zeichen. "Gäste-Zimmer Süd" -> gaeste_zimmer_sued."""
-    t = str(text or "").lower()
-    for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
-        t = t.replace(alt, neu)
-    t = re.sub(r"[^a-z0-9]", "_", t)
-    return t[:40]
+    """<name> fuer haus/anwesenheit und haus/tag nach der gemeinsamen Namensregel (Regeln/07 Nr. 15, Entscheidung des Hausherrn 22.11.2026), wie
+    ew_haus_name() (Ecowitt-Weiche), hausName() (Zigbee2MqttNG) und klima_name() (BLE-Scanner NG): klein, ae/oe/ue/ss,
+    jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird ein _, _ am Rand faellt weg, hoechstens 40 Zeichen
+    (danach rechts kein _).
+    Dieselbe Funktion wie klima_name() unten. "Gäste-Zimmer Süd" -> gaeste-zimmer_sued. Bis 1.3.45 blieb "-" nicht
+    stehen und jedes Zeichen wurde einzeln ersetzt; die Themen unter dem alten Namen raeumt der Dienst ueber die
+    Merkliste HAUS_MERKER ab (sie liegt neben dem Datenordner und uebersteht ein Update)."""
+    return klima_name(text)
 
 
 def haus_namen(liste):
@@ -996,7 +997,7 @@ def haus_namen(liste):
             continue
         if n in gesehen:
             gesehen[n] += 1
-            n2 = (n[:40 - len(str(gesehen[n])) - 1] + "_" + str(gesehen[n]))
+            n2 = (n[:40 - len(str(gesehen[n])) - 1].rstrip("_") + "_" + str(gesehen[n]))
             aus.append(n2)
         else:
             gesehen[n] = 1
@@ -1045,8 +1046,8 @@ KLIMA_FELDER = (("temperatur", 1, "-999", -60.0, 100.0),
 def klima_name(text):
     """Namensregel Nr. 15 wie ew_haus_name() (Ecowitt-Weiche) und hausName() (Zigbee2MqttNG): klein, ae/oe/ue/ss,
     jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird ein _, _ am Rand faellt weg, hoechstens 40 Zeichen.
-    Nur fuer die Vorbelegung im Formular und die Pruefung; haus_name() oben (haus/anwesenheit, haus/tag) bleibt,
-    wie sie ist - an deren Namen haengen schon Abnehmer."""
+    Fuer haus/klima nur Vorbelegung im Formular und Pruefung; seit 1.3.46 (Entscheidung des Hausherrn 22.11.2026)
+    bildet auch haus_name() oben die Namen unter haus/anwesenheit und haus/tag mit dieser Funktion."""
     t = str(text or "")
     for alt, neu in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss"), ("Ä", "ae"), ("Ö", "oe"), ("Ü", "ue")):
         t = t.replace(alt, neu)

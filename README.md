@@ -1,11 +1,15 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.45
+Version 1.3.46
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.46
+
+- **Geändert – Namen unter `haus/anwesenheit/` und `haus/tag/` nach der gemeinsamen Namensregel (Entscheidung des Hausherrn 22.11.2026):** Die Namen entstehen jetzt wie unter `haus/klima/` und in den übrigen Plugins: klein, Umlaute ausgeschrieben, jede Folge anderer Zeichen außer a–z, 0–9, `_` und `-` wird ein einziges `_`, ein `_` am Anfang und am Ende fällt weg, höchstens 40 Zeichen. Bisher wurde auch `-` zu `_`, und jedes Zeichen wurde einzeln ersetzt. **Ein Name mit `-`, mit mehreren Leer- oder Sonderzeichen hintereinander oder mit solchen Zeichen am Anfang oder Ende ändert sich deshalb** (Beispiel: „Gäste-Zimmer Süd“ war `gaeste_zimmer_sued`, ist jetzt `gaeste-zimmer_sued`); Namen aus Buchstaben, Ziffern und einzelnen Leerzeichen bleiben gleich. Die zurückbehaltenen Themen unter dem alten Namen räumt das Plugin über seine Merkliste ab. Wer einen solchen Namen in einem anderen Plugin (etwa MG iSmart oder Renault NG, „Bei Ankunft sofort abfragen“) oder in Loxone eingetragen hat, trägt den neuen ein. Ein aus der Cloud neu übernommener Tag bekommt seinen Alias nach derselben Regel; bestehende Aliase bleiben, wie sie sind. Gemessen auf dem Arbeitsrechner (Python mit nachgebildetem Broker, PHP 7.4 und 8.4); am Gerät nicht gemessen.
 
 ## Neu in 1.3.45
 
