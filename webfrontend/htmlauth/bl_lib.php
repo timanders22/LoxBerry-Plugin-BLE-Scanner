@@ -5311,7 +5311,7 @@ function bl_klima_anbieter()
 /** Namen, die nie ein <name> sind (Regeln/07 Nr. 15; dieselbe Vereinigung wie die Ecowitt-Weiche). */
 function bl_klima_reserviert()
 {
-    return array('zaehler', 'anbieter', 'jetzt', 'heute', 'morgen', 'warnung', 'pollen', 'ok', 'datum', 'zeit', 'sprache');
+    return array('zaehler', 'anbieter', 'jetzt', 'heute', 'morgen', 'warnung', 'pollen', 'ok', 'datum', 'datum_text', 'zeit', 'sprache');
 }
 
 /** Namensregel: klein, Umlaute ausgeschrieben, jede Folge anderer Zeichen ausser a-z, 0-9, _ und - wird _, _ am Rand

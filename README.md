@@ -1,11 +1,15 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.48
+Version 1.3.49
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.49
+
+- **Berichtigt – reservierter Name `datum_text` unter `haus/klima/`:** Ein Thermometer mit dem Namen `datum_text` wird jetzt wie `zaehler` oder `heute` abgewiesen: beim Speichern beanstandet, im Reiter Test gemeldet und nicht gesendet. Weatherdata sendet seit 0.9.13 das Thema `haus/wetter/datum_text`; der Name fehlte in der Liste der reservierten Namen (Regeln/07). Oberfläche und Dienst führen dieselbe Liste; der Reiter Test vergleicht sie weiter.
 
 ## Neu in 1.3.48
 

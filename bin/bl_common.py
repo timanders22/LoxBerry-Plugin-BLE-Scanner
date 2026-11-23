@@ -1048,7 +1048,7 @@ KLIMA_LESEN_GILT = 3600                  # so lange gilt ein Ruecklesen am Broke
 KLIMA_LESEN_ABSTAND = 60                 # ein Ruecklesen hoechstens so oft (ausser fuer einen neuen Namen)
 # Nie ein <name> (Regeln/07 Nr. 15, die Vereinigung wie ew_haus_reserviert()).
 KLIMA_RESERVIERT = ("zaehler", "anbieter", "jetzt", "heute", "morgen", "warnung", "pollen", "ok", "datum",
-                    "zeit", "sprache")
+                    "datum_text", "zeit", "sprache")
 # (Feld, Nachkommastellen, ohne Aussage, kleinster, groesster plausibler Wert) - wie ew_haus_fuehler()
 KLIMA_FELDER = (("temperatur", 1, "-999", -60.0, 100.0),
                 ("feuchte", 0, "-1", 0.0, 100.0),
