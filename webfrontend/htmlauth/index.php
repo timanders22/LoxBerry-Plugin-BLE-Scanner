@@ -714,6 +714,14 @@ if ($bl_ist_post && isset($_POST['save'])) {
     // Gruppe 33 (E-E4): Bind-Keys je MAC-Zeile (nur Schreiben, Haken loeschen)
     list($bl_bk_neu, $bl_bk_anders) = bl_bindkey_aus_post($bl_fehler, $tags, $bl_bean_tags);
     $bl_merk('tags');
+    // 1.3.48: eine Person (mit dem Haken haus_anwesenheit) oder ein Haus-Tag, deren Name auf einen reservierten Namen
+    // unter haus/... faellt (jemand, zaehler, anbieter), wird beanstandet - der Dienst sendet ihn nicht, und
+    // umbenannt wird nichts (Regeln/07 Nr. 15, Regeln/05). Entscheidung 16: dann wird nichts gespeichert.
+    $bl_hab = bl_haus_abgewiesen($neu, $tags);
+    if ($bl_hab) {
+        $bl_fehler[] = sprintf(bl_t('MANGEL.HAUS_RESERVIERT'), bl_haus_abgewiesen_text($bl_hab),
+                               implode(', ', bl_haus_reserviert_anwesenheit()), implode(', ', bl_haus_reserviert_tag()));
+    }
     // B19 (Gruppe 13): wirkungslose Altoptionen (min, raum) fallen beim Speichern weg - einmal gesagt.
     $bl_alt_weg = array();
     foreach ($bl_tags as $bl_ta) {

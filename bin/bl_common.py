@@ -985,14 +985,26 @@ def haus_name(text):
     return klima_name(text)
 
 
-def haus_namen(liste):
+# 1.3.48: nie ein <name> unter haus/anwesenheit bzw. haus/tag (Regeln/07 Nr. 15: zaehler, anbieter; unter
+# haus/anwesenheit belegt der Anbieter selbst jemand fuer die Sammelaussage und zaehler fuer das Lebenszeichen). Bis
+# 1.3.47 landete eine Person "Jemand" oder "Zaehler" (auch aus der WLAN-Zuordnung) genau dort und ueberschrieb
+# Sammelaussage bzw. Lebenszeichen. Ein solcher Name wird abgewiesen und gemeldet, nie umbenannt (Regeln/05).
+# Dieselben Listen in bl_lib.php (bl_haus_reserviert_anwesenheit(), bl_haus_reserviert_tag()); der Reiter Test
+# vergleicht beide Seiten ueber bl_lesen.py --vorgaben.
+HAUS_RESERVIERT_ANWESENHEIT = ("zaehler", "anbieter", "jemand")
+HAUS_RESERVIERT_TAG = ("zaehler", "anbieter")
+
+
+def haus_namen(liste, reserviert):
     """Je Eintrag den Haus-Namen; gleiche Namen bekommen _2, _3 ... in der Reihenfolge
-    der Liste (Nr. 15: "gleiche Namen bekommen _<nummer>"). Leer bleibt leer."""
+    der Liste (Nr. 15: "gleiche Namen bekommen _<nummer>"). Leer bleibt leer.
+    1.3.48: ein Name aus `reserviert` wird "" - nicht gesendet, nicht mitgezaehlt, auch kein _2 davon. Pflichtangabe,
+    damit kein Aufrufer den Schutz durch Weglassen verliert."""
     aus = []
     gesehen = {}
     for x in liste:
         n = haus_name(x)
-        if n == "":
+        if n == "" or n in reserviert:
             aus.append("")
             continue
         if n in gesehen:

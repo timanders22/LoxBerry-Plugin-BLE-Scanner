@@ -1190,6 +1190,7 @@ class Dienst:
         self.haus_eigen = self._haus_merker_lesen()
         self.haus_zaehler = 0
         self.haus_anstoss = 0.0
+        self.haus_abgewiesen = []     # 1.3.48: zuletzt gemeldete reservierte Namen (Protokoll einmal je Aenderung)
         # 1.3.45: haus/klima - Ruecklesen am Broker (Konfliktpruefung), Faden, voller Satz, Lebenszeichen, Lage
         self.klima_lesen = {"um": None, "versuch": None, "rc": None, "grund": "", "werte": {}, "basen": set()}
         self.klima_faden = None
@@ -1427,11 +1428,15 @@ class Dienst:
         if self.cfg.get("wlan_kopplung", "0") == "1":
             # Personen nur aus der WLAN-Zuordnung haben ebenfalls anwesend_gesamt (wlan_zusammenfuehren).
             namen |= {pn for _wn, pn in gem.wlan_zuordnung_lesen(self.cfg.get("wlan_zuordnung", ""))}
+        abgewiesen = []
         if self.cfg.get("haus_anwesenheit", "0") == "1" and namen:
             namen = sorted(namen)
             werte = []
-            for name, hname in zip(namen, gem.haus_namen(namen)):
+            for name, hname in zip(namen, gem.haus_namen(namen, gem.HAUS_RESERVIERT_ANWESENHEIT)):
                 if not hname:
+                    # 1.3.48: ein brauchbarer, aber reservierter Name - abgewiesen, gemeldet, nicht gesendet
+                    if gem.haus_name(name):
+                        abgewiesen.append("Person '%s' -> haus/anwesenheit/%s" % (name, gem.haus_name(name)))
                     continue
                 gesamt = self.letzter_stand.get("person/{0}/anwesend_gesamt".format(name))
                 try:
@@ -1443,11 +1448,21 @@ class Dienst:
             soll["haus/anwesenheit/jemand"] = gem.haus_jemand(werte)
         haus_tags = [t for t in self.tags
                      if t.get("aktiv") == "1" and str((t.get("opt") or {}).get("haus", "")) == "1"]
-        for tag, hname in zip(haus_tags, gem.haus_namen([self._zweig(t) for t in haus_tags])):
+        for tag, hname in zip(haus_tags, gem.haus_namen([self._zweig(t) for t in haus_tags], gem.HAUS_RESERVIERT_TAG)):
             if not hname:
+                if gem.haus_name(self._zweig(tag)):
+                    abgewiesen.append("Tag '%s' -> haus/tag/%s/da" % (self._zweig(tag), gem.haus_name(self._zweig(tag))))
                 continue
             w = self.letzter_stand.get("{0}/present".format(self._zweig(tag)))
             soll["haus/tag/" + hname + "/da"] = int(w) if w in ("0", "1") else "-"
+        # Einmal je geaenderter Menge ins Protokoll, nicht in jedem Lauf (der Reiter Test zeigt es dauerhaft).
+        if abgewiesen != self.haus_abgewiesen:
+            self.haus_abgewiesen = abgewiesen
+            if abgewiesen:
+                log.warning("Haus-Themen: reservierter Name abgewiesen, wird nicht gesendet (Regeln/07 Nr. 15; "
+                            "reserviert unter haus/anwesenheit %s, unter haus/tag %s): %s - Person bzw. Alias "
+                            "umbenennen.", ", ".join(gem.HAUS_RESERVIERT_ANWESENHEIT),
+                            ", ".join(gem.HAUS_RESERVIERT_TAG), "; ".join(abgewiesen))
         return soll
 
     def haus_senden(self, personen, erzwingen=False):

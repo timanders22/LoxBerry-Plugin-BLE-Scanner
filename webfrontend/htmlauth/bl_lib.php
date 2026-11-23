@@ -4437,15 +4437,29 @@ function bl_haus_name($text)
     return bl_klima_name($text);
 }
 
+/** 1.3.48: nie ein <name> unter haus/anwesenheit (Regeln/07 Nr. 15: zaehler, anbieter; der Anbieter belegt dort selbst
+ *  jemand und zaehler) - dieselbe Liste wie HAUS_RESERVIERT_ANWESENHEIT in bl_common.py, der Reiter Test vergleicht. */
+function bl_haus_reserviert_anwesenheit()
+{
+    return array('zaehler', 'anbieter', 'jemand');
+}
+
+/** 1.3.48: nie ein <name> unter haus/tag - wie HAUS_RESERVIERT_TAG in bl_common.py. */
+function bl_haus_reserviert_tag()
+{
+    return array('zaehler', 'anbieter');
+}
+
 /** 1.3.38 (K6): je Eintrag der Haus-Name, gleiche Namen bekommen _2, _3 ... in der Reihenfolge der Liste - dieselbe
- *  Regel wie haus_namen() in bl_common.py (Nr. 15). Leer bleibt leer. */
-function bl_haus_namen(array $liste)
+ *  Regel wie haus_namen() in bl_common.py (Nr. 15). Leer bleibt leer. 1.3.48: ein Name aus $reserviert wird '' (nicht
+ *  gesendet, kein _2 davon); Pflichtangabe wie in Python. */
+function bl_haus_namen(array $liste, array $reserviert)
 {
     $aus = array();
     $gesehen = array();
     foreach ($liste as $x) {
         $n = bl_haus_name($x);
-        if ($n === '') {
+        if ($n === '' || in_array($n, $reserviert, true)) {
             $aus[] = '';
             continue;
         }
@@ -5174,6 +5188,71 @@ function bl_pruef_irk($cfg, $tags, $status)
     return array(true, sprintf(bl_t('TEST.IRK_OK'), count($irk_tags), $weg));
 }
 
+/** Die Personen, die haus_sollstand() im Dienst unter haus/anwesenheit fuehrt: die der aktiven Tags und bei
+ *  wlan_kopplung=1 die der WLAN-Zuordnung, eindeutig, sortiert wie Python sorted() (SORT_STRING). */
+function bl_haus_personen($cfg, $tags)
+{
+    $namen = bl_personen($tags);
+    if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
+        foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) { $namen[] = $paar[1]; }
+    }
+    $namen = array_values(array_unique($namen, SORT_STRING));
+    sort($namen, SORT_STRING);
+    return $namen;
+}
+
+/** 1.3.48: Personen (nur mit haus_anwesenheit=1) und Haus-Tags, deren Name nach der Namensregel auf einen reservierten
+ *  faellt - je Eintrag array(Art 'person'|'tag', Eingabe, Thema). Der Dienst sendet sie nicht (haus_sollstand()); der
+ *  Reiter Test und das Speichern melden sie. Abgewiesen, nie umbenannt. */
+function bl_haus_abgewiesen($cfg, $tags)
+{
+    $aus = array();
+    if (bl_cfg($cfg, 'haus_anwesenheit', '0') === '1') {
+        foreach (bl_haus_personen($cfg, $tags) as $pn) {
+            $hn = bl_haus_name($pn);
+            if ($hn !== '' && in_array($hn, bl_haus_reserviert_anwesenheit(), true)) {
+                $aus[] = array('person', $pn, 'haus/anwesenheit/' . $hn);
+            }
+        }
+    }
+    foreach ($tags as $t) {
+        if ($t['aktiv'] !== '1' || !isset($t['opt']['haus']) || $t['opt']['haus'] !== '1') { continue; }
+        $zw = bl_thema($t);
+        $hn = bl_haus_name($zw);
+        if ($hn !== '' && in_array($hn, bl_haus_reserviert_tag(), true)) {
+            $aus[] = array('tag', $zw, 'haus/tag/' . $hn . '/da');
+        }
+    }
+    return $aus;
+}
+
+/** 1.3.48: die abgewiesenen Eintraege als ein Satzteil fuer TEST.HAUS_RESERVIERT und MANGEL.HAUS_RESERVIERT. */
+function bl_haus_abgewiesen_text(array $liste)
+{
+    $teile = array();
+    foreach ($liste as $a) {
+        $teile[] = sprintf(bl_t($a[0] === 'person' ? 'TEXT.HAUS_RES_PERSON' : 'TEXT.HAUS_RES_TAG'), $a[1], $a[2]);
+    }
+    return implode('; ', $teile);
+}
+
+/** 1.3.48: Vergleich der reservierten Namen PHP/Python (bl_lesen.py --vorgaben) - haus/anwesenheit, haus/tag und
+ *  haus/klima. Rueckgabe: die Namen der Listen, die abweichen oder in der Python-Ausgabe fehlen. */
+function bl_haus_reserviert_vergleich($py)
+{
+    $soll = array('haus/anwesenheit' => array(isset($py['haus_reserviert']['anwesenheit']) ? $py['haus_reserviert']['anwesenheit'] : null,
+                                              bl_haus_reserviert_anwesenheit()),
+                  'haus/tag'         => array(isset($py['haus_reserviert']['tag']) ? $py['haus_reserviert']['tag'] : null,
+                                              bl_haus_reserviert_tag()),
+                  'haus/klima'       => array(isset($py['klima_reserviert']) ? $py['klima_reserviert'] : null,
+                                              bl_klima_reserviert()));
+    $anders = array();
+    foreach ($soll as $stamm => $paar) {
+        if (!is_array($paar[0]) || array_values($paar[0]) !== array_values($paar[1])) { $anders[] = $stamm; }
+    }
+    return $anders;
+}
+
 /** V6-V8/V12: Haus-Themen - Haken, Sollstand und eigene Themen aus dem Abbild. */
 function bl_pruef_haus($cfg, $tags, $status, $gilt)
 {
@@ -5183,6 +5262,12 @@ function bl_pruef_haus($cfg, $tags, $status, $gilt)
     }
     if (bl_cfg($cfg, 'haus_anwesenheit', '0') !== '1' && !$tag_haus) {
         return array(null, bl_t('TEST.HAUS_AUS'));
+    }
+    // 1.3.48: ein reservierter Name ist rot, gleich ob der Dienst laeuft - er sendet ihn nie (abgewiesen, nicht umbenannt).
+    $bl_ab = bl_haus_abgewiesen($cfg, $tags);
+    if ($bl_ab) {
+        return array(false, sprintf(bl_t('TEST.HAUS_RESERVIERT'), bl_haus_abgewiesen_text($bl_ab),
+                                    implode(', ', bl_haus_reserviert_anwesenheit()), implode(', ', bl_haus_reserviert_tag())));
     }
     if (!$gilt || !is_array($status) || !isset($status['haus'])) {
         return array(null, bl_t('TEST.HAUS_UNKLAR'));
@@ -5195,13 +5280,7 @@ function bl_pruef_haus($cfg, $tags, $status, $gilt)
     // aus der Zuordnung wurden nie geprueft, und ein doppelter Name stand zweimal in der Meldung.
     $fehlt = array();
     if (bl_cfg($cfg, 'haus_anwesenheit', '0') === '1') {
-        $namen = bl_personen($tags);
-        if (bl_cfg($cfg, 'wlan_kopplung', '0') === '1') {
-            foreach (bl_wlan_zuordnung(bl_cfg($cfg, 'wlan_zuordnung', '')) as $paar) { $namen[] = $paar[1]; }
-        }
-        $namen = array_values(array_unique($namen, SORT_STRING));
-        sort($namen, SORT_STRING);
-        foreach (bl_haus_namen($namen) as $hn) {
+        foreach (bl_haus_namen(bl_haus_personen($cfg, $tags), bl_haus_reserviert_anwesenheit()) as $hn) {
             if ($hn === '') { continue; }
             $soll = 'haus/anwesenheit/' . $hn;
             if (!in_array($soll, $th, true)) { $fehlt[] = $soll; }

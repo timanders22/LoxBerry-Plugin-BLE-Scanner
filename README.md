@@ -1,11 +1,16 @@
 # LoxBerry-Plugin BLE-Scanner NG
 
-Version 1.3.47
+Version 1.3.48
 
 Erkennt Bluetooth-Low-Energy-Geräte in Reichweite und meldet dem Loxone
 Miniserver, ob ein hinterlegter Tag anwesend ist — samt Signalstärke,
 Zeitstempel und, wo das Gerät sie mitsendet, Temperatur, Luftfeuchte und
 Batteriestand. Typischer Einsatz: Schlüsselanhänger als Anwesenheitserkennung.
+
+## Neu in 1.3.48
+
+- **Berichtigt – reservierte Namen unter `haus/anwesenheit/` und `haus/tag/`:** Bisher landete eine Person namens „Jemand“ oder „Zaehler“ (auch aus der WLAN-Zuordnung) unter `haus/anwesenheit/jemand` bzw. `haus/anwesenheit/zaehler` und überschrieb die Sammelaussage oder das Lebenszeichen; ebenso ein Tag mit dem Alias `zaehler` unter `haus/tag/`. Solche Namen werden jetzt abgewiesen und gemeldet, nicht umbenannt: Unter `haus/anwesenheit/` sind `jemand`, `zaehler` und `anbieter` reserviert, unter `haus/tag/` `zaehler` und `anbieter`. Der Dienst sendet unter einem solchen Namen nichts, die Person zählt nicht in `haus/anwesenheit/jemand`, und das Protokoll nennt sie einmal. Der Reiter Test zeigt die Zeile „Haus-Themen“ rot, und beim Speichern wird die Einstellung beanstandet (gespeichert wird dann nichts). Abhilfe: Person bzw. Alias umbenennen oder den Haken abnehmen.
+- Reiter Test: Die reservierten Namen der Haus-Themen (`haus/anwesenheit`, `haus/tag`, `haus/klima`) werden zwischen Oberfläche und Dienst verglichen, wie schon die reservierten Zweignamen.
 
 ## Neu in 1.3.47
 

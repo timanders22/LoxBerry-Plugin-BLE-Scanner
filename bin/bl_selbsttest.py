@@ -1349,9 +1349,16 @@ def alles_pruefen():
     p.gleich(G, "Name: Folgen zu einem _, Rand faellt weg", gem.haus_name("__Küche  2__"), "kueche_2")
     p.gleich(G, "Name: - bleibt stehen", gem.haus_name("x--y"), "x--y")
     p.gleich(G, "Name: hoechstens 40, rechts kein _", gem.haus_name("x" * 39 + " yyyyy"), "x" * 39)
-    p.gleich(G, "gleiche Namen _2", gem.haus_namen(["Anna", "anna"]), ["anna", "anna_2"])
-    p.gleich(G, "gleiche Namen _2 ohne __ am Schnitt", gem.haus_namen(["x" * 37 + " yy", "x" * 37 + "  yy"]),
+    p.gleich(G, "gleiche Namen _2", gem.haus_namen(["Anna", "anna"], gem.HAUS_RESERVIERT_ANWESENHEIT), ["anna", "anna_2"])
+    p.gleich(G, "gleiche Namen _2 ohne __ am Schnitt",
+             gem.haus_namen(["x" * 37 + " yy", "x" * 37 + "  yy"], gem.HAUS_RESERVIERT_ANWESENHEIT),
              ["x" * 37 + "_yy", "x" * 37 + "_2"])
+    # 1.3.48: reservierte Namen werden abgewiesen (leer), nicht umbenannt - auch kein _2 davon
+    p.gleich(G, "1.3.48: reserviert unter anwesenheit -> leer, kein _2",
+             gem.haus_namen(["Jemand", "jemand", "Zähler", "Anbieter", "Jemand 2", "Anna"],
+                            gem.HAUS_RESERVIERT_ANWESENHEIT), ["", "", "", "", "jemand_2", "anna"])
+    p.gleich(G, "1.3.48: unter haus/tag ist jemand erlaubt, zaehler nicht",
+             gem.haus_namen(["jemand", "zaehler", "anbieter"], gem.HAUS_RESERVIERT_TAG), ["jemand", "", ""])
     p.gleich(G, "jemand: 1 / 0 / -", (gem.haus_jemand([0, 1]), gem.haus_jemand([0, 0]), gem.haus_jemand([0, -1])),
              (1, 0, "-"))
     cfg_h = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nhaus_anwesenheit=1\n"
@@ -1376,6 +1383,26 @@ def alles_pruefen():
     p.gleich(G, "Merkliste: nur die retained eigenen", sorted(dh.haus_eigen),
              ["haus/anwesenheit/anna", "haus/anwesenheit/jemand", "haus/tag/schluessel1/da"])
     dh.mqtt.client = None
+    # 1.3.48: Personen "Jemand" und "Zaehler", Tag-Alias zaehler mit haus=1 - nichts unter ihrem Namen, die
+    # Sammelaussage ohne sie (keine Person mit Aussage: "-"), das Lebenszeichen nie retained.
+    cfg_r = ("[CONFIG]\nglaettung=0\nereignisse=0\nankunft_sichtungen=1\nhaus_anwesenheit=1\n"
+             "tag1=AA:BB:CC:DD:EE:FF|1|Schluessel|person=Jemand,alias=zaehler,haus=1\n"
+             "tag2=22:BB:CC:DD:EE:FF|1|Uhr|person=Zaehler\n")
+    dr, _gr, _or = _dienst_bauen(cfg_r)
+    dr.haus_eigen = set()
+    dr.mqtt.client = object()
+    del haus[:]
+    _sichtung_setzen(dr, "AA:BB:CC:DD:EE:FF", -70, 0)
+    _sichtung_setzen(dr, "22:BB:CC:DD:EE:FF", -70, 0)
+    dr.auswerten(erzwingen=True)
+    p.gleich(G, "1.3.48: reservierte Namen nicht gesendet, retained nur jemand",
+             sorted(x for x in haus if x[2]), [("haus/anwesenheit/jemand", "-", True)])
+    p.gleich(G, "1.3.48: haus/anwesenheit/zaehler nur als Lebenszeichen (nie retained)",
+             sorted({x[2] for x in haus if x[0] == "haus/anwesenheit/zaehler"}), [False])
+    p.gleich(G, "1.3.48: abgewiesen und gemeldet", sorted(dr.haus_abgewiesen),
+             ["Person 'Jemand' -> haus/anwesenheit/jemand", "Person 'Zaehler' -> haus/anwesenheit/zaehler",
+              "Tag 'zaehler' -> haus/tag/zaehler/da"])
+    dr.mqtt.client = None
 
     # =====================================================================
     G = "Gruppe 33: Xiaomi-Thermometer (MiBeacon v5, Frist, Lage)"

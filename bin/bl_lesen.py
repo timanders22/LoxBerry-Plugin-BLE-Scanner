@@ -34,6 +34,10 @@ def main():
                           # und eine Pruefzeile beide Seiten vergleichen kann.
                           "retain": gem.RETAIN,
                           "reserviert": list(gem.RESERVIERTE_ZWEIGE),
+                          # 1.3.48: die reservierten <name> der Haus-Themen, gegen bl_lib.php verglichen
+                          "haus_reserviert": {"anwesenheit": list(gem.HAUS_RESERVIERT_ANWESENHEIT),
+                                              "tag": list(gem.HAUS_RESERVIERT_TAG)},
+                          "klima_reserviert": list(gem.KLIMA_RESERVIERT),
                           "version": gem.VERSION}, ensure_ascii=False))
         return 0
 

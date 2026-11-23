@@ -457,6 +457,11 @@ function bl_retain_vergleich()
         && array_values($py['reserviert']) !== array_values(bl_reservierte_zweige())) {
         $meldung[] = bl_t('TEST.RESERVIERT_ANDERS');
     }
+    // 1.3.48: dazu die reservierten <name> der Haus-Themen (haus/anwesenheit, haus/tag, haus/klima).
+    $bl_hr = bl_haus_reserviert_vergleich($py);
+    if ($bl_hr) {
+        $meldung[] = sprintf(bl_t('TEST.HAUS_RESERVIERT_ANDERS'), implode(', ', $bl_hr));
+    }
 
     $anzahl_r = count(array_filter($php));
     return array(count($meldung) === 0,
