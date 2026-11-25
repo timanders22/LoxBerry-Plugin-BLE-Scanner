@@ -576,6 +576,26 @@ def klima_lesen_cli():
     return 0
 
 
+def _haus_bereiche():
+    """1.3.50 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): das gemeinsame
+    Modul haus_bereiche.py neben dem Dienst, beim ersten Aufruf geladen."""
+    hier = os.path.dirname(os.path.abspath(__file__))
+    if hier not in sys.path:
+        sys.path.insert(0, hier)
+    import haus_bereiche  # noqa: E402
+    return haus_bereiche
+
+
+def praefix_haus_melden(praefix):
+    """1.3.50: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich unter
+    haus/ faellt; der Versand bleibt, wie er ist. Rueckgabe der gemeldete Bereich oder ""."""
+    hb = _haus_bereiche()
+    bereich = hb.hb_melden_faellig(praefix)
+    if bereich:
+        log.warning("%s", hb.hb_logtext(praefix, bereich))
+    return bereich
+
+
 class Mqtt:
     """Duenne Huelle um paho-mqtt. Faellt still aus, wenn Bibliothek oder
     Gateway fehlen - der HTTP-Weg funktioniert dann weiter.
@@ -3076,9 +3096,11 @@ class Dienst:
             "espresense": self._es_abbild(),
             # Personen und Raeume (1.3.36): die Raeume mit eigenen summary/raum/<R>/... (Reiter Einbindung) und der
             # Raum je Person - leer, solange die Einstellung aus ist. Raumnamen sind Themennamen, nie eine MAC.
+            "haus_bereiche": list(_haus_bereiche().HB_BEREICHE),   # 1.3.50
             "raeume": sorted(self.raeume_bekannt),
             "person_raum": {n: r for n, (r, _s) in sorted(self.person_raum.items())},
         }
+        praefix_haus_melden(self.praefix)   # 1.3.50: im gemeinsamen Bereich? melden, nicht anhalten
         try:
             temp = gem.STATUS_FILE + ".tmp"
             # Rechte VOR dem Inhalt: sonst steht die Datei fuer die Dauer des

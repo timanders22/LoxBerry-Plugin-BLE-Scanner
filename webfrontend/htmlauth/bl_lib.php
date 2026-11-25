@@ -1,10 +1,12 @@
 <?php
 require_once __DIR__ . '/sprachausgabe.php';     // Stamm, fuer die Vorgaben der Sprachansagen schon beim ersten Lesen der Konfiguration
+require_once __DIR__ . '/meldung.php';     // Statusmeldungen an SignalBot (seit 1.3.50)
 /* 1.3.42: die Abschrift des gemeinsamen Sicherungsmoduls (Stammfassung Werkzeuge/gemeinsam/sicherung.php, byte-gleich,
  * Werkzeuge/sicherung_einbauen.py) liegt neben dieser Datei. "Einstellungen sichern" und "Einstellungen zurueckspielen"
  * laufen darueber, in allen Linien gleich (Auftrag des Hausherrn 12.11.2026); diese Linie uebergibt nur ihre
  * Beschreibung (bl_sicherung_beschreibung()). Antwortet als Einstieg mit 403. */
 require_once __DIR__ . '/sicherung.php';
+require_once __DIR__ . '/haus_bereiche.php';     // gemeinsame Bereiche unter haus/ (seit 1.3.50, Regeln/07)
 require_once __DIR__ . '/uhrabgleich.php';   // gemeinsames Uhrmodul (Frage 95), Abschrift von Werkzeuge/gemeinsam/uhrabgleich.php
 /**
  * BLE-Scanner NG - gemeinsame Hilfsfunktionen
@@ -2927,19 +2929,20 @@ function bl_ansage_block_schreiben(array $cfg)
 /** Die Schluessel der Sprachansagen in der Hauptkonfiguration. */
 function bl_ansage_schluessel()
 {
-    return array('tts', 'ansage_regeln', 'ansage_haken', 'ansage_token_herkunft', 'ansage_aus_datei');
+    return array('tts', 'ansage_regeln', 'ansage_haken', 'meldung', 'ansage_token_herkunft', 'ansage_aus_datei');
 }
 
 /** Die Vorgaben: nie gesetzt = ab Werk EIN. Ein gespeicherter Block bleibt, auch 'aus'. */
 function bl_ansage_vorgaben()
 {
-    return array('tts' => ansage_werk_block(), 'ansage_regeln' => ansage_regeln_vorgaben(), 'ansage_haken' => array('ausfall' => 1), 'ansage_token_herkunft' => array(), 'ansage_aus_datei' => 0);
+    return array('tts' => ansage_werk_block(), 'ansage_regeln' => ansage_regeln_vorgaben(), 'ansage_haken' => array('ausfall' => 1), 'meldung' => meld_vorgaben(bl_meld_haken_vorgabe(), bl_meld_haken_vorgabe()), 'ansage_token_herkunft' => array(), 'ansage_aus_datei' => 0);
 }
 
 /** Wertpruefung fuer die Sprachansagen: null = nicht meine Schluessel, sonst tauglich ja/nein. */
 function bl_ansage_wert($k, $w)
 {
     if (!in_array((string) $k, bl_ansage_schluessel(), true)) { return null; }
+    if ((string) $k === 'meldung') { return !meld_block_pruefen($w, bl_ansage_anlaesse()); }     // 1.3.50
     $g = '';
     switch ((string) $k) {
         case 'tts':
@@ -3021,7 +3024,16 @@ function bl_ansage_anlaesse()
 }
 
 /** Ist der Haken dieses Anlasses gesetzt? Fehlt er, gilt die Vorgabe der Linie. */
+/** 1.3.50: Will die Ansage ODER die Meldung an SignalBot diesen Anlass? So legt die Erkennung ihn fuer beide Wege hin;
+ * bl_ansage_senden() trennt sie wieder (bl_meld_nur_ansage()). */
 function bl_ansage_anlass_an($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bl_ansage_cfg(); }
+    return bl_ansage_anlass_sprache($a, $cfg) || meld_anlass_an(bl_meld_block($cfg), (string) $a);
+}
+
+/** Ist der Haken dieses Anlasses fuer die ANSAGE gesetzt? (bis 1.3.50 hiess das bl_ansage_anlass_an()) */
+function bl_ansage_anlass_sprache($a, $cfg = null)
 {
     if ($cfg === null) { $cfg = bl_ansage_cfg(); }
     $h = (isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken'])) ? $cfg['ansage_haken'] : array();
@@ -3064,6 +3076,8 @@ function bl_ansage_post(array $post)
     $h = array();
     $neu = ansage_formular_lesen($post, bl_tts($cfg), $m, $b, array('modi' => bl_ansage_modi(), 'ziele' => true, 'token_vor_ort' => true, 'aus_gewinnt' => true), $k, $h);
     list($r, $hk) = ansage_regeln_formular($post, bl_ansage_regeln($cfg), bl_ansage_anlaesse(), $m, $b, $k);
+    // 1.3.50: der Block 'Meldungen an SignalBot' (eine Beanstandung haelt das ganze Formular an, wie die Regeln)
+    $meld = meld_formular_lesen($post, array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bl_ansage_anlaesse(), $m, $b, bl_meld_k(), bl_meld_haken_vorgabe());
     if ($m) {
         $t = array();
         foreach ($m as $x) { $t[] = $x['text']; }
@@ -3074,7 +3088,7 @@ function bl_ansage_post(array $post)
         $fn = ansage_feldnamen();
         foreach (ansage_geheim() as $s) { $geheim[] = isset($fn[$s]) ? $fn[$s] : 'tts_' . $s; }
         foreach ($post as $n => $w) {
-            if (strncmp((string) $n, 'tts_', 4) === 0 || strncmp((string) $n, 'ansage_', 7) === 0) {
+            if (strncmp((string) $n, 'tts_', 4) === 0 || strncmp((string) $n, 'ansage_', 7) === 0 || strncmp((string) $n, 'meld_', 5) === 0) {
                 if (!in_array((string) $n, $geheim, true)) { $e[$n] = $w; }
             }
         }
@@ -3086,6 +3100,7 @@ function bl_ansage_post(array $post)
     $cfg['ansage_token_herkunft'] = ansage_token_herkunft_formular($post, isset($cfg['ansage_token_herkunft']) ? $cfg['ansage_token_herkunft'] : array());
     $cfg['ansage_regeln'] = $r;
     $cfg['ansage_haken'] = $hk;
+    $cfg['meldung'] = $meld;
     $t = array();
     foreach ($h as $x) { $t[] = $x['text']; }
     return array(bl_ansage_cfg_schreiben($cfg), array(), $t);
@@ -3111,8 +3126,14 @@ function bl_ansage_form_html($felder)
     $o[] = '<form action="index.php" method="post" autocomplete="off">' . $felder;
     $o[] = ansage_formular_html(bl_tts($cfg), $h + array('modi' => bl_ansage_modi(), 'ziele' => true, 'ziele_post' => isset($ein['tts_ziel_art']) ? $ein : null), $k);
     $o[] = ansage_regeln_html(bl_ansage_regeln($cfg), isset($cfg['ansage_haken']) && is_array($cfg['ansage_haken']) ? $cfg['ansage_haken'] : array('ausfall' => 1), bl_ansage_anlaesse(), $h + array('token_vor_ort' => true), $k);
+    // 1.3.50: Statusmeldungen an SignalBot (gemeinsames Modul meldung.php), im selben Formular
+    $o[] = '<h3>' . $e(bl_t('SIGNALMELDUNG.TITEL')) . '</h3>';
+    $o[] = meld_formular_html(bl_meld_block($cfg), bl_ansage_anlaesse(), $h, bl_meld_k());
+    list(, $meld_lage) = meld_pruefzeile(bl_meld_block($cfg), bl_meld_bean($cfg), bl_meld_k());
+    $o[] = '<div class="sm-hilfe">' . $e(bl_t('SIGNALMELDUNG.F_TEST') . ' ' . $meld_lage) . '</div>';
     $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ansage_speichern" value="1">' . $e(bl_t('ANSAGEPLUGIN.K_SPEICHERN')) . '</button>';
     $o[] = '<button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ansage_test" value="1">' . $e(bl_t('ANSAGEPLUGIN.K_TEST')) . '</button></div>';
+    $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="meld_test" value="1">' . $e(bl_t('SIGNALMELDUNG.K_TEST')) . '</button></div>';     // 1.3.50
     $o[] = '</form>';
     $o[] = bl_ansage_lage_html($cfg);
     return implode("\n", $o) . "\n";
@@ -3282,6 +3303,8 @@ function bl_ansage_senden($jetzt = null)
         $conf = bl_ansage_cfg();
         bl_ansage_token_pflegen($conf);
         $conf = bl_ansage_cfg();
+        bl_meld_senden($frisch, $conf);     // 1.3.50: dieselben Anlaesse an SignalBot (eigene Haken)
+        $frisch = bl_meld_nur_ansage($frisch, $conf);     // die Ansage nur mit ihrem eigenen Haken
         $a = ansage_regel_sprechen($frisch, bl_tts($conf), bl_ansage_regeln($conf), bl_ansage_k());
         $erg = $a['regel'] !== '' ? $a['regel'] : 'gesprochen';
         if ($a['r'] !== null) {
@@ -3482,6 +3505,7 @@ function bl_sicherung_beschreibung($tags_datei = null)
                  + array('sichern' => 'ansage_sicherung_bereinigen'),
         'ansage_regeln' => sicherung_block(array_keys(ansage_regeln_vorgaben())),
         'ansage_haken' => sicherung_block(array('ausfall')),
+        'meldung'      => meld_sicherung_knoten(bl_ansage_anlaesse(), bl_meld_k()),     // 1.3.50
         /* Ohne Zuordnungsschluessel wie bis 1.3.41: ein leerer Wert in einem Tag der Datei gilt (Regel 3 greift in
          * Listen nur mit Zuordnungsschluessel, Regeln/05). */
         'tags' => sicherung_liste(array('kennung', 'aktiv', 'name'), '',
@@ -5846,4 +5870,104 @@ function bl_pruef_thermometer($tags, $gilt)
         $aus[] = bl_zeile(sprintf(bl_t('PRUEF.THERMO'), $wer), $lage === 0 ? true : ($lage === 1 ? null : false), $text);
     }
     return $aus;
+}
+
+/**
+ * 1.3.50 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): Zeile im Reiter Test -
+ * faellt das gespeicherte Themen-Praefix auf einen gemeinsamen Bereich unter haus/? Speichern und Zurueckspielen
+ * weisen ein solches Praefix ab; ein schon gespeichertes bleibt in Betrieb und ist hier rot, grau bei ausgeschaltetem MQTT.
+ * Dazu der Vergleich der Liste mit der, die der Dienst in seinen Zustand schreibt (haus_bereiche).
+ * Liste und Pruefung aus dem gemeinsamen Modul haus_bereiche.php. Rueckgabe array(stand, html).
+ */
+function bl_pruef_praefix_haus($cfg)
+{
+    $p = ((string) bl_cfg($cfg, 'themenpraefix', 'blescanner') !== '' ? (string) bl_cfg($cfg, 'themenpraefix', 'blescanner') : 'blescanner');
+    $b = hb_bereich($p);
+    if ($b !== '') {
+        if (!((string) bl_cfg($cfg, 'mqtt', '1') === '1')) {
+            return array(-1, sprintf(bl_t('HAUSBEREICH.A_AUS'), strval($p), strval($b)));
+        }
+        return array(0, sprintf(bl_t('HAUSBEREICH.A_NEIN'), strval($p), strval($b)));
+    }
+    $z = (is_array(bl_status()) && isset(bl_status()['haus_bereiche'])) ? bl_status()['haus_bereiche'] : null;
+    if (!is_array($z)) {
+        return array(-1, sprintf(bl_t('HAUSBEREICH.A_UNBEKANNT'), strval($p)));
+    }
+    if ($z !== hb_bereiche()) {
+        return array(0, sprintf(bl_t('HAUSBEREICH.A_LISTE'), strval(implode(', ', hb_bereiche())),
+            strval(implode(', ', array_map('strval', $z)))));
+    }
+    return array(1, sprintf(bl_t('HAUSBEREICH.A_JA'), strval($p)));
+}
+
+if (!function_exists('bl_meld_block')) {
+
+/* ---------------- Statusmeldungen an SignalBot (1.3.50, gemeinsames Modul meldung.php) ----------------
+ *
+ * Auftrag des Hausherrn 23.11.2026, Entscheidungen 23.11.2026 ("haus/meldung (Empfehlung)", "Wie empfohlen"): dieselben
+ * Anlaesse wie die Ansage, eigener Haken je Anlass, ab Werk aus; Sperre, Bremse und Versand im Modul. Die Erkennung legt
+ * einen Anlass hin, wenn Ansage ODER Meldung ihn will (bl_ansage_anlass_an()); der Sender trennt die Wege wieder.
+ */
+
+/** Die ab-Werk-Haken der Ansage dieser Linie: so stehen auch die Haken der Meldung, solange der Block nie gespeichert ist. */
+function bl_meld_haken_vorgabe()
+{
+    return array('ausfall' => 1);
+}
+
+/** Der wirksame Block 'meldung' fuer den Betrieb (ungueltig gespeichert gilt als aus und wird im Formular genannt). */
+function bl_meld_block($cfg = null)
+{
+    if ($cfg === null) { $cfg = bl_ansage_cfg(); }
+    list($b) = meld_block(array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bl_ansage_anlaesse(), bl_meld_haken_vorgabe());
+    return $b;
+}
+
+/** Die Beanstandungen eines gespeicherten Blocks (leer = gueltig). */
+function bl_meld_bean($cfg = null)
+{
+    if ($cfg === null) { $cfg = bl_ansage_cfg(); }
+    list(, $f) = meld_block(array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, bl_ansage_anlaesse(), bl_meld_haken_vorgabe());
+    return $f;
+}
+
+/** Der Kontext des Moduls: Datenordner (data/plugins/<ordner>, daraus der Absender) und Texte - wie bei der Ansage. */
+function bl_meld_k()
+{
+    return bl_ansage_k();
+}
+
+/** Fuer die Ansage nur Eintraege, deren Ansage-Haken gesetzt ist; ein Eintrag ohne bekannten Anlass bleibt wie bisher. */
+function bl_meld_nur_ansage(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bl_ansage_cfg(); }
+    $anl = bl_ansage_anlaesse();
+    $aus = array();
+    foreach ($l as $e) {
+        if (is_array($e) && array_key_exists(meld_anlass_von($e), $anl) && !bl_ansage_anlass_sprache(meld_anlass_von($e), $cfg)) { continue; }
+        $aus[] = $e;
+    }
+    return $aus;
+}
+
+/** Die Eintraege an SignalBot melden. Protokoll: eine Zeile, wenn gesendet oder gescheitert (nie der Text). */
+function bl_meld_senden(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = bl_ansage_cfg(); }
+    $b = bl_meld_block($cfg);
+    if (empty($b['ein']) || !$l) { return null; }
+    $a = meld_regel_senden($l, $b, bl_meld_k());
+    if ($a['regel'] === '' || in_array($a['regel'], array('BREMSE', 'STAND', 'ORDNER'), true)) {
+        bl_ansage_zeile(meld_regel_kurz($a));
+    }
+    return $a;
+}
+
+/** Der Knopf "Testmeldung senden": array(angenommen, Satz). Geht an Haken, Sperre und Bremse vorbei. */
+function bl_meld_test()
+{
+    $r = meld_testmeldung(bl_meld_k());
+    bl_ansage_zeile('Testmeldung an SignalBot: ' . ($r[0] ? 'angenommen' : 'nicht angenommen'));
+    return $r;
+}
 }

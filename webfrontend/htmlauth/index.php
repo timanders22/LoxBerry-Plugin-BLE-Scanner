@@ -433,6 +433,12 @@ function bl_tags_aus_post(&$mangel, $bestand = array(), &$bean = null)
  * ================================================================== */
 /* ============ Loxone-Vorlage herunterladen ============ */
 /* Sprachansagen, eigenes Formular. Die Testansage spricht immer. */
+/* 1.3.50: Testmeldung an SignalBot (Knopf unter den Sprachansagen) - wie die Testansage darunter. */
+if ($bl_ist_post && isset($_POST['meld_test'])) {
+    list($bl_at, $bl_ag) = bl_meld_test();
+    if ($bl_at) { $bl_hinweis = bl_t('SIGNALMELDUNG.T_OK'); } else { $bl_fehler[] = $bl_ag; }
+    $bl_tab = 'tab-settings';
+}
 if ($bl_ist_post && isset($_POST['ansage_test'])) {
     list($bl_at, $bl_ag) = bl_ansage_test();
     if ($bl_at) { $bl_hinweis = bl_t('ANSAGEPLUGIN.M_TEST_OK'); } else { $bl_fehler[] = bl_t('ANSAGEPLUGIN.M_TEST_FEHL') . ' ' . $bl_ag; }

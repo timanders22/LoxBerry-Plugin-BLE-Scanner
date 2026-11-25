@@ -1309,6 +1309,9 @@ function bl_pruefzeilen($cfg, $tags)
     $zeilen[] = bl_zeile(bl_t('PRUEF.BRUECKE_EINRICHTUNG'), $ok, $meldung);
     list($ok, $meldung) = bl_pruef_praefix_bruecke($cfg);
     $zeilen[] = bl_zeile(bl_t('PRUEF.PRAEFIX_BRUECKE'), $ok, $meldung);
+    // 1.3.50: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $bl_hb = bl_pruef_praefix_haus($cfg);
+    $zeilen[] = bl_zeile(bl_t('HAUSBEREICH.F_TEST'), $bl_hb[0] === 1 ? true : ($bl_hb[0] === 0 ? false : null), $bl_hb[1]);
     list($ok, $meldung) = bl_pruef_auftrag($cfg);
     $zeilen[] = bl_zeile(bl_t('PRUEF.AUFTRAG'), $ok, $meldung);
     list($ok, $meldung) = bl_pruef_irk($cfg, $tags, $status);
